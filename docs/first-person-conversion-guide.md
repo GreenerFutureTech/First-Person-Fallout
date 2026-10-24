@@ -212,9 +212,18 @@ geometry temporary; do not serialize it into saves or map files.
 F11 now renders a first map-connected graybox in the map viewport. It starts
 at the player's square-grid cell and facing, raycasts against wall objects
 (including non-blocking walls), blocking scenery, and closed doors, and draws
-flat-color perspective columns. Mouse look turns the view; F9 still switches
-to the top-down source diagnostic. F11 restores the isometric view and normal
-mouse mode.
+flat-color perspective columns. Other critters appear as camera-facing
+billboards using their current Fallout FRM frame, scaled by perspective and
+occluded by the raycast wall depth. A small color marker shows party members
+and same-team critters in green, non-party critters in amber outside combat,
+and opposing teams in red during combat. Mouse look turns the view; F9 still
+switches to the top-down source diagnostic. F11 restores the isometric view
+and normal mouse mode. Actor and camera positions retain half-square offsets
+from the underlying hex tiles so nearby critters do not collapse onto the
+player's exact diagnostic position.
+
+Graybox wall side faces use distinct saturated debug colors instead of gray
+and brown shades that can disappear against the sky and ground.
 
 This is deliberately a coarse first pass, not final topology: each blocking
 object is treated as a full square-grid cell, and wall orientation, corners,

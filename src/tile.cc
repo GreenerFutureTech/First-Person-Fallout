@@ -5,9 +5,12 @@
 #include <string.h>
 
 #include <algorithm>
+#include <limits>
 #include <stack>
+#include <vector>
 
 #include "art.h"
+#include "combat.h"
 #include "color.h"
 #include "debug.h"
 #include "draw.h"
@@ -16,6 +19,7 @@
 #include "map.h"
 #include "map_edge.h"
 #include "object.h"
+#include "party_member.h"
 #include "platform_compat.h"
 #include "proto.h"
 #include "settings.h"
@@ -69,13 +73,27 @@ struct TileFirstPersonGrayboxRenderContext {
     unsigned char* wallCells;
 };
 
+struct TileFirstPersonActorRenderContext {
+    MapElevation elevation;
+    double cameraX;
+    double cameraY;
+    double directionX;
+    double directionY;
+    double cameraPlaneX;
+    double cameraPlaneY;
+    int horizonY;
+    std::vector<double>* wallDepths;
+};
+
 static void tileSetBorder(int windowWidth, int windowHeight, int hexGridWidth, int hexGridHeight);
 static void tileRefreshMapper(Rect* rect, MapElevation elevation);
 static void tileRefreshGame(Rect* rect, MapElevation elevation);
 static void tileRenderFirstPersonPreview();
 static void tileFirstPersonTopologyMarkObject(Object* object, void* context);
 static void tileFirstPersonGrayboxMarkObject(Object* object, void* context);
+static void tileFirstPersonRenderActor(Object* object, void* context);
 static void tileFirstPersonDrawCrosshair();
+static bool tileFirstPersonGetWorldPosition(int tile, double* x, double* y);
 static void roof_fill_push_task_if_in_bounds(std::stack<roof_fill_task>& tasks_stack, int x, int y);
 static void roof_fill_off_process_task(std::stack<roof_fill_task>& tasks_stack, MapElevation elevation, bool on);
 static void tileRenderRoof(const TileFrmId& frmId, int x, int y, Rect* rect, int light);
@@ -817,11 +835,7 @@ static void tileRenderFirstPersonPreview()
     double cameraX = SQUARE_GRID_WIDTH / 2.0;
     double cameraY = SQUARE_GRID_HEIGHT / 2.0;
     if (gDude != nullptr && gDude->elevation == gElevation && tileIsValid(gDude->tile)) {
-        const int playerSquareTile = squareTileFromTile(gDude->tile);
-        if (squareGridTileIsValid(playerSquareTile)) {
-            cameraX = playerSquareTile % SQUARE_GRID_WIDTH + 0.5;
-            cameraY = playerSquareTile / SQUARE_GRID_WIDTH + 0.5;
-        }
+        tileFirstPersonGetWorldPosition(gDude->tile, &cameraX, &cameraY);
     }
 
     const double yaw = gFirstPersonPreviewYaw * kPi / 180.0;
@@ -829,6 +843,8 @@ static void tileRenderFirstPersonPreview()
     const double directionY = -cos(yaw);
     const double cameraPlaneX = -directionY * kFieldOfViewScale;
     const double cameraPlaneY = directionX * kFieldOfViewScale;
+    std::vector<double> wallDepths(gTileWindowWidth,
+        std::numeric_limits<double>::infinity());
 
     for (int x = 0; x < gTileWindowWidth; x++) {
         const double cameraOffset = 2.0 * x / gTileWindowWidth - 1.0;
@@ -887,6 +903,7 @@ static void tileRenderFirstPersonPreview()
             side == 0
                 ? sideDistanceX - deltaDistanceX
                 : sideDistanceY - deltaDistanceY);
+        wallDepths[x] = perpendicularDistance;
         const int wallHeight = std::min(gTileWindowHeight,
             static_cast<int>(gTileWindowHeight / perpendicularDistance));
         const int wallTop = std::max(0, horizonY - wallHeight / 2);
@@ -912,13 +929,13 @@ static void tileRenderFirstPersonPreview()
                 wallColor = COLOR_DARK_RED;
                 break;
             case 2:
-                wallColor = COLOR_DARK_GREY_2;
+                wallColor = COLOR_BLUE_2;
                 break;
             case 3:
-                wallColor = COLOR_DARK_BROWN;
+                wallColor = COLOR_MAGENTA;
                 break;
             case 4:
-                wallColor = COLOR_DULL_BROWN;
+                wallColor = COLOR_LIGHT_GREEN_2;
                 break;
             default:
                 break;
@@ -933,6 +950,18 @@ static void tileRenderFirstPersonPreview()
             wallColor);
     }
 
+    TileFirstPersonActorRenderContext actorContext = {
+        gElevation,
+        cameraX,
+        cameraY,
+        directionX,
+        directionY,
+        cameraPlaneX,
+        cameraPlaneY,
+        horizonY,
+        &wallDepths,
+    };
+    objectVisitAll(tileFirstPersonRenderActor, &actorContext);
     tileFirstPersonDrawCrosshair();
 }
 
@@ -976,6 +1005,182 @@ static void tileFirstPersonGrayboxMarkObject(Object* object, void* context)
     if (cellWallType == 0 || cellWallType == 2 || wallType == 3) {
         cellWallType = wallType;
     }
+}
+
+static void tileFirstPersonRenderActor(Object* object, void* context)
+{
+    const TileFirstPersonActorRenderContext* renderContext =
+        static_cast<const TileFirstPersonActorRenderContext*>(context);
+    if (object == gDude
+        || object->elevation != renderContext->elevation
+        || (object->flags & OBJECT_HIDDEN) != OBJECT_NONE
+        || !tileIsValid(object->tile)
+        || FrmId(object).objectType() != OBJ_TYPE_CRITTER) {
+        return;
+    }
+
+    double objectX;
+    double objectY;
+    if (!tileFirstPersonGetWorldPosition(object->tile, &objectX, &objectY)) {
+        return;
+    }
+
+    const double relativeX = objectX - renderContext->cameraX;
+    const double relativeY = objectY - renderContext->cameraY;
+    const double determinant = renderContext->cameraPlaneX * renderContext->directionY
+        - renderContext->directionX * renderContext->cameraPlaneY;
+    if (determinant == 0.0) {
+        return;
+    }
+
+    const double inverseDeterminant = 1.0 / determinant;
+    const double transformX = inverseDeterminant
+        * (renderContext->directionY * relativeX - renderContext->directionX * relativeY);
+    const double transformY = inverseDeterminant
+        * (-renderContext->cameraPlaneY * relativeX + renderContext->cameraPlaneX * relativeY);
+    if (transformY <= 0.1) {
+        return;
+    }
+
+    const int screenCenterX = static_cast<int>(
+        (gTileWindowWidth / 2.0) * (1.0 + transformX / transformY));
+    const double projectionScale = gTileWindowHeight / transformY;
+    const int spriteHeight = std::min(gTileWindowHeight * 2,
+        std::max(1, static_cast<int>(projectionScale * 0.9)));
+    const int spriteWidth = std::max(1, static_cast<int>(projectionScale * 0.42));
+    const int spriteTop = renderContext->horizonY - spriteHeight / 2;
+    const int spriteBottom = spriteTop + spriteHeight;
+    const int spriteLeft = screenCenterX - spriteWidth / 2;
+    const int spriteRight = spriteLeft + spriteWidth;
+    Color actorColor = COLOR_AMBER;
+    if (objectIsPartyMember(object)
+        || (gDude != nullptr
+            && object->data.critter.combat.team == gDude->data.critter.combat.team)) {
+        actorColor = COLOR_LIGHT_GREEN_3;
+    } else if (isInCombat()) {
+        actorColor = COLOR_LIGHT_RED;
+    }
+
+    Rotation facingRotation = rotationIsValid(object->rotation)
+        ? object->rotation
+        : ROTATION_NE;
+    {
+        double viewX = renderContext->cameraX - objectX;
+        double viewY = renderContext->cameraY - objectY;
+        const double viewLength = sqrt(viewX * viewX + viewY * viewY);
+        if (viewLength > 0.0) {
+            viewX /= viewLength;
+            viewY /= viewLength;
+
+            double bestDot = -std::numeric_limits<double>::infinity();
+            for (int rotationIndex = ROTATION_FIRST; rotationIndex < ROTATION_COUNT; rotationIndex++) {
+                const Rotation rotation = static_cast<Rotation>(rotationIndex);
+                const int adjacentTile = tileGetTileInDirection(object->tile, rotation, 1);
+                double adjacentX;
+                double adjacentY;
+                if (!tileFirstPersonGetWorldPosition(adjacentTile, &adjacentX, &adjacentY)) {
+                    continue;
+                }
+
+                const double directionX = adjacentX - objectX;
+                const double directionY = adjacentY - objectY;
+                const double directionLength = sqrt(directionX * directionX + directionY * directionY);
+                if (directionLength <= 0.0) {
+                    continue;
+                }
+
+                const double dot = (directionX * viewX + directionY * viewY) / directionLength;
+                if (dot > bestDot) {
+                    bestDot = dot;
+                    facingRotation = rotation;
+                }
+            }
+        }
+    }
+
+    FrmImage image;
+    if (image.lock(FrmId(object), object->frame, facingRotation)) {
+        const ConstBuffer2D frame = image.getBuffer();
+        if (frame.width <= 0 || frame.height <= 0) {
+            return;
+        }
+        const int artHeight = std::min(gTileWindowHeight * 2,
+            std::max(1, static_cast<int>(projectionScale * 0.9)));
+        const int artWidth = std::max(1,
+            static_cast<int>(artHeight * frame.width / static_cast<double>(frame.height)));
+        const int artBottom = renderContext->horizonY
+            + static_cast<int>(projectionScale * 0.42);
+        const int artTop = artBottom - artHeight;
+        const int artLeft = screenCenterX - artWidth / 2;
+
+        for (int x = std::max(0, artLeft); x < std::min(gTileWindowWidth, artLeft + artWidth); x++) {
+            if (transformY >= (*renderContext->wallDepths)[x]) {
+                continue;
+            }
+
+            const int sourceX = (x - artLeft) * frame.width / artWidth;
+            for (int y = std::max(0, artTop); y < std::min(gTileWindowHeight, artBottom); y++) {
+                const int sourceY = (y - artTop) * frame.height / artHeight;
+                const unsigned char color = frame.data[sourceY * frame.width + sourceX];
+                if (color != 0) {
+                    gTileWindowBuffer[y * gTileWindowPitch + x] = color;
+                }
+            }
+        }
+
+        const int markerY = std::max(0, artTop - 3);
+        const int markerLeft = std::max(0, screenCenterX - 2);
+        const int markerRight = std::min(gTileWindowWidth - 1, screenCenterX + 2);
+        if (markerY < gTileWindowHeight && markerLeft <= markerRight) {
+            bufferDrawLine(gTileWindowBuffer,
+                gTileWindowPitch,
+                markerLeft,
+                markerY,
+                markerRight,
+                markerY,
+                actorColor);
+        }
+        return;
+    }
+
+    for (int x = std::max(0, spriteLeft); x < std::min(gTileWindowWidth, spriteRight); x++) {
+        if (transformY >= (*renderContext->wallDepths)[x]) {
+            continue;
+        }
+
+        const double normalizedX = (x - spriteLeft) / static_cast<double>(spriteWidth);
+        for (int y = std::max(0, spriteTop); y < std::min(gTileWindowHeight, spriteBottom); y++) {
+            const double normalizedY = (y - spriteTop) / static_cast<double>(spriteHeight);
+            double silhouetteWidth;
+            if (normalizedY < 0.2) {
+                silhouetteWidth = 0.2;
+            } else if (normalizedY < 0.3) {
+                silhouetteWidth = 0.1;
+            } else if (normalizedY < 0.72) {
+                silhouetteWidth = 0.46;
+            } else {
+                silhouetteWidth = 0.34;
+            }
+
+            const double centerDistance = fabs(normalizedX - 0.5);
+            if (centerDistance > silhouetteWidth / 2.0) {
+                continue;
+            }
+
+            gTileWindowBuffer[y * gTileWindowPitch + x] = actorColor;
+        }
+    }
+}
+
+static bool tileFirstPersonGetWorldPosition(int tile, double* x, double* y)
+{
+    if (!tileIsValid(tile)) {
+        return false;
+    }
+
+    *x = (tile % gHexGridWidth) / 2.0 + 0.25;
+    *y = (tile / gHexGridWidth) / 2.0 + 0.25;
+    return true;
 }
 
 static void tileFirstPersonDrawCrosshair()
