@@ -64,11 +64,18 @@ struct TileFirstPersonTopologyRenderContext {
     int cellSize;
 };
 
+struct TileFirstPersonGrayboxRenderContext {
+    MapElevation elevation;
+    unsigned char* wallCells;
+};
+
 static void tileSetBorder(int windowWidth, int windowHeight, int hexGridWidth, int hexGridHeight);
 static void tileRefreshMapper(Rect* rect, MapElevation elevation);
 static void tileRefreshGame(Rect* rect, MapElevation elevation);
 static void tileRenderFirstPersonPreview();
 static void tileFirstPersonTopologyMarkObject(Object* object, void* context);
+static void tileFirstPersonGrayboxMarkObject(Object* object, void* context);
+static void tileFirstPersonDrawCrosshair();
 static void roof_fill_push_task_if_in_bounds(std::stack<roof_fill_task>& tasks_stack, int x, int y);
 static void roof_fill_off_process_task(std::stack<roof_fill_task>& tasks_stack, MapElevation elevation, bool on);
 static void tileRenderRoof(const TileFrmId& frmId, int x, int y, Rect* rect, int light);
@@ -774,106 +781,234 @@ static void tileRefreshGame(Rect* rect, MapElevation elevation)
 
 static void tileRenderFirstPersonPreview()
 {
+    constexpr double kPi = 3.14159265358979323846;
+    constexpr double kFieldOfViewScale = 0.66;
+
     bufferFill(gTileWindowBuffer,
         gTileWindowWidth,
         gTileWindowHeight,
         gTileWindowPitch,
         COLOR_DARK_GREY_3);
 
-    if (gTileWindowWidth < 2 || gTileWindowHeight < 2) {
+    if (gTileWindowWidth < 2 || gTileWindowHeight < 2
+        || !elevationIsValid(gElevation) || gTileSquares[gElevation] == nullptr) {
         return;
     }
 
+    const int horizonY = gTileWindowHeight / 2;
+    bufferFill(gTileWindowBuffer,
+        gTileWindowWidth,
+        horizonY,
+        gTileWindowPitch,
+        COLOR_DARK_GREY_3);
+    bufferFill(gTileWindowBuffer + horizonY * gTileWindowPitch,
+        gTileWindowWidth,
+        gTileWindowHeight - horizonY,
+        gTileWindowPitch,
+        COLOR_DULL_BROWN);
+
+    unsigned char wallCells[SQUARE_GRID_SIZE] = {};
+    TileFirstPersonGrayboxRenderContext context = {
+        gElevation,
+        wallCells,
+    };
+    objectVisitAll(tileFirstPersonGrayboxMarkObject, &context);
+
+    double cameraX = SQUARE_GRID_WIDTH / 2.0;
+    double cameraY = SQUARE_GRID_HEIGHT / 2.0;
+    if (gDude != nullptr && gDude->elevation == gElevation && tileIsValid(gDude->tile)) {
+        const int playerSquareTile = squareTileFromTile(gDude->tile);
+        if (squareGridTileIsValid(playerSquareTile)) {
+            cameraX = playerSquareTile % SQUARE_GRID_WIDTH + 0.5;
+            cameraY = playerSquareTile / SQUARE_GRID_WIDTH + 0.5;
+        }
+    }
+
+    const double yaw = gFirstPersonPreviewYaw * kPi / 180.0;
+    const double directionX = sin(yaw);
+    const double directionY = -cos(yaw);
+    const double cameraPlaneX = -directionY * kFieldOfViewScale;
+    const double cameraPlaneY = directionX * kFieldOfViewScale;
+
+    for (int x = 0; x < gTileWindowWidth; x++) {
+        const double cameraOffset = 2.0 * x / gTileWindowWidth - 1.0;
+        const double rayDirectionX = directionX + cameraPlaneX * cameraOffset;
+        const double rayDirectionY = directionY + cameraPlaneY * cameraOffset;
+
+        int mapX = static_cast<int>(cameraX);
+        int mapY = static_cast<int>(cameraY);
+        const double deltaDistanceX = rayDirectionX == 0.0
+            ? 1.0e30
+            : fabs(1.0 / rayDirectionX);
+        const double deltaDistanceY = rayDirectionY == 0.0
+            ? 1.0e30
+            : fabs(1.0 / rayDirectionY);
+        const int stepX = rayDirectionX < 0.0 ? -1 : 1;
+        const int stepY = rayDirectionY < 0.0 ? -1 : 1;
+        double sideDistanceX = (rayDirectionX < 0.0
+                ? cameraX - mapX
+                : mapX + 1.0 - cameraX)
+            * deltaDistanceX;
+        double sideDistanceY = (rayDirectionY < 0.0
+                ? cameraY - mapY
+                : mapY + 1.0 - cameraY)
+            * deltaDistanceY;
+        int side = 0;
+        unsigned char wallType = 0;
+
+        while (mapX >= 0 && mapX < SQUARE_GRID_WIDTH
+            && mapY >= 0 && mapY < SQUARE_GRID_HEIGHT) {
+            if (sideDistanceX < sideDistanceY) {
+                sideDistanceX += deltaDistanceX;
+                mapX += stepX;
+                side = 0;
+            } else {
+                sideDistanceY += deltaDistanceY;
+                mapY += stepY;
+                side = 1;
+            }
+
+            if (mapX < 0 || mapX >= SQUARE_GRID_WIDTH
+                || mapY < 0 || mapY >= SQUARE_GRID_HEIGHT) {
+                break;
+            }
+
+            wallType = wallCells[mapY * SQUARE_GRID_WIDTH + mapX];
+            if (wallType != 0) {
+                break;
+            }
+        }
+
+        if (wallType == 0) {
+            continue;
+        }
+
+        const double perpendicularDistance = std::max(0.1,
+            side == 0
+                ? sideDistanceX - deltaDistanceX
+                : sideDistanceY - deltaDistanceY);
+        const int wallHeight = std::min(gTileWindowHeight,
+            static_cast<int>(gTileWindowHeight / perpendicularDistance));
+        const int wallTop = std::max(0, horizonY - wallHeight / 2);
+        const int wallBottom = std::min(gTileWindowHeight - 1, horizonY + wallHeight / 2);
+        Color wallColor = COLOR_LIGHT_RED;
+        switch (wallType) {
+        case 2:
+            wallColor = COLOR_AMBER;
+            break;
+        case 3:
+            wallColor = COLOR_LIGHT_GOLD;
+            break;
+        case 4:
+            wallColor = COLOR_YELLOW_2;
+            break;
+        default:
+            break;
+        }
+
+        if (side == 1) {
+            switch (wallType) {
+            case 1:
+                wallColor = COLOR_DARK_RED;
+                break;
+            case 2:
+                wallColor = COLOR_DARK_GREY_2;
+                break;
+            case 3:
+                wallColor = COLOR_DARK_BROWN;
+                break;
+            case 4:
+                wallColor = COLOR_DULL_BROWN;
+                break;
+            default:
+                break;
+            }
+        }
+        bufferDrawLine(gTileWindowBuffer,
+            gTileWindowPitch,
+            x,
+            wallTop,
+            x,
+            wallBottom,
+            wallColor);
+    }
+
+    tileFirstPersonDrawCrosshair();
+}
+
+static void tileFirstPersonGrayboxMarkObject(Object* object, void* context)
+{
+    const TileFirstPersonGrayboxRenderContext* renderContext =
+        static_cast<const TileFirstPersonGrayboxRenderContext*>(context);
+    if (object->elevation != renderContext->elevation
+        || (object->flags & OBJECT_HIDDEN) != OBJECT_NONE
+        || !tileIsValid(object->tile)) {
+        return;
+    }
+
+    const ObjectType objectType = FrmId(object).objectType();
+    if (objectType != OBJ_TYPE_WALL && objectType != OBJ_TYPE_SCENERY) {
+        return;
+    }
+
+    const int squareTile = squareTileFromTile(object->tile);
+    if (!squareGridTileIsValid(squareTile)) {
+        return;
+    }
+
+    unsigned char wallType = 0;
+    if (objectType == OBJ_TYPE_WALL) {
+        wallType = (object->flags & OBJECT_NO_BLOCK) == OBJECT_NONE ? 1 : 2;
+    } else {
+        if ((object->flags & OBJECT_NO_BLOCK) != OBJECT_NONE) {
+            return;
+        }
+
+        Proto* proto;
+        if (protoGetProto(object, &proto) == 0 && proto->scenery.type == SCENERY_TYPE_DOOR) {
+            wallType = 3;
+        } else {
+            wallType = 4;
+        }
+    }
+
+    unsigned char& cellWallType = renderContext->wallCells[squareTile];
+    if (cellWallType == 0 || cellWallType == 2 || wallType == 3) {
+        cellWallType = wallType;
+    }
+}
+
+static void tileFirstPersonDrawCrosshair()
+{
     const int centerX = gTileWindowWidth / 2;
-    const int horizonY = gTileWindowHeight * 2 / 5;
-    const int floorHeight = gTileWindowHeight - horizonY - 1;
-    constexpr double kPi = 3.14159265358979323846;
-    const int vanishingX = std::clamp(
-        centerX + static_cast<int>(sin(gFirstPersonPreviewYaw * kPi / 180.0) * centerX * 0.75),
-        0,
-        gTileWindowWidth - 1);
-
-    for (int y = horizonY; y < gTileWindowHeight; y++) {
-        const int depth = y - horizonY;
-        const int leftEdge = vanishingX - vanishingX * depth / floorHeight;
-        const int rightEdge = vanishingX + (gTileWindowWidth - vanishingX) * depth / floorHeight;
-
-        if (leftEdge > 0) {
-            bufferFill(gTileWindowBuffer + y * gTileWindowPitch,
-                leftEdge,
-                1,
-                gTileWindowPitch,
-                COLOR_DULL_BROWN);
-        }
-
-        if (rightEdge > leftEdge) {
-            bufferFill(gTileWindowBuffer + y * gTileWindowPitch + leftEdge,
-                rightEdge - leftEdge + 1,
-                1,
-                gTileWindowPitch,
-                COLOR_SAND);
-        }
-
-        if (rightEdge + 1 < gTileWindowWidth) {
-            bufferFill(gTileWindowBuffer + y * gTileWindowPitch + rightEdge + 1,
-                gTileWindowWidth - rightEdge - 1,
-                1,
-                gTileWindowPitch,
-                COLOR_DARK_BROWN);
-        }
-    }
-
+    const int centerY = gTileWindowHeight / 2;
     bufferDrawLine(gTileWindowBuffer,
         gTileWindowPitch,
-        vanishingX,
-        horizonY,
-        0,
-        gTileWindowHeight - 1,
-        COLOR_SAND);
-    bufferDrawLine(gTileWindowBuffer,
-        gTileWindowPitch,
-        vanishingX,
-        horizonY,
-        gTileWindowWidth - 1,
-        gTileWindowHeight - 1,
-        COLOR_SAND);
-
-    for (int division = 1; division <= 3; division++) {
-        const int y = horizonY + floorHeight * division / 4;
-        const int leftEdge = vanishingX - vanishingX * (y - horizonY) / floorHeight;
-        const int rightEdge = vanishingX + (gTileWindowWidth - vanishingX) * (y - horizonY) / floorHeight;
-        bufferDrawLine(gTileWindowBuffer, gTileWindowPitch, leftEdge, y, rightEdge, y, COLOR_DARK_BROWN);
-    }
-
-    const int crosshairX = centerX;
-    const int crosshairY = gTileWindowHeight / 2;
-    bufferDrawLine(gTileWindowBuffer,
-        gTileWindowPitch,
-        std::max(0, crosshairX - 5),
-        crosshairY,
-        std::max(0, crosshairX - 2),
-        crosshairY,
+        std::max(0, centerX - 5),
+        centerY,
+        std::max(0, centerX - 2),
+        centerY,
         COLOR_WHITE);
     bufferDrawLine(gTileWindowBuffer,
         gTileWindowPitch,
-        std::min(gTileWindowWidth - 1, crosshairX + 2),
-        crosshairY,
-        std::min(gTileWindowWidth - 1, crosshairX + 5),
-        crosshairY,
+        std::min(gTileWindowWidth - 1, centerX + 2),
+        centerY,
+        std::min(gTileWindowWidth - 1, centerX + 5),
+        centerY,
         COLOR_WHITE);
     bufferDrawLine(gTileWindowBuffer,
         gTileWindowPitch,
-        crosshairX,
-        std::max(0, crosshairY - 5),
-        crosshairX,
-        std::max(0, crosshairY - 2),
+        centerX,
+        std::max(0, centerY - 5),
+        centerX,
+        std::max(0, centerY - 2),
         COLOR_WHITE);
     bufferDrawLine(gTileWindowBuffer,
         gTileWindowPitch,
-        crosshairX,
-        std::min(gTileWindowHeight - 1, crosshairY + 2),
-        crosshairX,
-        std::min(gTileWindowHeight - 1, crosshairY + 5),
+        centerX,
+        std::min(gTileWindowHeight - 1, centerY + 2),
+        centerX,
+        std::min(gTileWindowHeight - 1, centerY + 5),
         COLOR_WHITE);
 }
 
@@ -1058,6 +1193,28 @@ void tileFirstPersonPreviewToggle()
     if (gFirstPersonPreviewEnabled) {
         gFirstPersonPreviewTopologyEnabled = false;
         gFirstPersonPreviewYaw = 0;
+        if (gDude != nullptr && tileIsValid(gDude->tile) && rotationIsValid(gDude->rotation)) {
+            const int playerSquareTile = squareTileFromTile(gDude->tile);
+            for (int distance = 1; distance <= 4; distance++) {
+                const int facingTile = tileGetTileInDirection(gDude->tile, gDude->rotation, distance);
+                const int facingSquareTile = squareTileFromTile(facingTile);
+                if (!squareGridTileIsValid(playerSquareTile)
+                    || !squareGridTileIsValid(facingSquareTile)) {
+                    continue;
+                }
+
+                const int deltaX = facingSquareTile % SQUARE_GRID_WIDTH - playerSquareTile % SQUARE_GRID_WIDTH;
+                const int deltaY = facingSquareTile / SQUARE_GRID_WIDTH - playerSquareTile / SQUARE_GRID_WIDTH;
+                if (deltaX != 0 || deltaY != 0) {
+                    constexpr double kPi = 3.14159265358979323846;
+                    gFirstPersonPreviewYaw = static_cast<int>(atan2(deltaX, -deltaY) * 180.0 / kPi);
+                    if (gFirstPersonPreviewYaw < 0) {
+                        gFirstPersonPreviewYaw += 360;
+                    }
+                    break;
+                }
+            }
+        }
         tileFirstPersonPreviewRefresh();
     } else {
         tileRefreshGame(&gTileWindowRect, gElevation);

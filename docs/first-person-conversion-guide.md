@@ -196,7 +196,7 @@ needed authored metadata rather than guessing from its isometric pixels.
 While the F11 preview is active, press F9 to switch to a top-down diagnostic
 of the loaded elevation. The full square tile grid shows floor tiles; object
 markers show blocking/non-blocking walls, doors, scenery, critters, and items.
-The player is a white point. Press F9 again to return to the corridor preview
+The player is a white point. Press F9 again to return to the graybox preview
 and F11 to exit to the original view.
 
 Use this view to inspect whether object positions and floor regions give us
@@ -209,19 +209,20 @@ geometry temporary; do not serialize it into saves or map files.
 
 ### 3. Render the gray-box scene
 
-The existing F11 preview is the initial visual spike: it replaces only the
-map viewport with flat-shaded placeholder walls, floor, and a crosshair.
-Horizontal mouse motion turns that preview using SDL relative mode. F9
-temporarily switches the preview to the source-topology diagnostic. Neither
-view changes gameplay; F11 restores the isometric view and normal mouse mode.
+F11 now renders a first map-connected graybox in the map viewport. It starts
+at the player's square-grid cell and facing, raycasts against wall objects
+(including non-blocking walls), blocking scenery, and closed doors, and draws
+flat-color perspective columns. Mouse look turns the view; F9 still switches
+to the top-down source diagnostic. F11 restores the isometric view and normal
+mouse mode.
 
-Next, connect the preview renderer to the derived scene using simple solid
-colors. Render the scene with a grid raycaster (or similarly constrained
-renderer) and verify wall edges, openings, and distances before adding textures.
-Integrate at the map-view boundary: map/object changes invalidate the view,
-the first-person frame is composed in the map viewport, and the interface bar
-and modal UI remain the existing windows. Do not render over menus, movies,
-dialogue, or other modes that temporarily take control of the screen.
+This is deliberately a coarse first pass, not final topology: each blocking
+object is treated as a full square-grid cell, and wall orientation, corners,
+floor boundaries, and elevations have not yet been reconstructed as surfaces.
+Open/non-blocking doors remain openings. Compare the view against F9 and the
+isometric map to identify where this cell-based approximation fails before
+adding texture or movement. Map/object refreshes redraw the preview; the
+interface bar and modal UI remain existing windows.
 
 ### 4. Add a small texture proof
 
