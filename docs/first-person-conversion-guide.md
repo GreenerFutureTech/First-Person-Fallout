@@ -235,12 +235,19 @@ interface bar and modal UI remain existing windows.
 
 ### 4. Add a small texture proof
 
-Pick one representative wall/floor asset from game data, inspect its FRM
-directions and frames with the existing asset tools, and texture one surface
-while preserving the game's palette indices. Check seams, orientation,
-transparency, and baked-in isometric shading. If the source art does not tile
-or project cleanly, record a small authored crop/retexture requirement instead
-of stretching the whole sprite and accepting obvious distortion.
+The F11 graybox now finds the nearest valid floor FRM on the loaded elevation
+and projects that single palette-indexed image across the floor plane. Zero
+pixels retain the graybox ground color. This is an intentionally crude proof:
+it ignores per-cell floor changes and repeats the isometric tile image in a
+square world pattern. Compare its transparency, seams, orientation, and baked
+lighting against the graybox; use `ce-frm2png` to inspect a candidate frame.
+If the result is unsuitable, record whether a cropped or authored tile
+texture is needed before generalizing this renderer.
+
+Once a floor image has been validated, repeat the experiment with one wall FRM
+on a correctly oriented wall segment. Do not project the whole isometric wall
+sprite as if it were a seamless rectangular material without inspecting it
+first.
 
 ### 5. Add movement, collision, and synchronization
 

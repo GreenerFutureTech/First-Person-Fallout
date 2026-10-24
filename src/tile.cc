@@ -834,8 +834,14 @@ static void tileRenderFirstPersonPreview()
 
     double cameraX = SQUARE_GRID_WIDTH / 2.0;
     double cameraY = SQUARE_GRID_HEIGHT / 2.0;
+    int cameraSquareTile = SQUARE_GRID_WIDTH * (SQUARE_GRID_HEIGHT / 2)
+        + SQUARE_GRID_WIDTH / 2;
     if (gDude != nullptr && gDude->elevation == gElevation && tileIsValid(gDude->tile)) {
         tileFirstPersonGetWorldPosition(gDude->tile, &cameraX, &cameraY);
+        const int playerSquareTile = squareTileFromTile(gDude->tile);
+        if (squareGridTileIsValid(playerSquareTile)) {
+            cameraSquareTile = playerSquareTile;
+        }
     }
 
     const double yaw = gFirstPersonPreviewYaw * kPi / 180.0;
@@ -843,6 +849,56 @@ static void tileRenderFirstPersonPreview()
     const double directionY = -cos(yaw);
     const double cameraPlaneX = -directionY * kFieldOfViewScale;
     const double cameraPlaneY = directionX * kFieldOfViewScale;
+
+    int floorTextureSquareTile = -1;
+    int nearestFloorDistance = std::numeric_limits<int>::max();
+    for (int squareTile = 0; squareTile < SQUARE_GRID_SIZE; squareTile++) {
+        const TileFrameId frameId =
+            FloorTileFrmId(gTileSquares[gElevation]->tileFid[squareTile]).frameId<TileFrameId>();
+        if (frameId == TileFrameId::Invalid
+            || frameId == TileFrameId::Reserved
+            || frameId == TileFrameId::Grid) {
+            continue;
+        }
+
+        const int distance = abs(squareTile % SQUARE_GRID_WIDTH - cameraSquareTile % SQUARE_GRID_WIDTH)
+            + abs(squareTile / SQUARE_GRID_WIDTH - cameraSquareTile / SQUARE_GRID_WIDTH);
+        if (distance < nearestFloorDistance) {
+            nearestFloorDistance = distance;
+            floorTextureSquareTile = squareTile;
+        }
+    }
+
+    FrmImage floorTexture;
+    if (floorTextureSquareTile >= 0) {
+        const FloorTileFrmId floorFrmId(
+            gTileSquares[gElevation]->tileFid[floorTextureSquareTile]);
+        floorTexture.lock(FrmId(floorFrmId.frameId<TileFrameId>()));
+    }
+    const ConstBuffer2D floorTextureFrame = floorTexture.getBuffer();
+    if (floorTextureFrame && floorTextureFrame.width > 0 && floorTextureFrame.height > 0) {
+        for (int y = horizonY + 1; y < gTileWindowHeight; y++) {
+            const double rowDistance = (gTileWindowHeight * 0.5) / (y - horizonY);
+            for (int x = 0; x < gTileWindowWidth; x++) {
+                const double cameraOffset = 2.0 * x / gTileWindowWidth - 1.0;
+                const double rayDirectionX = directionX + cameraPlaneX * cameraOffset;
+                const double rayDirectionY = directionY + cameraPlaneY * cameraOffset;
+                const double worldX = cameraX + rayDirectionX * rowDistance;
+                const double worldY = cameraY + rayDirectionY * rowDistance;
+                const double fractionX = worldX - floor(worldX);
+                const double fractionY = worldY - floor(worldY);
+                const int textureX = std::min(floorTextureFrame.width - 1,
+                    static_cast<int>(fractionX * floorTextureFrame.width));
+                const int textureY = std::min(floorTextureFrame.height - 1,
+                    static_cast<int>(fractionY * floorTextureFrame.height));
+                const unsigned char color = floorTextureFrame.data[textureY * floorTextureFrame.width + textureX];
+                if (color != 0) {
+                    gTileWindowBuffer[y * gTileWindowPitch + x] = color;
+                }
+            }
+        }
+    }
+
     std::vector<double> wallDepths(gTileWindowWidth,
         std::numeric_limits<double>::infinity());
 
