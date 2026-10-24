@@ -16,6 +16,8 @@ typedef struct ObjectWithFlags {
     Object* object;
 } ObjectWithFlags;
 
+typedef void(ObjectVisitorProc)(Object* object, void* context);
+
 extern Color* _wallBlendTable;
 extern Object* _moveBlockObj;
 
@@ -72,6 +74,7 @@ Object* objectFindFirstAtElevation(MapElevation elevation);
 Object* objectFindNextAtElevation();
 Object* objectFindFirstAtLocation(MapElevation elevation, int tile);
 Object* objectFindNextAtLocation();
+void objectVisitAll(ObjectVisitorProc* visitor, void* context);
 void objectGetRect(Object* obj, Rect* rect);
 bool _obj_occupied(int tile_num, MapElevation elev);
 Object* _obj_blocking_at(Object* excludeObj, int tile_num, MapElevation elev);

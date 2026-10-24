@@ -17,6 +17,7 @@
 #include "map_edge.h"
 #include "object.h"
 #include "platform_compat.h"
+#include "proto.h"
 #include "settings.h"
 #include "svga.h"
 #include "tile_hires_stencil.h"
@@ -56,9 +57,18 @@ struct roof_fill_task {
     int y;
 };
 
+struct TileFirstPersonTopologyRenderContext {
+    MapElevation elevation;
+    int mapLeft;
+    int mapTop;
+    int cellSize;
+};
+
 static void tileSetBorder(int windowWidth, int windowHeight, int hexGridWidth, int hexGridHeight);
 static void tileRefreshMapper(Rect* rect, MapElevation elevation);
 static void tileRefreshGame(Rect* rect, MapElevation elevation);
+static void tileRenderFirstPersonPreview();
+static void tileFirstPersonTopologyMarkObject(Object* object, void* context);
 static void roof_fill_push_task_if_in_bounds(std::stack<roof_fill_task>& tasks_stack, int x, int y);
 static void roof_fill_off_process_task(std::stack<roof_fill_task>& tasks_stack, MapElevation elevation, bool on);
 static void tileRenderRoof(const TileFrmId& frmId, int x, int y, Rect* rect, int light);
@@ -89,6 +99,9 @@ static TileWindowRefreshElevationProc* gTileWindowRefreshElevationProc = tileRef
 
 // 0x51D968 refresh_enabled
 static bool gTileEnabled = true;
+static bool gFirstPersonPreviewEnabled = false;
+static bool gFirstPersonPreviewTopologyEnabled = false;
+static int gFirstPersonPreviewYaw = 0;
 
 // 0x51D96C off_tile
 const int _off_tile[ROTATION_COUNT] = {
@@ -714,6 +727,11 @@ static void tileRefreshMapper(Rect* rect, MapElevation elevation)
 // 0x4B15E8 refresh_game
 static void tileRefreshGame(Rect* rect, MapElevation elevation)
 {
+    if (gFirstPersonPreviewEnabled) {
+        tileFirstPersonPreviewRefresh();
+        return;
+    }
+
     Rect rectToUpdate;
 
     if (rectIntersection(rect, &gTileWindowRect, &rectToUpdate) == -1) {
@@ -752,6 +770,298 @@ static void tileRefreshGame(Rect* rect, MapElevation elevation)
     }
 
     gTileWindowRefreshProc(didClear ? &rectToUpdate : &renderRect);
+}
+
+static void tileRenderFirstPersonPreview()
+{
+    bufferFill(gTileWindowBuffer,
+        gTileWindowWidth,
+        gTileWindowHeight,
+        gTileWindowPitch,
+        COLOR_DARK_GREY_3);
+
+    if (gTileWindowWidth < 2 || gTileWindowHeight < 2) {
+        return;
+    }
+
+    const int centerX = gTileWindowWidth / 2;
+    const int horizonY = gTileWindowHeight * 2 / 5;
+    const int floorHeight = gTileWindowHeight - horizonY - 1;
+    constexpr double kPi = 3.14159265358979323846;
+    const int vanishingX = std::clamp(
+        centerX + static_cast<int>(sin(gFirstPersonPreviewYaw * kPi / 180.0) * centerX * 0.75),
+        0,
+        gTileWindowWidth - 1);
+
+    for (int y = horizonY; y < gTileWindowHeight; y++) {
+        const int depth = y - horizonY;
+        const int leftEdge = vanishingX - vanishingX * depth / floorHeight;
+        const int rightEdge = vanishingX + (gTileWindowWidth - vanishingX) * depth / floorHeight;
+
+        if (leftEdge > 0) {
+            bufferFill(gTileWindowBuffer + y * gTileWindowPitch,
+                leftEdge,
+                1,
+                gTileWindowPitch,
+                COLOR_DULL_BROWN);
+        }
+
+        if (rightEdge > leftEdge) {
+            bufferFill(gTileWindowBuffer + y * gTileWindowPitch + leftEdge,
+                rightEdge - leftEdge + 1,
+                1,
+                gTileWindowPitch,
+                COLOR_SAND);
+        }
+
+        if (rightEdge + 1 < gTileWindowWidth) {
+            bufferFill(gTileWindowBuffer + y * gTileWindowPitch + rightEdge + 1,
+                gTileWindowWidth - rightEdge - 1,
+                1,
+                gTileWindowPitch,
+                COLOR_DARK_BROWN);
+        }
+    }
+
+    bufferDrawLine(gTileWindowBuffer,
+        gTileWindowPitch,
+        vanishingX,
+        horizonY,
+        0,
+        gTileWindowHeight - 1,
+        COLOR_SAND);
+    bufferDrawLine(gTileWindowBuffer,
+        gTileWindowPitch,
+        vanishingX,
+        horizonY,
+        gTileWindowWidth - 1,
+        gTileWindowHeight - 1,
+        COLOR_SAND);
+
+    for (int division = 1; division <= 3; division++) {
+        const int y = horizonY + floorHeight * division / 4;
+        const int leftEdge = vanishingX - vanishingX * (y - horizonY) / floorHeight;
+        const int rightEdge = vanishingX + (gTileWindowWidth - vanishingX) * (y - horizonY) / floorHeight;
+        bufferDrawLine(gTileWindowBuffer, gTileWindowPitch, leftEdge, y, rightEdge, y, COLOR_DARK_BROWN);
+    }
+
+    const int crosshairX = centerX;
+    const int crosshairY = gTileWindowHeight / 2;
+    bufferDrawLine(gTileWindowBuffer,
+        gTileWindowPitch,
+        std::max(0, crosshairX - 5),
+        crosshairY,
+        std::max(0, crosshairX - 2),
+        crosshairY,
+        COLOR_WHITE);
+    bufferDrawLine(gTileWindowBuffer,
+        gTileWindowPitch,
+        std::min(gTileWindowWidth - 1, crosshairX + 2),
+        crosshairY,
+        std::min(gTileWindowWidth - 1, crosshairX + 5),
+        crosshairY,
+        COLOR_WHITE);
+    bufferDrawLine(gTileWindowBuffer,
+        gTileWindowPitch,
+        crosshairX,
+        std::max(0, crosshairY - 5),
+        crosshairX,
+        std::max(0, crosshairY - 2),
+        COLOR_WHITE);
+    bufferDrawLine(gTileWindowBuffer,
+        gTileWindowPitch,
+        crosshairX,
+        std::min(gTileWindowHeight - 1, crosshairY + 2),
+        crosshairX,
+        std::min(gTileWindowHeight - 1, crosshairY + 5),
+        COLOR_WHITE);
+}
+
+static void tileRenderFirstPersonTopology()
+{
+    bufferFill(gTileWindowBuffer,
+        gTileWindowWidth,
+        gTileWindowHeight,
+        gTileWindowPitch,
+        COLOR_BLACK);
+
+    if (gTileWindowWidth < SQUARE_GRID_WIDTH || gTileWindowHeight < SQUARE_GRID_HEIGHT
+        || !elevationIsValid(gElevation) || gTileSquares[gElevation] == nullptr) {
+        return;
+    }
+
+    const int cellSize = std::min(
+        (gTileWindowWidth - 16) / SQUARE_GRID_WIDTH,
+        (gTileWindowHeight - 16) / SQUARE_GRID_HEIGHT);
+    if (cellSize <= 0) {
+        return;
+    }
+
+    const int mapWidth = cellSize * SQUARE_GRID_WIDTH;
+    const int mapHeight = cellSize * SQUARE_GRID_HEIGHT;
+    const int mapLeft = (gTileWindowWidth - mapWidth) / 2;
+    const int mapTop = (gTileWindowHeight - mapHeight) / 2;
+
+    for (int squareTile = 0; squareTile < SQUARE_GRID_SIZE; squareTile++) {
+        const FloorTileFrmId floorFid(gTileSquares[gElevation]->tileFid[squareTile]);
+        if (floorFid.frameId<TileFrameId>() == TileFrameId::Invalid) {
+            continue;
+        }
+
+        const int x = mapLeft + (squareTile % SQUARE_GRID_WIDTH) * cellSize;
+        const int y = mapTop + (squareTile / SQUARE_GRID_WIDTH) * cellSize;
+        bufferFill(gTileWindowBuffer + y * gTileWindowPitch + x,
+            cellSize - 1,
+            cellSize - 1,
+            gTileWindowPitch,
+            COLOR_DARK_GREY_2);
+    }
+
+    TileFirstPersonTopologyRenderContext context = {
+        gElevation,
+        mapLeft,
+        mapTop,
+        cellSize,
+    };
+    objectVisitAll(tileFirstPersonTopologyMarkObject, &context);
+
+    if (gDude != nullptr && gDude->elevation == gElevation && tileIsValid(gDude->tile)) {
+        const int squareTile = squareTileFromTile(gDude->tile);
+        if (squareGridTileIsValid(squareTile)) {
+            const int cellX = mapLeft + (squareTile % SQUARE_GRID_WIDTH) * cellSize;
+            const int cellY = mapTop + (squareTile / SQUARE_GRID_WIDTH) * cellSize;
+            bufferFill(gTileWindowBuffer + (cellY + (cellSize - 1) / 2) * gTileWindowPitch
+                    + cellX + (cellSize - 1) / 2,
+                1,
+                1,
+                gTileWindowPitch,
+                COLOR_WHITE);
+        }
+    }
+}
+
+static void tileFirstPersonTopologyMarkObject(Object* object, void* context)
+{
+    const TileFirstPersonTopologyRenderContext* renderContext =
+        static_cast<const TileFirstPersonTopologyRenderContext*>(context);
+    if (object->elevation != renderContext->elevation
+        || (object->flags & OBJECT_HIDDEN) != OBJECT_NONE
+        || !tileIsValid(object->tile)) {
+        return;
+    }
+
+    const ObjectType objectType = FrmId(object).objectType();
+    if (artIsObjectTypeHidden(objectType)) {
+        return;
+    }
+
+    const int squareTile = squareTileFromTile(object->tile);
+    if (!squareGridTileIsValid(squareTile)) {
+        return;
+    }
+
+    const int cellX = renderContext->mapLeft + (squareTile % SQUARE_GRID_WIDTH) * renderContext->cellSize;
+    const int cellY = renderContext->mapTop + (squareTile / SQUARE_GRID_WIDTH) * renderContext->cellSize;
+
+    Color markerColor = COLOR_LIGHT_GREY;
+    switch (objectType) {
+    case OBJ_TYPE_WALL:
+        markerColor = (object->flags & OBJECT_NO_BLOCK) == OBJECT_NONE
+            ? COLOR_LIGHT_RED
+            : COLOR_AMBER;
+        break;
+    case OBJ_TYPE_SCENERY: {
+        Proto* proto;
+        if (protoGetProto(object, &proto) == 0 && proto->scenery.type == SCENERY_TYPE_DOOR) {
+            markerColor = (object->flags & OBJECT_NO_BLOCK) == OBJECT_NONE
+                ? COLOR_LIGHT_RED
+                : COLOR_LIGHT_GREEN_3;
+        } else {
+            markerColor = (object->flags & OBJECT_NO_BLOCK) == OBJECT_NONE
+                ? COLOR_LIGHT_GOLD
+                : COLOR_YELLOW_2;
+        }
+        break;
+    }
+    case OBJ_TYPE_CRITTER:
+        markerColor = COLOR_LIGHT_GREEN_3;
+        break;
+    case OBJ_TYPE_ITEM:
+        markerColor = COLOR_CYAN;
+        break;
+    default:
+        break;
+    }
+
+    const int markerSize = std::min(renderContext->cellSize - 1, 3);
+    if (markerSize > 0) {
+        bufferFill(gTileWindowBuffer
+                + (cellY + (renderContext->cellSize - markerSize) / 2) * gTileWindowPitch
+                + cellX + (renderContext->cellSize - markerSize) / 2,
+            markerSize,
+            markerSize,
+            gTileWindowPitch,
+            markerColor);
+    }
+}
+
+bool tileFirstPersonPreviewIsEnabled()
+{
+    return gFirstPersonPreviewEnabled;
+}
+
+void tileFirstPersonPreviewRefresh()
+{
+    if (!gFirstPersonPreviewEnabled || gTileWindowBuffer == nullptr || gTileWindowRefreshProc == nullptr) {
+        return;
+    }
+
+    if (gFirstPersonPreviewTopologyEnabled) {
+        tileRenderFirstPersonTopology();
+    } else {
+        tileRenderFirstPersonPreview();
+    }
+    gTileWindowRefreshProc(&gTileWindowRect);
+}
+
+void tileFirstPersonPreviewToggleTopology()
+{
+    if (!gFirstPersonPreviewEnabled) {
+        return;
+    }
+
+    gFirstPersonPreviewTopologyEnabled = !gFirstPersonPreviewTopologyEnabled;
+    tileFirstPersonPreviewRefresh();
+}
+
+void tileFirstPersonPreviewLook(int deltaX)
+{
+    if (!gFirstPersonPreviewEnabled || gFirstPersonPreviewTopologyEnabled || deltaX == 0) {
+        return;
+    }
+
+    gFirstPersonPreviewYaw = (gFirstPersonPreviewYaw + deltaX) % 360;
+    if (gFirstPersonPreviewYaw < 0) {
+        gFirstPersonPreviewYaw += 360;
+    }
+
+    tileFirstPersonPreviewRefresh();
+}
+
+void tileFirstPersonPreviewToggle()
+{
+    if (gTileWindowBuffer == nullptr || gTileWindowRefreshProc == nullptr) {
+        return;
+    }
+
+    gFirstPersonPreviewEnabled = !gFirstPersonPreviewEnabled;
+    if (gFirstPersonPreviewEnabled) {
+        gFirstPersonPreviewTopologyEnabled = false;
+        gFirstPersonPreviewYaw = 0;
+        tileFirstPersonPreviewRefresh();
+    } else {
+        tileRefreshGame(&gTileWindowRect, gElevation);
+    }
 }
 
 // 0x4B1634 tile_toggle_roof

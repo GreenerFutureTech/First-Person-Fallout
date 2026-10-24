@@ -15,6 +15,9 @@ static int mouseWindowMappingWindowHeight = 0;
 static int mouseWindowMappingLogicalWidth = 0;
 static int mouseWindowMappingLogicalHeight = 0;
 static bool mouseRelativeMode = false;
+static bool mouseRelativeModeForced = false;
+static int mouseRelativeMotionX = 0;
+static int mouseRelativeMotionY = 0;
 
 static void mouseDeviceMapWindowToLogicalPosition(int* x, int* y);
 
@@ -57,11 +60,16 @@ bool mouseDeviceInitMode()
     // "Absolute mode" means cursor position is controlled by the OS, and we read it directly.
     // Mouse sensitivity settings can only apply in relative mode.
 
-    bool wantsRelativeMode = gProgramIsActive && (screenIsExclusiveFullscreen() || settings.screen.mouse_lock);
+    bool wantsRelativeMode = gProgramIsActive
+        && (mouseRelativeModeForced || screenIsExclusiveFullscreen() || settings.screen.mouse_lock);
 
     if (wantsRelativeMode) {
+        if (SDL_SetRelativeMouseMode(SDL_TRUE) != 0) {
+            return false;
+        }
+
         mouseRelativeMode = true;
-        return SDL_SetRelativeMouseMode(SDL_TRUE) == 0;
+        return true;
     }
 
     if (SDL_SetRelativeMouseMode(SDL_FALSE) != 0) {
@@ -71,6 +79,32 @@ bool mouseDeviceInitMode()
     mouseRelativeMode = false;
     mouseDeviceRefreshWindowMapping();
     return true;
+}
+
+bool mouseDeviceSetRelativeModeForced(bool enabled)
+{
+    mouseRelativeModeForced = enabled;
+    mouseRelativeMotionX = 0;
+    mouseRelativeMotionY = 0;
+
+    if (mouseDeviceInitMode()) {
+        return true;
+    }
+
+    mouseRelativeModeForced = false;
+    if (!mouseDeviceInitMode()) {
+        debugPrint("Failed to restore mouse mode: %s\n", SDL_GetError());
+    }
+
+    return false;
+}
+
+void mouseDeviceGetRelativeMotion(int* deltaX, int* deltaY)
+{
+    *deltaX = mouseRelativeMotionX;
+    *deltaY = mouseRelativeMotionY;
+    mouseRelativeMotionX = 0;
+    mouseRelativeMotionY = 0;
 }
 
 // 0x4E04E8
@@ -165,6 +199,11 @@ void handleMouseEvent(SDL_Event* event)
 {
     // Mouse movement and buttons are accumulated in SDL itself and will be
     // processed later in `mouseDeviceGetData` via `SDL_GetRelativeMouseState`.
+
+    if (event->type == SDL_MOUSEMOTION && mouseRelativeMode) {
+        mouseRelativeMotionX += event->motion.xrel;
+        mouseRelativeMotionY += event->motion.yrel;
+    }
 
     if (event->type == SDL_MOUSEWHEEL) {
         gMouseWheelDeltaX += event->wheel.x;

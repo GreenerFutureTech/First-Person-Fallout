@@ -1646,6 +1646,11 @@ static void isoWindowRefreshRect(Rect* rect)
 // 0x483EE4 map_scroll_refresh_game
 static void isoWindowRefreshRectGame(Rect* rect)
 {
+    if (tileFirstPersonPreviewIsEnabled()) {
+        tileFirstPersonPreviewRefresh();
+        return;
+    }
+
     Rect rectToUpdate;
     if (rectIntersection(rect, &gIsoWindowRect, &rectToUpdate) == -1) {
         return;

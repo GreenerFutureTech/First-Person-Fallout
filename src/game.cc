@@ -20,6 +20,7 @@
 #include "dbox.h"
 #include "debug.h"
 #include "display_monitor.h"
+#include "dinput.h"
 #include "draw.h"
 #include "endgame.h"
 #include "font_manager.h"
@@ -37,6 +38,7 @@
 #include "loadsave.h"
 #include "map.h"
 #include "memory.h"
+#include "mouse.h"
 #include "mouse.h"
 #include "movie.h"
 #include "movie_effect.h"
@@ -549,6 +551,14 @@ void gameExit()
 // 0x442D44
 int gameHandleKey(int eventCode, bool isInCombatMode)
 {
+    if (tileFirstPersonPreviewIsEnabled() && mouseDeviceUsesRelativeMode()) {
+        int deltaX;
+        int deltaY;
+        mouseDeviceGetRelativeMotion(&deltaX, &deltaY);
+        (void)deltaY;
+        tileFirstPersonPreviewLook(static_cast<int>(deltaX * settings.preferences.mouse_sensitivity));
+    }
+
     // NOTE: Uninline.
     if (gameGetState() == GameState::DialogRequested) {
         _gdialogSystemEnter();
@@ -942,6 +952,23 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                 char* msg = getmsg(&gMiscMessageList, &messageListItem, 4);
                 displayMonitorAddMessage(msg);
             }
+        }
+        break;
+    case KEY_F9:
+        tileFirstPersonPreviewToggleTopology();
+        break;
+    case KEY_F11:
+        if (tileFirstPersonPreviewIsEnabled()) {
+            tileFirstPersonPreviewToggle();
+            mouseShowCursor();
+            if (!mouseDeviceSetRelativeModeForced(false)) {
+                debugPrint("Failed to restore mouse mode: %s\n", SDL_GetError());
+            }
+        } else if (mouseDeviceSetRelativeModeForced(true)) {
+            mouseHideCursor();
+            tileFirstPersonPreviewToggle();
+        } else {
+            debugPrint("Failed to enable relative mouse mode for preview: %s\n", SDL_GetError());
         }
         break;
     case KEY_CTRL_V:

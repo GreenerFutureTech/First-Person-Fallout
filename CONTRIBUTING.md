@@ -4,6 +4,9 @@ This file is currently a shell to be filled in over time. For now, it only captu
 
 For current sfall compatibility status and the remaining work needed to close gaps, see [SFALL_COMPATIBILITY.md](SFALL_COMPATIBILITY.md).
 
+For the proposed architecture and staged implementation of the first-person
+conversion, see [docs/first-person-conversion-guide.md](docs/first-person-conversion-guide.md).
+
 ## Building
 
 The project uses CMake, so building mostly comes down to picking the right preset.

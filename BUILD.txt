@@ -1,0 +1,12 @@
+## JUST THE BUILD
+
+$cmake = 'C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'
+& $cmake --build 'out\build\windows-x64-vs18' --config Release --target fallout2-ce --parallel
+
+## Copy and run
+
+$game = 'C:\Users\Flyin\source\repos\Fo2Build'
+$build = 'C:\Users\Flyin\source\repos\First-Person-Fallout\out\build\windows-x64-vs18'
+
+Copy-Item "$build\Release\fallout2-ce.exe" "$game\fallout2-ce.exe" -Force
+Start-Process "$game\fallout2-ce.exe" -WorkingDirectory $game

@@ -22,6 +22,8 @@ bool directInputInit();
 void directInputFree();
 bool mouseDeviceUsesRelativeMode();
 bool mouseDeviceInitMode();
+bool mouseDeviceSetRelativeModeForced(bool enabled);
+void mouseDeviceGetRelativeMotion(int* deltaX, int* deltaY);
 void mouseDeviceRefreshWindowMapping();
 void mouseDeviceSetLogicalPosition(int x, int y);
 bool mouseDeviceAcquire();
