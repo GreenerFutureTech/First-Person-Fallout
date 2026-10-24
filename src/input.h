@@ -3,6 +3,11 @@
 
 namespace fallout {
 
+enum InputEventCode {
+    INPUT_EVENT_FIRST_PERSON_LEFT_CLICK = -3,
+    INPUT_EVENT_FIRST_PERSON_RIGHT_CLICK = -4,
+};
+
 typedef void(TickerProc)();
 
 typedef int(ScreenshotHandler)(int width, int height, unsigned char* buffer, unsigned char* palette);

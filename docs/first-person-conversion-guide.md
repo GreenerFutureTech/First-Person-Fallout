@@ -225,9 +225,21 @@ occluded by the raycast wall depth. A small color marker shows party members
 and same-team critters in green, non-party critters in amber outside combat,
 and opposing teams in red during combat. Mouse look turns the view; F9 still
 switches to the top-down source diagnostic. F11 restores the isometric view
-and normal mouse mode. Actor and camera positions retain half-square offsets
-from the underlying hex tiles so nearby critters do not collapse onto the
-player's exact diagnostic position.
+and normal mouse mode. Aim the crosshair at a visible critter and left-click
+to use the existing talk action. WASD moves one hex step relative to the
+view direction, using the game's existing movement animation and collision
+path. During combat, movement spends the existing movement AP (including
+bonus move AP) and is unavailable when no movement AP remains. Actor and
+camera positions retain half-square offsets from the underlying hex tiles so
+nearby critters do not collapse onto the player's exact diagnostic position.
+
+During turn-based combat, mouse-look remains active by default. Right-click
+to show the normal cursor and freeze the view; select the weapon/action from
+the interface bar, then click a visible enemy to send that target to Fallout's
+existing combat attack logic. Right-click again to return to mouse-look.
+Combat entry defaults to mouse-look, and combat exit restores mouse-look if
+the cursor was active. Attack range, line of sight, hit chance, action points,
+and turn order remain controlled by the original combat system.
 
 Graybox wall side faces use distinct saturated debug colors instead of gray
 and brown shades that can disappear against the sky and ground.
@@ -261,13 +273,15 @@ on a correctly oriented wall segment. Do not project the whole isometric wall
 sprite as if it were a seamless rectangular material without inspecting it
 first.
 
-### 5. Add movement, collision, and synchronization
+### 5. Expand movement, collision, and synchronization
 
-Add keyboard movement and relative mouse look in the gameplay input path.
+Tile-step WASD movement uses Fallout's existing animation and collision path.
+Outside combat it remains real-time; in combat each step is limited by the
+player's available AP and uses the engine's existing movement AP accounting.
 Move the camera continuously only if collision against the derived geometry
-can be validated; otherwise begin with tile-step movement. At each required
-simulation boundary, synchronize `gDude` through existing APIs so map scripts,
-combat, transitions, and saves observe a valid tile/elevation/rotation.
+can be validated. At each required simulation boundary, synchronize `gDude`
+through existing APIs so map scripts, combat, transitions, and saves observe
+a valid tile/elevation/rotation.
 
 Test walls, corners, narrow doorways, open doors, map boundaries, elevation
 changes, party members, knockback, combat entry/exit, and map transitions.
@@ -278,15 +292,17 @@ make a camera appear to move.
 
 Render static walls and floor first, then doors and interactive scenery, then
 critters/items as correctly occluded billboards or the chosen 3D equivalents.
-Next address lighting, roof/visibility behavior, combat targeting, and the
-player weapon/hand presentation. Reuse current object IDs for selection and
-interaction so that inventory, scripts, and combat continue to act on the
-same objects.
+Next address lighting, roof/visibility behavior, and the player weapon/hand
+presentation. Reuse current object IDs for selection and interaction so that
+inventory, scripts, and combat continue to act on the same objects.
 
-Treat combat as its own integration milestone. A first-person crosshair can
-select an object, but attack range, hit chance, line of sight, AP, and turn
-order must still be resolved by the existing combat system unless a separate
-gameplay redesign is approved.
+Treat combat as its own integration milestone. F11 now supports mouse-look
+and cursor-toggle modes for selecting weapons through the existing interface
+bar and targeting visible critters by their first-person screen position.
+Attack range, hit chance, line of sight, AP, and turn order are resolved by
+the existing combat system. Validate weapon selection, target clicks, missed
+clicks, combat entry/exit, and different attack modes in game before expanding
+this path.
 
 ### 7. Harden, configure, and expand
 

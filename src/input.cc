@@ -18,6 +18,7 @@
 #include "sfall_script_hooks.h"
 #include "svga.h"
 #include "text_font.h"
+#include "tile.h"
 #include "touch.h"
 #include "win32.h"
 #include "window_manager.h"
@@ -1006,6 +1007,16 @@ void _GNW95_process_message()
         case SDL_MOUSEWHEEL:
             if (e.type == SDL_MOUSEBUTTONDOWN || e.type == SDL_MOUSEBUTTONUP) {
                 inputHandleMouseClickHook(e.button.button, e.type == SDL_MOUSEBUTTONDOWN);
+                if (e.type == SDL_MOUSEBUTTONDOWN
+                    && tileFirstPersonPreviewIsEnabled()
+                    && mouseDeviceUsesRelativeMode()
+                    && cursorIsHidden()) {
+                    if (e.button.button == SDL_BUTTON_LEFT) {
+                        enqueueInputEvent(INPUT_EVENT_FIRST_PERSON_LEFT_CLICK);
+                    } else if (e.button.button == SDL_BUTTON_RIGHT) {
+                        enqueueInputEvent(INPUT_EVENT_FIRST_PERSON_RIGHT_CLICK);
+                    }
+                }
             }
             handleMouseEvent(&e);
             break;

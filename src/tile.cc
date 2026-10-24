@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "art.h"
+#include "animation.h"
 #include "combat.h"
 #include "color.h"
 #include "debug.h"
@@ -18,6 +19,7 @@
 #include "light.h"
 #include "map.h"
 #include "map_edge.h"
+#include "mouse.h"
 #include "object.h"
 #include "party_member.h"
 #include "platform_compat.h"
@@ -25,6 +27,7 @@
 #include "settings.h"
 #include "svga.h"
 #include "tile_hires_stencil.h"
+#include "window_manager.h"
 
 namespace fallout {
 
@@ -80,6 +83,17 @@ enum TileFirstPersonWallOrientation : unsigned char {
     TILE_FIRST_PERSON_WALL_ORIENTATION_EAST_WEST,
 };
 
+struct TileFirstPersonActorHitTarget {
+    Object* object;
+    double depth;
+    int left;
+    int top;
+    int width;
+    int height;
+    int frame;
+    Rotation rotation;
+};
+
 struct TileFirstPersonActorRenderContext {
     MapElevation elevation;
     double cameraX;
@@ -90,6 +104,7 @@ struct TileFirstPersonActorRenderContext {
     double cameraPlaneY;
     int horizonY;
     std::vector<double>* wallDepths;
+    std::vector<TileFirstPersonActorHitTarget>* hitTargets;
 };
 
 static void tileSetBorder(int windowWidth, int windowHeight, int hexGridWidth, int hexGridHeight);
@@ -135,6 +150,8 @@ static bool gTileEnabled = true;
 static bool gFirstPersonPreviewEnabled = false;
 static bool gFirstPersonPreviewTopologyEnabled = false;
 static int gFirstPersonPreviewYaw = 0;
+static std::vector<double> gFirstPersonPreviewWallDepths;
+static std::vector<TileFirstPersonActorHitTarget> gFirstPersonPreviewActorHitTargets;
 
 // 0x51D96C off_tile
 const int _off_tile[ROTATION_COUNT] = {
@@ -809,6 +826,7 @@ static void tileRenderFirstPersonPreview()
 {
     constexpr double kPi = 3.14159265358979323846;
     constexpr double kFieldOfViewScale = 0.66;
+    gFirstPersonPreviewActorHitTargets.clear();
 
     bufferFill(gTileWindowBuffer,
         gTileWindowWidth,
@@ -909,8 +927,8 @@ static void tileRenderFirstPersonPreview()
         }
     }
 
-    std::vector<double> wallDepths(gTileWindowWidth,
-        std::numeric_limits<double>::infinity());
+    std::vector<double>& wallDepths = gFirstPersonPreviewWallDepths;
+    wallDepths.assign(gTileWindowWidth, std::numeric_limits<double>::infinity());
 
     for (int x = 0; x < gTileWindowWidth; x++) {
         const double cameraOffset = 2.0 * x / gTileWindowWidth - 1.0;
@@ -1086,6 +1104,7 @@ static void tileRenderFirstPersonPreview()
         cameraPlaneY,
         horizonY,
         &wallDepths,
+        &gFirstPersonPreviewActorHitTargets,
     };
     objectVisitAll(tileFirstPersonRenderActor, &actorContext);
     tileFirstPersonDrawCrosshair();
@@ -1254,6 +1273,16 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
             + static_cast<int>(projectionScale * 0.42);
         const int artTop = artBottom - artHeight;
         const int artLeft = screenCenterX - artWidth / 2;
+        renderContext->hitTargets->push_back({
+            object,
+            transformY,
+            artLeft,
+            artTop,
+            artWidth,
+            artHeight,
+            object->frame,
+            facingRotation,
+        });
 
         for (int x = std::max(0, artLeft); x < std::min(gTileWindowWidth, artLeft + artWidth); x++) {
             if (transformY >= (*renderContext->wallDepths)[x]) {
@@ -1285,6 +1314,16 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         return;
     }
 
+    renderContext->hitTargets->push_back({
+        object,
+        transformY,
+        spriteLeft,
+        spriteTop,
+        spriteWidth,
+        spriteHeight,
+        object->frame,
+        facingRotation,
+    });
     for (int x = std::max(0, spriteLeft); x < std::min(gTileWindowWidth, spriteRight); x++) {
         if (transformY >= (*renderContext->wallDepths)[x]) {
             continue;
@@ -1389,6 +1428,7 @@ static void tileFirstPersonDrawDiagnosticLine(int x1, int y1, int x2, int y2, Co
 
 static void tileRenderFirstPersonTopology()
 {
+    gFirstPersonPreviewActorHitTargets.clear();
     bufferFill(gTileWindowBuffer,
         gTileWindowWidth,
         gTileWindowHeight,
@@ -1598,6 +1638,144 @@ bool tileFirstPersonPreviewIsEnabled()
     return gFirstPersonPreviewEnabled;
 }
 
+static Object* tileFirstPersonPreviewPickCritterAtPosition(int x, int y)
+{
+    if (!gFirstPersonPreviewEnabled
+        || gFirstPersonPreviewTopologyEnabled
+        || x < 0
+        || x >= gTileWindowWidth
+        || y < 0
+        || y >= gTileWindowHeight
+        || gFirstPersonPreviewWallDepths.size() != static_cast<size_t>(gTileWindowWidth)) {
+        return nullptr;
+    }
+
+    Object* pickedObject = nullptr;
+    double pickedDepth = std::numeric_limits<double>::infinity();
+    for (const TileFirstPersonActorHitTarget& target : gFirstPersonPreviewActorHitTargets) {
+        if (target.depth >= pickedDepth
+            || x < target.left
+            || x >= target.left + target.width
+            || y < target.top
+            || y >= target.top + target.height
+            || target.depth >= gFirstPersonPreviewWallDepths[x]) {
+            continue;
+        }
+
+        FrmImage image;
+        if (image.lock(FrmId(target.object), target.frame, target.rotation)) {
+            const ConstBuffer2D frame = image.getBuffer();
+            if (!frame || frame.width <= 0 || frame.height <= 0) {
+                continue;
+            }
+
+            const int sourceX = (x - target.left) * frame.width / target.width;
+            const int sourceY = (y - target.top) * frame.height / target.height;
+            if (frame.data[sourceY * frame.width + sourceX] == 0) {
+                continue;
+            }
+        }
+
+        pickedObject = target.object;
+        pickedDepth = target.depth;
+    }
+
+    return pickedObject;
+}
+
+Object* tileFirstPersonPreviewPickCritter()
+{
+    return tileFirstPersonPreviewPickCritterAtPosition(gTileWindowWidth / 2, gTileWindowHeight / 2);
+}
+
+Object* tileFirstPersonPreviewPickCritterAt(int screenX, int screenY)
+{
+    Rect isoWindowRect;
+    if (windowGetRect(gIsoWindow, &isoWindowRect) != 0
+        || screenX < isoWindowRect.left
+        || screenX > isoWindowRect.right
+        || screenY < isoWindowRect.top
+        || screenY > isoWindowRect.bottom) {
+        return nullptr;
+    }
+
+    return tileFirstPersonPreviewPickCritterAtPosition(
+        screenX - isoWindowRect.left,
+        screenY - isoWindowRect.top);
+}
+
+bool tileFirstPersonPreviewMove(int relativeDirection)
+{
+    if (!gFirstPersonPreviewEnabled
+        || gFirstPersonPreviewTopologyEnabled
+        || gDude == nullptr
+        || !tileIsValid(gDude->tile)
+        || relativeDirection < 0
+        || relativeDirection > 3) {
+        return false;
+    }
+
+    int actionPoints = -1;
+    if (isInCombat()) {
+        actionPoints = gDude->data.critter.combat.ap + _combat_free_move;
+        if (actionPoints <= 0) {
+            return false;
+        }
+    }
+
+    constexpr double kPi = 3.14159265358979323846;
+    const double targetYaw = (gFirstPersonPreviewYaw + relativeDirection * 90) * kPi / 180.0;
+    const double targetX = sin(targetYaw);
+    const double targetY = -cos(targetYaw);
+    Rotation movementRotation = ROTATION_NE;
+    double bestDot = -std::numeric_limits<double>::infinity();
+    double playerX;
+    double playerY;
+    if (!tileFirstPersonGetWorldPosition(gDude->tile, &playerX, &playerY)) {
+        return false;
+    }
+    for (int rotationIndex = ROTATION_FIRST; rotationIndex < ROTATION_COUNT; rotationIndex++) {
+        const Rotation candidate = static_cast<Rotation>(rotationIndex);
+        const int adjacentTile = tileGetTileInDirection(gDude->tile, candidate, 1);
+        double adjacentX;
+        double adjacentY;
+        if (!tileFirstPersonGetWorldPosition(adjacentTile, &adjacentX, &adjacentY)) {
+            continue;
+        }
+
+        double directionX = adjacentX - playerX;
+        double directionY = adjacentY - playerY;
+        const double directionLength = sqrt(directionX * directionX + directionY * directionY);
+        if (directionLength <= 0.0) {
+            continue;
+        }
+
+        directionX /= directionLength;
+        directionY /= directionLength;
+        const double dot = directionX * targetX + directionY * targetY;
+        if (dot > bestDot) {
+            bestDot = dot;
+            movementRotation = candidate;
+        }
+    }
+
+    if (bestDot == -std::numeric_limits<double>::infinity()) {
+        return false;
+    }
+
+    const int destinationTile = tileGetTileInDirection(gDude->tile, movementRotation, 1);
+    if (!tileIsValid(destinationTile)) {
+        return false;
+    }
+
+    if (reg_anim_begin(ANIMATION_REQUEST_RESERVED) != 0) {
+        return false;
+    }
+    const int result = animationRegisterMoveToTile(gDude, destinationTile, gDude->elevation, actionPoints, 0);
+    const int endResult = reg_anim_end();
+    return result == 0 && endResult == 0;
+}
+
 void tileFirstPersonPreviewRefresh()
 {
     if (!gFirstPersonPreviewEnabled || gTileWindowBuffer == nullptr || gTileWindowRefreshProc == nullptr) {
@@ -1610,6 +1788,9 @@ void tileFirstPersonPreviewRefresh()
         tileRenderFirstPersonPreview();
     }
     gTileWindowRefreshProc(&gTileWindowRect);
+    if (!cursorIsHidden()) {
+        mouseShowCursor();
+    }
 }
 
 void tileFirstPersonPreviewToggleTopology()
