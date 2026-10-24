@@ -16,6 +16,7 @@
 #include "debug.h"
 #include "draw.h"
 #include "game_mouse.h"
+#include "input.h"
 #include "light.h"
 #include "map.h"
 #include "map_edge.h"
@@ -117,6 +118,7 @@ static void tileFirstPersonRenderActor(Object* object, void* context);
 static void tileFirstPersonDrawCrosshair();
 static void tileFirstPersonDrawDiagnosticLine(int x1, int y1, int x2, int y2, Color color);
 static bool tileFirstPersonGetWorldPosition(int tile, double* x, double* y);
+static void tileFirstPersonGetCameraPosition(int tile, MapElevation elevation, double* x, double* y);
 static void roof_fill_push_task_if_in_bounds(std::stack<roof_fill_task>& tasks_stack, int x, int y);
 static void roof_fill_off_process_task(std::stack<roof_fill_task>& tasks_stack, MapElevation elevation, bool on);
 static void tileRenderRoof(const TileFrmId& frmId, int x, int y, Rect* rect, int light);
@@ -150,6 +152,14 @@ static bool gTileEnabled = true;
 static bool gFirstPersonPreviewEnabled = false;
 static bool gFirstPersonPreviewTopologyEnabled = false;
 static int gFirstPersonPreviewYaw = 0;
+static bool gFirstPersonPreviewCameraInitialized = false;
+static int gFirstPersonPreviewCameraTile = -1;
+static MapElevation gFirstPersonPreviewCameraElevation;
+static unsigned int gFirstPersonPreviewCameraStartTime = 0;
+static double gFirstPersonPreviewCameraStartX = 0.0;
+static double gFirstPersonPreviewCameraStartY = 0.0;
+static double gFirstPersonPreviewCameraTargetX = 0.0;
+static double gFirstPersonPreviewCameraTargetY = 0.0;
 static std::vector<double> gFirstPersonPreviewWallDepths;
 static std::vector<TileFirstPersonActorHitTarget> gFirstPersonPreviewActorHitTargets;
 
@@ -862,14 +872,8 @@ static void tileRenderFirstPersonPreview()
 
     double cameraX = SQUARE_GRID_WIDTH / 2.0;
     double cameraY = SQUARE_GRID_HEIGHT / 2.0;
-    int cameraSquareTile = SQUARE_GRID_WIDTH * (SQUARE_GRID_HEIGHT / 2)
-        + SQUARE_GRID_WIDTH / 2;
     if (gDude != nullptr && gDude->elevation == gElevation && tileIsValid(gDude->tile)) {
-        tileFirstPersonGetWorldPosition(gDude->tile, &cameraX, &cameraY);
-        const int playerSquareTile = squareTileFromTile(gDude->tile);
-        if (squareGridTileIsValid(playerSquareTile)) {
-            cameraSquareTile = playerSquareTile;
-        }
+        tileFirstPersonGetCameraPosition(gDude->tile, gDude->elevation, &cameraX, &cameraY);
     }
 
     const double yaw = gFirstPersonPreviewYaw * kPi / 180.0;
@@ -878,51 +882,81 @@ static void tileRenderFirstPersonPreview()
     const double cameraPlaneX = -directionY * kFieldOfViewScale;
     const double cameraPlaneY = directionX * kFieldOfViewScale;
 
-    int floorTextureSquareTile = -1;
-    int nearestFloorDistance = std::numeric_limits<int>::max();
+    std::vector<FrmImage> floorTextures;
+    std::vector<int> floorTextureIndices(FrmId::kMaxFrameId + 1, -1);
     for (int squareTile = 0; squareTile < SQUARE_GRID_SIZE; squareTile++) {
-        const TileFrameId frameId =
-            FloorTileFrmId(gTileSquares[gElevation]->tileFid[squareTile]).frameId<TileFrameId>();
+        const FloorTileFrmId floorTileFrmId(gTileSquares[gElevation]->tileFid[squareTile]);
+        if ((floorTileFrmId.flags() & TileFlags::TemporarilyHidden) != TileFlags::None) {
+            continue;
+        }
+
+        const TileFrameId frameId = floorTileFrmId.frameId<TileFrameId>();
         if (frameId == TileFrameId::Invalid
             || frameId == TileFrameId::Reserved
             || frameId == TileFrameId::Grid) {
             continue;
         }
 
-        const int distance = abs(squareTile % SQUARE_GRID_WIDTH - cameraSquareTile % SQUARE_GRID_WIDTH)
-            + abs(squareTile / SQUARE_GRID_WIDTH - cameraSquareTile / SQUARE_GRID_WIDTH);
-        if (distance < nearestFloorDistance) {
-            nearestFloorDistance = distance;
-            floorTextureSquareTile = squareTile;
+        const int frameIndex = static_cast<int>(frameId);
+        if (frameIndex < 0 || frameIndex >= static_cast<int>(floorTextureIndices.size())
+            || floorTextureIndices[frameIndex] != -1) {
+            continue;
+        }
+
+        floorTextureIndices[frameIndex] = -2;
+        floorTextures.emplace_back();
+        if (floorTextures.back().lock(FrmId(frameId))) {
+            floorTextureIndices[frameIndex] = static_cast<int>(floorTextures.size()) - 1;
         }
     }
 
-    FrmImage floorTexture;
-    if (floorTextureSquareTile >= 0) {
-        const FloorTileFrmId floorFrmId(
-            gTileSquares[gElevation]->tileFid[floorTextureSquareTile]);
-        floorTexture.lock(FrmId(floorFrmId.frameId<TileFrameId>()));
-    }
-    const ConstBuffer2D floorTextureFrame = floorTexture.getBuffer();
-    if (floorTextureFrame && floorTextureFrame.width > 0 && floorTextureFrame.height > 0) {
-        for (int y = horizonY + 1; y < gTileWindowHeight; y++) {
-            const double rowDistance = (gTileWindowHeight * 0.5) / (y - horizonY);
-            for (int x = 0; x < gTileWindowWidth; x++) {
-                const double cameraOffset = 2.0 * x / gTileWindowWidth - 1.0;
-                const double rayDirectionX = directionX + cameraPlaneX * cameraOffset;
-                const double rayDirectionY = directionY + cameraPlaneY * cameraOffset;
-                const double worldX = cameraX + rayDirectionX * rowDistance;
-                const double worldY = cameraY + rayDirectionY * rowDistance;
-                const double fractionX = worldX - floor(worldX);
-                const double fractionY = worldY - floor(worldY);
-                const int textureX = std::min(floorTextureFrame.width - 1,
-                    static_cast<int>(fractionX * floorTextureFrame.width));
-                const int textureY = std::min(floorTextureFrame.height - 1,
-                    static_cast<int>(fractionY * floorTextureFrame.height));
-                const unsigned char color = floorTextureFrame.data[textureY * floorTextureFrame.width + textureX];
-                if (color != 0) {
-                    gTileWindowBuffer[y * gTileWindowPitch + x] = color;
-                }
+    for (int y = horizonY + 1; y < gTileWindowHeight; y++) {
+        const double rowDistance = (gTileWindowHeight * 0.5) / (y - horizonY);
+        for (int x = 0; x < gTileWindowWidth; x++) {
+            const double cameraOffset = 2.0 * x / gTileWindowWidth - 1.0;
+            const double rayDirectionX = directionX + cameraPlaneX * cameraOffset;
+            const double rayDirectionY = directionY + cameraPlaneY * cameraOffset;
+            const double worldX = cameraX + rayDirectionX * rowDistance;
+            const double worldY = cameraY + rayDirectionY * rowDistance;
+            const int mapX = static_cast<int>(floor(worldX));
+            const int mapY = static_cast<int>(floor(worldY));
+            if (mapX < 0 || mapX >= SQUARE_GRID_WIDTH
+                || mapY < 0 || mapY >= SQUARE_GRID_HEIGHT) {
+                continue;
+            }
+
+            const int squareTile = mapY * SQUARE_GRID_WIDTH + mapX;
+            const FloorTileFrmId floorTileFrmId(gTileSquares[gElevation]->tileFid[squareTile]);
+            if ((floorTileFrmId.flags() & TileFlags::TemporarilyHidden) != TileFlags::None) {
+                continue;
+            }
+
+            const int frameIndex = static_cast<int>(floorTileFrmId.frameId<TileFrameId>());
+            if (frameIndex < 0 || frameIndex >= static_cast<int>(floorTextureIndices.size())) {
+                continue;
+            }
+
+            const int textureIndex = floorTextureIndices[frameIndex];
+            if (textureIndex < 0) {
+                continue;
+            }
+
+            const ConstBuffer2D floorTextureFrame = floorTextures[textureIndex].getBuffer();
+            if (!floorTextureFrame || floorTextureFrame.width <= 0 || floorTextureFrame.height <= 0) {
+                continue;
+            }
+
+            const double fractionX = worldX - floor(worldX);
+            const double fractionY = worldY - floor(worldY);
+            const double textureU = 0.5 + (fractionX - fractionY) * 0.5;
+            const double textureV = (fractionX + fractionY) * 0.5;
+            const int textureX = std::min(floorTextureFrame.width - 1,
+                static_cast<int>(textureU * floorTextureFrame.width));
+            const int textureY = std::min(floorTextureFrame.height - 1,
+                static_cast<int>(textureV * floorTextureFrame.height));
+            const unsigned char color = floorTextureFrame.data[textureY * floorTextureFrame.width + textureX];
+            if (color != 0) {
+                gTileWindowBuffer[y * gTileWindowPitch + x] = color;
             }
         }
     }
@@ -1085,13 +1119,9 @@ static void tileRenderFirstPersonPreview()
                 break;
             }
         }
-        bufferDrawLine(gTileWindowBuffer,
-            gTileWindowPitch,
-            x,
-            wallTop,
-            x,
-            wallBottom,
-            wallColor);
+        for (int y = wallTop; y <= wallBottom; y++) {
+            gTileWindowBuffer[y * gTileWindowPitch + x] = wallColor;
+        }
     }
 
     TileFirstPersonActorRenderContext actorContext = {
@@ -1206,11 +1236,14 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
     const int screenCenterX = static_cast<int>(
         (gTileWindowWidth / 2.0) * (1.0 + transformX / transformY));
     const double projectionScale = gTileWindowHeight / transformY;
-    const int spriteHeight = std::min(gTileWindowHeight * 2,
-        std::max(1, static_cast<int>(projectionScale * 0.9)));
-    const int spriteWidth = std::max(1, static_cast<int>(projectionScale * 0.42));
-    const int spriteTop = renderContext->horizonY - spriteHeight / 2;
-    const int spriteBottom = spriteTop + spriteHeight;
+    const int maximumActorHeight = std::max(1, static_cast<int>(gTileWindowHeight * 0.8));
+    const int projectedActorHeight = std::max(1, static_cast<int>(projectionScale * 0.9));
+    const int actorHeight = std::min(maximumActorHeight, projectedActorHeight);
+    const int actorBottom = std::min(gTileWindowHeight,
+        renderContext->horizonY + static_cast<int>(projectionScale * 0.42));
+    const int spriteWidth = std::max(1, static_cast<int>(actorHeight * 0.42 / 0.9));
+    const int spriteTop = actorBottom - actorHeight;
+    const int spriteBottom = actorBottom;
     const int spriteLeft = screenCenterX - spriteWidth / 2;
     const int spriteRight = spriteLeft + spriteWidth;
     Color actorColor = COLOR_AMBER;
@@ -1265,12 +1298,10 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         if (frame.width <= 0 || frame.height <= 0) {
             return;
         }
-        const int artHeight = std::min(gTileWindowHeight * 2,
-            std::max(1, static_cast<int>(projectionScale * 0.9)));
+        const int artHeight = actorHeight;
         const int artWidth = std::max(1,
             static_cast<int>(artHeight * frame.width / static_cast<double>(frame.height)));
-        const int artBottom = renderContext->horizonY
-            + static_cast<int>(projectionScale * 0.42);
+        const int artBottom = actorBottom;
         const int artTop = artBottom - artHeight;
         const int artLeft = screenCenterX - artWidth / 2;
         renderContext->hitTargets->push_back({
@@ -1320,7 +1351,7 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         spriteLeft,
         spriteTop,
         spriteWidth,
-        spriteHeight,
+        actorHeight,
         object->frame,
         facingRotation,
     });
@@ -1331,7 +1362,7 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
 
         const double normalizedX = (x - spriteLeft) / static_cast<double>(spriteWidth);
         for (int y = std::max(0, spriteTop); y < std::min(gTileWindowHeight, spriteBottom); y++) {
-            const double normalizedY = (y - spriteTop) / static_cast<double>(spriteHeight);
+            const double normalizedY = (y - spriteTop) / static_cast<double>(actorHeight);
             double silhouetteWidth;
             if (normalizedY < 0.2) {
                 silhouetteWidth = 0.2;
@@ -1362,6 +1393,52 @@ static bool tileFirstPersonGetWorldPosition(int tile, double* x, double* y)
     *x = (tile % gHexGridWidth) / 2.0 + 0.25;
     *y = (tile / gHexGridWidth) / 2.0 + 0.25;
     return true;
+}
+
+static void tileFirstPersonGetCameraPosition(int tile, MapElevation elevation, double* x, double* y)
+{
+    double targetX;
+    double targetY;
+    if (!tileFirstPersonGetWorldPosition(tile, &targetX, &targetY)) {
+        *x = SQUARE_GRID_WIDTH / 2.0;
+        *y = SQUARE_GRID_HEIGHT / 2.0;
+        gFirstPersonPreviewCameraInitialized = false;
+        return;
+    }
+
+    const unsigned int now = getTicks();
+    constexpr unsigned int kCameraLerpDuration = 180;
+    if (!gFirstPersonPreviewCameraInitialized
+        || gFirstPersonPreviewCameraElevation != elevation) {
+        gFirstPersonPreviewCameraInitialized = true;
+        gFirstPersonPreviewCameraTile = tile;
+        gFirstPersonPreviewCameraElevation = elevation;
+        gFirstPersonPreviewCameraStartTime = now;
+        gFirstPersonPreviewCameraStartX = targetX;
+        gFirstPersonPreviewCameraStartY = targetY;
+        gFirstPersonPreviewCameraTargetX = targetX;
+        gFirstPersonPreviewCameraTargetY = targetY;
+    } else if (gFirstPersonPreviewCameraTile != tile) {
+        const double progress = std::min(1.0,
+            static_cast<double>(getTicksBetween(now, gFirstPersonPreviewCameraStartTime))
+                / kCameraLerpDuration);
+        gFirstPersonPreviewCameraStartX = gFirstPersonPreviewCameraStartX
+            + (gFirstPersonPreviewCameraTargetX - gFirstPersonPreviewCameraStartX) * progress;
+        gFirstPersonPreviewCameraStartY = gFirstPersonPreviewCameraStartY
+            + (gFirstPersonPreviewCameraTargetY - gFirstPersonPreviewCameraStartY) * progress;
+        gFirstPersonPreviewCameraTargetX = targetX;
+        gFirstPersonPreviewCameraTargetY = targetY;
+        gFirstPersonPreviewCameraStartTime = now;
+        gFirstPersonPreviewCameraTile = tile;
+    }
+
+    const double progress = std::min(1.0,
+        static_cast<double>(getTicksBetween(now, gFirstPersonPreviewCameraStartTime))
+            / kCameraLerpDuration);
+    *x = gFirstPersonPreviewCameraStartX
+        + (gFirstPersonPreviewCameraTargetX - gFirstPersonPreviewCameraStartX) * progress;
+    *y = gFirstPersonPreviewCameraStartY
+        + (gFirstPersonPreviewCameraTargetY - gFirstPersonPreviewCameraStartY) * progress;
 }
 
 static void tileFirstPersonDrawCrosshair()
@@ -1824,6 +1901,7 @@ void tileFirstPersonPreviewToggle()
     }
 
     gFirstPersonPreviewEnabled = !gFirstPersonPreviewEnabled;
+    gFirstPersonPreviewCameraInitialized = false;
     if (gFirstPersonPreviewEnabled) {
         gFirstPersonPreviewTopologyEnabled = false;
         gFirstPersonPreviewYaw = 0;

@@ -3,6 +3,11 @@
 $cmake = 'C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'
 & $cmake --build 'out\build\windows-x64-vs18' --config Release --target fallout2-ce --parallel
 
+
+$cmake = 'C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'
+& $cmake --build 'out\build\windows-x64-vs18' --config Release --target fallout2-ce --parallel
+
+
 ## Copy and run
 
 $game = 'C:\Users\Flyin\source\repos\Fo2Build'

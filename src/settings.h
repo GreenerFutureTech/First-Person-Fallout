@@ -98,7 +98,7 @@ struct SystemSettings {
 struct ScreenSettings {
     int resolution_x = 640;
     int resolution_y = 480;
-    WindowMode windowed = WindowMode::Fullscreen;
+    WindowMode windowed = WindowMode::Windowed;
     bool mouse_lock = false;
     int scale = 1;
 };

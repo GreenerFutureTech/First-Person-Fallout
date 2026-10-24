@@ -95,7 +95,7 @@ static void gameFreeGlobalVars();
 static bool tryLoadBaseCEModAtPath(const char* path, bool* found, bool* openFailed);
 static int gameDbInit();
 static void showSplash();
-static bool gameFirstPersonPreviewSetCombatCursor(bool enabled);
+static bool gameFirstPersonPreviewSetMouseReleased(bool enabled);
 
 inline constexpr char kBaseModPath[] = "ce.dat";
 
@@ -108,7 +108,7 @@ static char _aBuildHash[] = _BUILD_HASH;
 
 // 0x5186B4 game_ui_disabled
 static bool gGameUiDisabled = false;
-static bool gFirstPersonPreviewCombatMouseReleased = false;
+static bool gFirstPersonPreviewMouseReleased = false;
 
 // 0x5186B8 game_state_cur
 static GameState gGameState = GameState::Normal;
@@ -554,16 +554,12 @@ void gameExit()
 int gameHandleKey(int eventCode, bool isInCombatMode)
 {
     if (tileFirstPersonPreviewIsEnabled()) {
-        if (isInCombat()) {
-            if (gFirstPersonPreviewCombatMouseReleased != !mouseDeviceUsesRelativeMode()) {
-                gameFirstPersonPreviewSetCombatCursor(gFirstPersonPreviewCombatMouseReleased);
-            } else if (gFirstPersonPreviewCombatMouseReleased) {
-                mouseShowCursor();
-            } else {
-                mouseHideCursor();
-            }
-        } else if (gFirstPersonPreviewCombatMouseReleased) {
-            gameFirstPersonPreviewSetCombatCursor(false);
+        if (gFirstPersonPreviewMouseReleased != !mouseDeviceUsesRelativeMode()) {
+            gameFirstPersonPreviewSetMouseReleased(gFirstPersonPreviewMouseReleased);
+        } else if (gFirstPersonPreviewMouseReleased) {
+            mouseShowCursor();
+        } else {
+            mouseHideCursor();
         }
     }
 
@@ -578,6 +574,7 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
     // NOTE: Uninline.
     if (gameGetState() == GameState::DialogRequested) {
         const bool firstPersonPreviewWasEnabled = tileFirstPersonPreviewIsEnabled();
+        const bool firstPersonPreviewMouseWasReleased = gFirstPersonPreviewMouseReleased;
         if (firstPersonPreviewWasEnabled) {
             mouseShowCursor();
             if (!mouseDeviceSetRelativeModeForced(false)) {
@@ -588,33 +585,29 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
         _gdialogSystemEnter();
 
         if (firstPersonPreviewWasEnabled && tileFirstPersonPreviewIsEnabled()) {
-            if (mouseDeviceSetRelativeModeForced(true)) {
-                mouseHideCursor();
-            } else {
-                debugPrint("Failed to restore first-person mouse mode: %s\n", SDL_GetError());
-            }
+            gameFirstPersonPreviewSetMouseReleased(firstPersonPreviewMouseWasReleased);
         }
     }
 
     if (tileFirstPersonPreviewIsEnabled()
         && eventCode == INPUT_EVENT_FIRST_PERSON_RIGHT_CLICK) {
-        if (isInCombat()) {
-            gameFirstPersonPreviewSetCombatCursor(true);
-        }
+        gameFirstPersonPreviewSetMouseReleased(true);
         return 0;
     }
 
     if (tileFirstPersonPreviewIsEnabled()
         && (eventCode == -2 || eventCode == INPUT_EVENT_FIRST_PERSON_LEFT_CLICK)) {
         const int mouseState = mouseGetEvent();
+        if (gFirstPersonPreviewMouseReleased
+            && (mouseState & MOUSE_EVENT_RIGHT_BUTTON_DOWN) != 0
+            && (mouseState & MOUSE_EVENT_RIGHT_BUTTON_REPEAT) == 0) {
+            gameFirstPersonPreviewSetMouseReleased(false);
+            return 0;
+        }
+
         if (isInCombat()) {
-            if (gFirstPersonPreviewCombatMouseReleased
-                && (mouseState & MOUSE_EVENT_RIGHT_BUTTON_DOWN) != 0
-                && (mouseState & MOUSE_EVENT_RIGHT_BUTTON_REPEAT) == 0) {
-                gameFirstPersonPreviewSetCombatCursor(false);
-                return 0;
-            }
-            if (eventCode == -2
+            if (gFirstPersonPreviewMouseReleased
+                && eventCode == -2
                 && (mouseState & MOUSE_EVENT_LEFT_BUTTON_UP) != 0
                 && gameMouseGetMode() == GAME_MOUSE_MODE_CROSSHAIR) {
                 int mouseX;
@@ -630,15 +623,36 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                 return 0;
             }
         } else {
-            if (eventCode == INPUT_EVENT_FIRST_PERSON_LEFT_CLICK
-                || ((mouseState & MOUSE_EVENT_LEFT_BUTTON_DOWN) != 0
-                    && (mouseState & MOUSE_EVENT_LEFT_BUTTON_REPEAT) == 0)) {
+            if (eventCode == INPUT_EVENT_FIRST_PERSON_LEFT_CLICK) {
                 Object* critter = tileFirstPersonPreviewPickCritter();
                 if (critter != nullptr && _obj_action_can_talk_to(critter)) {
                     actionTalk(gDude, critter);
                 }
+                return 0;
             }
-            return 0;
+
+            if (gFirstPersonPreviewMouseReleased) {
+                int mouseX;
+                int mouseY;
+                mouseGetPosition(&mouseX, &mouseY);
+                Rect isoWindowRect;
+                if (windowGetRect(gIsoWindow, &isoWindowRect) == 0
+                    && mouseX >= isoWindowRect.left
+                    && mouseX <= isoWindowRect.right
+                    && mouseY >= isoWindowRect.top
+                    && mouseY <= isoWindowRect.bottom) {
+                    if ((mouseState & MOUSE_EVENT_LEFT_BUTTON_DOWN) != 0
+                        && (mouseState & MOUSE_EVENT_LEFT_BUTTON_REPEAT) == 0) {
+                        Object* critter = tileFirstPersonPreviewPickCritterAt(mouseX, mouseY);
+                        if (critter != nullptr && _obj_action_can_talk_to(critter)) {
+                            actionTalk(gDude, critter);
+                        }
+                    }
+                    return 0;
+                }
+            } else {
+                return 0;
+            }
         }
     }
 
@@ -1068,7 +1082,7 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
         if (tileFirstPersonPreviewIsEnabled()) {
             tileFirstPersonPreviewToggle();
             mouseShowCursor();
-            gFirstPersonPreviewCombatMouseReleased = false;
+            gFirstPersonPreviewMouseReleased = false;
             if (!mouseDeviceSetRelativeModeForced(false)) {
                 debugPrint("Failed to restore mouse mode: %s\n", SDL_GetError());
             }
@@ -1121,11 +1135,11 @@ void gameUiDisable(int allowScrolling)
     }
 }
 
-static bool gameFirstPersonPreviewSetCombatCursor(bool enabled)
+static bool gameFirstPersonPreviewSetMouseReleased(bool enabled)
 {
     if (mouseDeviceUsesRelativeMode() == !enabled
         || mouseDeviceSetRelativeModeForced(!enabled)) {
-        gFirstPersonPreviewCombatMouseReleased = enabled;
+        gFirstPersonPreviewMouseReleased = enabled;
         if (enabled) {
             mouseShowCursor();
         } else {
@@ -1134,7 +1148,7 @@ static bool gameFirstPersonPreviewSetCombatCursor(bool enabled)
         return true;
     }
 
-    debugPrint("Failed to change first-person combat mouse mode: %s\n", SDL_GetError());
+    debugPrint("Failed to change first-person mouse mode: %s\n", SDL_GetError());
     return false;
 }
 

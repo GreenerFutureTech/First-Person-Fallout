@@ -221,7 +221,9 @@ at the player's square-grid cell and facing, raycasts against blocking wall
 objects, blocking scenery, and closed doors, and draws
 flat-color perspective columns. Other critters appear as camera-facing
 billboards using their current Fallout FRM frame, scaled by perspective and
-occluded by the raycast wall depth. A small color marker shows party members
+occluded by the raycast wall depth. Their size is capped at 80% of the
+viewport height, with the frame's aspect ratio preserved and feet grounded
+at the projected floor position. A small color marker shows party members
 and same-team critters in green, non-party critters in amber outside combat,
 and opposing teams in red during combat. Mouse look turns the view; F9 still
 switches to the top-down source diagnostic. F11 restores the isometric view
@@ -232,14 +234,19 @@ path. During combat, movement spends the existing movement AP (including
 bonus move AP) and is unavailable when no movement AP remains. Actor and
 camera positions retain half-square offsets from the underlying hex tiles so
 nearby critters do not collapse onto the player's exact diagnostic position.
+The camera interpolates between the player's hex tile positions over a short
+transition, rather than interpreting isometric animation pixels as first-
+person world coordinates.
 
-During turn-based combat, mouse-look remains active by default. Right-click
-to show the normal cursor and freeze the view; select the weapon/action from
-the interface bar, then click a visible enemy to send that target to Fallout's
-existing combat attack logic. Right-click again to return to mouse-look.
-Combat entry defaults to mouse-look, and combat exit restores mouse-look if
-the cursor was active. Attack range, line of sight, hit chance, action points,
-and turn order remain controlled by the original combat system.
+During real-time operation and turn-based combat, mouse-look remains active
+by default. Right-click to show the normal cursor and freeze the view. In
+real-time, use the cursor on the interface bar or click a visible critter to
+talk; clicks in the 3D viewport do not fall through to isometric picking.
+During combat, select the weapon/action from the interface bar, then click a
+visible enemy to send that target to Fallout's existing combat attack logic.
+Right-click again to return to mouse-look. Attack range, line of sight, hit
+chance, action points, and turn order remain controlled by the original
+combat system.
 
 Graybox wall side faces use distinct saturated debug colors instead of gray
 and brown shades that can disappear against the sky and ground.
@@ -259,19 +266,22 @@ windows.
 
 ### 4. Add a small texture proof
 
-The F11 graybox now finds the nearest valid floor FRM on the loaded elevation
-and projects that single palette-indexed image across the floor plane. Zero
-pixels retain the graybox ground color. This is an intentionally crude proof:
-it ignores per-cell floor changes and repeats the isometric tile image in a
-square world pattern. Compare its transparency, seams, orientation, and baked
-lighting against the graybox; use `ce-frm2png` to inspect a candidate frame.
-If the result is unsuitable, record whether a cropped or authored tile
-texture is needed before generalizing this renderer.
+The F11 graybox samples the floor FRM assigned to each square-grid cell rather
+than repeating one nearby floor across the entire map. It maps each square
+world cell onto the diamond-shaped source image, avoiding the transparent
+corners that previously left irregular holes in the ground. Palette index
+zero retains the graybox ground color; cells with hidden or unavailable floor
+art also retain that fallback. This is still a stylized projection of
+isometric art. Check texture orientation, seams, transparency, and baked
+lighting on Arroyo village and an interior map.
 
-Once a floor image has been validated, repeat the experiment with one wall FRM
-on a correctly oriented wall segment. Do not project the whole isometric wall
-sprite as if it were a seamless rectangular material without inspecting it
-first.
+Wall faces remain flat-color graybox slabs. Fallout wall FRMs are complete
+isometric scene sprites, not seamless wall-surface textures; projecting them
+onto raycast faces stretches rooflines, ground details, and transparent
+regions into distracting bands. The Arroyo test confirmed this mismatch, so
+do not map raw wall FRMs onto these faces. Before adding wall art, identify a
+valid wall-surface asset or a deliberate extraction/cropping and mapping
+strategy, then validate it against the original isometric view.
 
 ### 5. Expand movement, collision, and synchronization
 
