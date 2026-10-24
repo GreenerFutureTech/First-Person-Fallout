@@ -199,6 +199,13 @@ markers show blocking/non-blocking walls, doors, scenery, critters, and items.
 The player is a white point. Press F9 again to return to the graybox preview
 and F11 to exit to the original view.
 
+Wall and scenery markers include a colored tick showing the object's six-way
+rotation: magenta is NE, cyan is E, green is SE, blue is SW, pink is W, and
+white is NW. A 2x2 pixel block at the cell's upper-right corner identifies
+prototype corner flags: cyan is east, yellow is north, magenta is south, blue
+is west, and white means multiple corner flags are set. The center marker
+retains its existing color for object type/blocking state.
+
 Use this view to inspect whether object positions and floor regions give us
 enough information to build useful wall segments and openings. It is a
 diagnostic of source data, not a claim that wall orientation or geometry has
@@ -210,8 +217,8 @@ geometry temporary; do not serialize it into saves or map files.
 ### 3. Render the gray-box scene
 
 F11 now renders a first map-connected graybox in the map viewport. It starts
-at the player's square-grid cell and facing, raycasts against wall objects
-(including non-blocking walls), blocking scenery, and closed doors, and draws
+at the player's square-grid cell and facing, raycasts against blocking wall
+objects, blocking scenery, and closed doors, and draws
 flat-color perspective columns. Other critters appear as camera-facing
 billboards using their current Fallout FRM frame, scaled by perspective and
 occluded by the raycast wall depth. A small color marker shows party members
@@ -225,13 +232,18 @@ player's exact diagnostic position.
 Graybox wall side faces use distinct saturated debug colors instead of gray
 and brown shades that can disappear against the sky and ground.
 
-This is deliberately a coarse first pass, not final topology: each blocking
-object is treated as a full square-grid cell, and wall orientation, corners,
-floor boundaries, and elevations have not yet been reconstructed as surfaces.
-Open/non-blocking doors remain openings. Compare the view against F9 and the
-isometric map to identify where this cell-based approximation fails before
-adding texture or movement. Map/object refreshes redraw the preview; the
-interface bar and modal UI remain existing windows.
+Wall objects with the prototype's North/South or East/West orientation are
+currently drawn as thin, finite-thickness wall slabs across their square-grid
+cell, using prototype orientation rather than the object's six-way art
+rotation. This avoids the angle-dependent gaps of zero-thickness planes.
+Non-blocking and light-through wall/scenery objects are treated as openings,
+matching the game's separate movement and sight flags. Walls marked as
+corners, blocking scenery, and closed doors still use the conservative
+full-cell blocker when they block sight. This is an incremental geometry
+improvement, not a complete reconstruction of wall segments: validate it
+against representative maps before extending corner handling. Map/object
+refreshes redraw the preview; the interface bar and modal UI remain existing
+windows.
 
 ### 4. Add a small texture proof
 

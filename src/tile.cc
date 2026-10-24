@@ -71,6 +71,13 @@ struct TileFirstPersonTopologyRenderContext {
 struct TileFirstPersonGrayboxRenderContext {
     MapElevation elevation;
     unsigned char* wallCells;
+    unsigned char* wallOrientations;
+};
+
+enum TileFirstPersonWallOrientation : unsigned char {
+    TILE_FIRST_PERSON_WALL_ORIENTATION_CELL,
+    TILE_FIRST_PERSON_WALL_ORIENTATION_NORTH_SOUTH,
+    TILE_FIRST_PERSON_WALL_ORIENTATION_EAST_WEST,
 };
 
 struct TileFirstPersonActorRenderContext {
@@ -93,6 +100,7 @@ static void tileFirstPersonTopologyMarkObject(Object* object, void* context);
 static void tileFirstPersonGrayboxMarkObject(Object* object, void* context);
 static void tileFirstPersonRenderActor(Object* object, void* context);
 static void tileFirstPersonDrawCrosshair();
+static void tileFirstPersonDrawDiagnosticLine(int x1, int y1, int x2, int y2, Color color);
 static bool tileFirstPersonGetWorldPosition(int tile, double* x, double* y);
 static void roof_fill_push_task_if_in_bounds(std::stack<roof_fill_task>& tasks_stack, int x, int y);
 static void roof_fill_off_process_task(std::stack<roof_fill_task>& tasks_stack, MapElevation elevation, bool on);
@@ -826,9 +834,11 @@ static void tileRenderFirstPersonPreview()
         COLOR_DULL_BROWN);
 
     unsigned char wallCells[SQUARE_GRID_SIZE] = {};
+    unsigned char wallOrientations[SQUARE_GRID_SIZE] = {};
     TileFirstPersonGrayboxRenderContext context = {
         gElevation,
         wallCells,
+        wallOrientations,
     };
     objectVisitAll(tileFirstPersonGrayboxMarkObject, &context);
 
@@ -927,9 +937,82 @@ static void tileRenderFirstPersonPreview()
             * deltaDistanceY;
         int side = 0;
         unsigned char wallType = 0;
-
+        double wallDistance = std::numeric_limits<double>::infinity();
+        double cellEntryDistance = 0.0;
         while (mapX >= 0 && mapX < SQUARE_GRID_WIDTH
             && mapY >= 0 && mapY < SQUARE_GRID_HEIGHT) {
+            const int cellIndex = mapY * SQUARE_GRID_WIDTH + mapX;
+            wallType = wallCells[cellIndex];
+            if (wallType != 0) {
+                const TileFirstPersonWallOrientation wallOrientation =
+                    static_cast<TileFirstPersonWallOrientation>(wallOrientations[cellIndex]);
+                if (wallOrientation == TILE_FIRST_PERSON_WALL_ORIENTATION_CELL) {
+                    wallDistance = std::max(0.1, cellEntryDistance);
+                    break;
+                }
+
+                const double cellExitDistance = std::min(sideDistanceX, sideDistanceY);
+                constexpr double kIntersectionEpsilon = 1.0e-8;
+                constexpr double kWallThickness = 0.2;
+                const bool wallRunsNorthSouth =
+                    wallOrientation == TILE_FIRST_PERSON_WALL_ORIENTATION_NORTH_SOUTH;
+                const double wallMinX = wallRunsNorthSouth
+                    ? mapX + 0.5 - kWallThickness / 2.0
+                    : mapX;
+                const double wallMaxX = wallRunsNorthSouth
+                    ? mapX + 0.5 + kWallThickness / 2.0
+                    : mapX + 1.0;
+                const double wallMinY = wallRunsNorthSouth
+                    ? mapY
+                    : mapY + 0.5 - kWallThickness / 2.0;
+                const double wallMaxY = wallRunsNorthSouth
+                    ? mapY + 1.0
+                    : mapY + 0.5 + kWallThickness / 2.0;
+                double nearX = -std::numeric_limits<double>::infinity();
+                double farX = std::numeric_limits<double>::infinity();
+                double nearY = -std::numeric_limits<double>::infinity();
+                double farY = std::numeric_limits<double>::infinity();
+                bool rayIntersectsWallBounds = true;
+                if (fabs(rayDirectionX) <= kIntersectionEpsilon) {
+                    rayIntersectsWallBounds = cameraX >= wallMinX - kIntersectionEpsilon
+                        && cameraX <= wallMaxX + kIntersectionEpsilon;
+                } else {
+                    nearX = (wallMinX - cameraX) / rayDirectionX;
+                    farX = (wallMaxX - cameraX) / rayDirectionX;
+                    if (nearX > farX) {
+                        std::swap(nearX, farX);
+                    }
+                }
+
+                if (rayIntersectsWallBounds) {
+                    if (fabs(rayDirectionY) <= kIntersectionEpsilon) {
+                        rayIntersectsWallBounds = cameraY >= wallMinY - kIntersectionEpsilon
+                            && cameraY <= wallMaxY + kIntersectionEpsilon;
+                    } else {
+                        nearY = (wallMinY - cameraY) / rayDirectionY;
+                        farY = (wallMaxY - cameraY) / rayDirectionY;
+                        if (nearY > farY) {
+                            std::swap(nearY, farY);
+                        }
+                    }
+                }
+
+                const double wallEntryDistance = std::max(nearX, nearY);
+                const double wallExitDistance = std::min(farX, farY);
+                const double clippedWallEntryDistance =
+                    std::max(cellEntryDistance, wallEntryDistance);
+                if (rayIntersectsWallBounds
+                    && wallExitDistance >= clippedWallEntryDistance - kIntersectionEpsilon
+                    && clippedWallEntryDistance <= cellExitDistance + kIntersectionEpsilon) {
+                    wallDistance = std::max(0.1, clippedWallEntryDistance);
+                    if (wallEntryDistance >= cellEntryDistance - kIntersectionEpsilon) {
+                        side = nearX > nearY ? 0 : 1;
+                    }
+                    break;
+                }
+            }
+
+            cellEntryDistance = std::min(sideDistanceX, sideDistanceY);
             if (sideDistanceX < sideDistanceY) {
                 sideDistanceX += deltaDistanceX;
                 mapX += stepX;
@@ -945,30 +1028,20 @@ static void tileRenderFirstPersonPreview()
                 break;
             }
 
-            wallType = wallCells[mapY * SQUARE_GRID_WIDTH + mapX];
-            if (wallType != 0) {
-                break;
-            }
         }
 
-        if (wallType == 0) {
+        if (wallType == 0
+            || wallDistance == std::numeric_limits<double>::infinity()) {
             continue;
         }
 
-        const double perpendicularDistance = std::max(0.1,
-            side == 0
-                ? sideDistanceX - deltaDistanceX
-                : sideDistanceY - deltaDistanceY);
-        wallDepths[x] = perpendicularDistance;
+        wallDepths[x] = wallDistance;
         const int wallHeight = std::min(gTileWindowHeight,
-            static_cast<int>(gTileWindowHeight / perpendicularDistance));
+            static_cast<int>(gTileWindowHeight / wallDistance));
         const int wallTop = std::max(0, horizonY - wallHeight / 2);
         const int wallBottom = std::min(gTileWindowHeight - 1, horizonY + wallHeight / 2);
         Color wallColor = COLOR_LIGHT_RED;
         switch (wallType) {
-        case 2:
-            wallColor = COLOR_AMBER;
-            break;
         case 3:
             wallColor = COLOR_LIGHT_GOLD;
             break;
@@ -983,9 +1056,6 @@ static void tileRenderFirstPersonPreview()
             switch (wallType) {
             case 1:
                 wallColor = COLOR_DARK_RED;
-                break;
-            case 2:
-                wallColor = COLOR_BLUE_2;
                 break;
             case 3:
                 wallColor = COLOR_MAGENTA;
@@ -1036,19 +1106,34 @@ static void tileFirstPersonGrayboxMarkObject(Object* object, void* context)
         return;
     }
 
+    if ((object->flags & (OBJECT_NO_BLOCK | OBJECT_LIGHT_THRU)) != OBJECT_NONE) {
+        return;
+    }
+
     const int squareTile = squareTileFromTile(object->tile);
     if (!squareGridTileIsValid(squareTile)) {
         return;
     }
 
     unsigned char wallType = 0;
+    TileFirstPersonWallOrientation wallOrientation =
+        TILE_FIRST_PERSON_WALL_ORIENTATION_CELL;
     if (objectType == OBJ_TYPE_WALL) {
-        wallType = (object->flags & OBJECT_NO_BLOCK) == OBJECT_NONE ? 1 : 2;
-    } else {
-        if ((object->flags & OBJECT_NO_BLOCK) != OBJECT_NONE) {
-            return;
+        wallType = 1;
+        Proto* proto = nullptr;
+        if (protoGetProto(object, &proto) == 0) {
+            constexpr unsigned int kCornerFlags = PROTO_EXT_FLAG_NORTH_CORNER
+                | PROTO_EXT_FLAG_SOUTH_CORNER
+                | PROTO_EXT_FLAG_EAST_CORNER
+                | PROTO_EXT_FLAG_WEST_CORNER;
+            const unsigned int extendedFlags = proto->wall.extendedFlags;
+            if ((extendedFlags & kCornerFlags) == 0) {
+                wallOrientation = (extendedFlags & PROTO_EXT_FLAG_HIDDEN) != 0
+                    ? TILE_FIRST_PERSON_WALL_ORIENTATION_EAST_WEST
+                    : TILE_FIRST_PERSON_WALL_ORIENTATION_NORTH_SOUTH;
+            }
         }
-
+    } else {
         Proto* proto;
         if (protoGetProto(object, &proto) == 0 && proto->scenery.type == SCENERY_TYPE_DOOR) {
             wallType = 3;
@@ -1058,8 +1143,9 @@ static void tileFirstPersonGrayboxMarkObject(Object* object, void* context)
     }
 
     unsigned char& cellWallType = renderContext->wallCells[squareTile];
-    if (cellWallType == 0 || cellWallType == 2 || wallType == 3) {
+    if (cellWallType == 0 || wallType == 3) {
         cellWallType = wallType;
+        renderContext->wallOrientations[squareTile] = wallOrientation;
     }
 }
 
@@ -1273,6 +1359,34 @@ static void tileFirstPersonDrawCrosshair()
         COLOR_WHITE);
 }
 
+static void tileFirstPersonDrawDiagnosticLine(int x1, int y1, int x2, int y2, Color color)
+{
+    const int deltaX = abs(x2 - x1);
+    const int stepX = x1 < x2 ? 1 : -1;
+    const int deltaY = -abs(y2 - y1);
+    const int stepY = y1 < y2 ? 1 : -1;
+    int error = deltaX + deltaY;
+
+    while (true) {
+        if (x1 >= 0 && x1 < gTileWindowWidth && y1 >= 0 && y1 < gTileWindowHeight) {
+            gTileWindowBuffer[y1 * gTileWindowPitch + x1] = color;
+        }
+        if (x1 == x2 && y1 == y2) {
+            break;
+        }
+
+        const int doubledError = 2 * error;
+        if (doubledError >= deltaY) {
+            error += deltaY;
+            x1 += stepX;
+        }
+        if (doubledError <= deltaX) {
+            error += deltaX;
+            y1 += stepY;
+        }
+    }
+}
+
 static void tileRenderFirstPersonTopology()
 {
     bufferFill(gTileWindowBuffer,
@@ -1360,15 +1474,20 @@ static void tileFirstPersonTopologyMarkObject(Object* object, void* context)
     const int cellY = renderContext->mapTop + (squareTile / SQUARE_GRID_WIDTH) * renderContext->cellSize;
 
     Color markerColor = COLOR_LIGHT_GREY;
+    Proto* proto = nullptr;
+    const bool hasProto = protoGetProto(object, &proto) == 0;
+    ProtoExtendedFlags cornerFlags = PROTO_EXT_FLAG_NONE;
     switch (objectType) {
     case OBJ_TYPE_WALL:
         markerColor = (object->flags & OBJECT_NO_BLOCK) == OBJECT_NONE
             ? COLOR_LIGHT_RED
             : COLOR_AMBER;
+        if (hasProto) {
+            cornerFlags = proto->wall.extendedFlags;
+        }
         break;
-    case OBJ_TYPE_SCENERY: {
-        Proto* proto;
-        if (protoGetProto(object, &proto) == 0 && proto->scenery.type == SCENERY_TYPE_DOOR) {
+    case OBJ_TYPE_SCENERY:
+        if (hasProto && proto->scenery.type == SCENERY_TYPE_DOOR) {
             markerColor = (object->flags & OBJECT_NO_BLOCK) == OBJECT_NONE
                 ? COLOR_LIGHT_RED
                 : COLOR_LIGHT_GREEN_3;
@@ -1377,8 +1496,10 @@ static void tileFirstPersonTopologyMarkObject(Object* object, void* context)
                 ? COLOR_LIGHT_GOLD
                 : COLOR_YELLOW_2;
         }
+        if (hasProto) {
+            cornerFlags = proto->scenery.extendedFlags;
+        }
         break;
-    }
     case OBJ_TYPE_CRITTER:
         markerColor = COLOR_LIGHT_GREEN_3;
         break;
@@ -1398,6 +1519,77 @@ static void tileFirstPersonTopologyMarkObject(Object* object, void* context)
             markerSize,
             gTileWindowPitch,
             markerColor);
+    }
+
+    if (objectType != OBJ_TYPE_WALL && objectType != OBJ_TYPE_SCENERY) {
+        return;
+    }
+
+    if (rotationIsValid(object->rotation)) {
+        static constexpr int kRotationX[ROTATION_COUNT] = { 1, 1, 1, -1, -1, -1 };
+        static constexpr int kRotationY[ROTATION_COUNT] = { -1, 0, 1, 1, 0, -1 };
+        const int centerX = cellX + renderContext->cellSize / 2;
+        const int centerY = cellY + renderContext->cellSize / 2;
+        const int arrowLength = std::max(1, (renderContext->cellSize - 1) / 2);
+        const int arrowX = centerX + kRotationX[object->rotation] * arrowLength;
+        const int arrowY = centerY + kRotationY[object->rotation] * arrowLength;
+        Color rotationColor;
+        switch (object->rotation) {
+        case ROTATION_NE:
+            rotationColor = COLOR_MAGENTA;
+            break;
+        case ROTATION_E:
+            rotationColor = COLOR_CYAN;
+            break;
+        case ROTATION_SE:
+            rotationColor = COLOR_LIGHT_GREEN_3;
+            break;
+        case ROTATION_SW:
+            rotationColor = COLOR_BLUE;
+            break;
+        case ROTATION_W:
+            rotationColor = COLOR_LIGHT_PINK;
+            break;
+        case ROTATION_NW:
+            rotationColor = COLOR_WHITE;
+            break;
+        default:
+            rotationColor = COLOR_WHITE;
+            break;
+        }
+        tileFirstPersonDrawDiagnosticLine(centerX, centerY, arrowX, arrowY, rotationColor);
+    }
+
+    constexpr unsigned int kCornerFlags = PROTO_EXT_FLAG_EAST_CORNER
+        | PROTO_EXT_FLAG_NORTH_CORNER
+        | PROTO_EXT_FLAG_SOUTH_CORNER
+        | PROTO_EXT_FLAG_WEST_CORNER;
+    const unsigned int cornerFlagBits = static_cast<unsigned int>(cornerFlags) & kCornerFlags;
+    if (cornerFlagBits != 0) {
+        Color cornerColor = COLOR_MAGENTA;
+        if (cornerFlagBits == PROTO_EXT_FLAG_EAST_CORNER) {
+            cornerColor = COLOR_CYAN;
+        } else if (cornerFlagBits == PROTO_EXT_FLAG_NORTH_CORNER) {
+            cornerColor = COLOR_YELLOW_2;
+        } else if (cornerFlagBits == PROTO_EXT_FLAG_SOUTH_CORNER) {
+            cornerColor = COLOR_MAGENTA;
+        } else if (cornerFlagBits == PROTO_EXT_FLAG_WEST_CORNER) {
+            cornerColor = COLOR_BLUE;
+        } else {
+            cornerColor = COLOR_WHITE;
+        }
+
+        const int cornerSize = std::min(2, renderContext->cellSize - 1);
+        const int cornerX = cellX + renderContext->cellSize - cornerSize;
+        const int cornerY = cellY;
+        if (cornerSize > 0 && cornerX >= 0 && cornerX + cornerSize <= gTileWindowWidth
+            && cornerY >= 0 && cornerY + cornerSize <= gTileWindowHeight) {
+            bufferFill(gTileWindowBuffer + cornerY * gTileWindowPitch + cornerX,
+                cornerSize,
+                cornerSize,
+                gTileWindowPitch,
+                cornerColor);
+        }
     }
 }
 
