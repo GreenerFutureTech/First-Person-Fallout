@@ -626,17 +626,53 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
         if (isInCombat()) {
             if (gFirstPersonPreviewMouseReleased
                 && eventCode == -2
-                && (mouseState & MOUSE_EVENT_LEFT_BUTTON_UP) != 0
-                && gameMouseGetMode() == GAME_MOUSE_MODE_CROSSHAIR) {
+                && (mouseState & MOUSE_EVENT_LEFT_BUTTON_UP) != 0) {
                 int mouseX;
                 int mouseY;
                 mouseGetPosition(&mouseX, &mouseY);
-                Object* critter = tileFirstPersonPreviewPickCritterAt(mouseX, mouseY);
-                if (critter != nullptr) {
-                    if (critterIsDead(critter)) {
-                        actionLootCritter(gDude, critter);
+
+                Rect isoWindowRect;
+                if (windowGetRect(gIsoWindow, &isoWindowRect) == 0
+                    && mouseX >= isoWindowRect.left
+                    && mouseX <= isoWindowRect.right
+                    && mouseY >= isoWindowRect.top
+                    && mouseY <= isoWindowRect.bottom) {
+                    Object* critter = gameMouseGetMode() == GAME_MOUSE_MODE_CROSSHAIR
+                        ? tileFirstPersonPreviewPickCritterAt(mouseX, mouseY)
+                        : nullptr;
+                    if (critter != nullptr) {
+                        if (critterIsDead(critter)) {
+                            actionLootCritter(gDude, critter);
+                        } else {
+                            _combat_attack_this(critter);
+                        }
                     } else {
-                        _combat_attack_this(critter);
+                        const int destinationTile = tileFirstPersonPreviewPickGroundTileAt(
+                            mouseX - isoWindowRect.left,
+                            mouseY - isoWindowRect.top);
+                        if (tileIsValid(destinationTile)) {
+                            int actionPoints = gDude->data.critter.combat.ap + _combat_free_move;
+                            if (gPressedPhysicalKeys[SDL_SCANCODE_RCTRL]
+                                || gPressedPhysicalKeys[SDL_SCANCODE_LCTRL]) {
+                                HitMode hitMode;
+                                bool aiming;
+                                interfaceGetCurrentHitMode(&hitMode, &aiming);
+                                actionPoints -= itemGetActionPointCost(gDude, hitMode, aiming);
+                            }
+                            if (actionPoints > 0) {
+                                tileFirstPersonPreviewTurnToTile(destinationTile);
+                                if (reg_anim_begin(ANIMATION_REQUEST_RESERVED) == 0) {
+                                    if (settings.preferences.running) {
+                                        animationRegisterRunToTile(gDude, destinationTile,
+                                            gDude->elevation, actionPoints, 0);
+                                    } else {
+                                        animationRegisterMoveToTile(gDude, destinationTile,
+                                            gDude->elevation, actionPoints, 0);
+                                    }
+                                    reg_anim_end();
+                                }
+                            }
+                        }
                     }
                 }
                 return 0;
