@@ -111,6 +111,8 @@ int gameMouseRenderPrimaryAction(int x, int y, GameMouseActionMenuItem menuItem,
 int _gmouse_3d_pick_frame_hot(int* x, int* y);
 int gameMouseRenderActionMenuItems(int x, int y, const GameMouseActionMenuItem* menuItems, int menuItemsCount, int width, int height);
 int gameMouseHighlightActionMenuItemAtIndex(int menuItemIndex);
+GameMouseActionMenuItem gameMouseGetHighlightedActionMenuItem();
+int gameMouseCopyActionMenuBuffer(unsigned char* destination, int destinationPitch, int destinationWidth, int destinationHeight, int x, int y);
 void gameMouseLoadItemHighlight();
 void _gmouse_remove_item_outline(Object* object);
 

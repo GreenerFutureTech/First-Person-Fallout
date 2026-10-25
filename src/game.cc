@@ -30,9 +30,9 @@
 #include "game_mouse.h"
 #include "game_movie.h"
 #include "game_sound.h"
-#include "input.h"
 #include "interface.h"
 #include "inventory.h"
+#include "input.h"
 #include "item.h"
 #include "kb.h"
 #include "loadsave.h"
@@ -96,6 +96,7 @@ static bool tryLoadBaseCEModAtPath(const char* path, bool* found, bool* openFail
 static int gameDbInit();
 static void showSplash();
 static bool gameFirstPersonPreviewSetMouseReleased(bool enabled);
+static void gameFirstPersonPreviewShowCritterMenu(Object* critter, int mouseX, int mouseY);
 
 inline constexpr char kBaseModPath[] = "ce.dat";
 
@@ -109,6 +110,8 @@ static char _aBuildHash[] = _BUILD_HASH;
 // 0x5186B4 game_ui_disabled
 static bool gGameUiDisabled = false;
 static bool gFirstPersonPreviewMouseReleased = false;
+static bool gFirstPersonPreviewActionMenuShown = false;
+static unsigned int gFirstPersonPreviewLeftClickStartTime = 0;
 
 // 0x5186B8 game_state_cur
 static GameState gGameState = GameState::Normal;
@@ -573,7 +576,7 @@ void gameHandleFirstPersonPreviewInput(int eventCode)
     }
 
     if (eventCode == INPUT_EVENT_FIRST_PERSON_RIGHT_CLICK) {
-        gameFirstPersonPreviewSetMouseReleased(true);
+        gameFirstPersonPreviewSetMouseReleased(!gFirstPersonPreviewMouseReleased);
     } else if (eventCode == -2) {
         const int mouseState = mouseGetEvent();
         if (gFirstPersonPreviewMouseReleased
@@ -581,6 +584,168 @@ void gameHandleFirstPersonPreviewInput(int eventCode)
             && (mouseState & MOUSE_EVENT_RIGHT_BUTTON_REPEAT) == 0) {
             gameFirstPersonPreviewSetMouseReleased(false);
         }
+    }
+}
+
+static void gameFirstPersonPreviewShowCritterMenu(Object* targetObj, int mouseX, int mouseY)
+{
+    if (targetObj == nullptr || targetObj == gDude) {
+        return;
+    }
+
+    GameMouseActionMenuItem menuItems[GAME_MOUSE_ACTION_MENU_ITEM_COUNT - 1];
+    int menuItemCount = 0;
+    if (_obj_action_can_talk_to(targetObj)) {
+        if (!isInCombat()) {
+            menuItems[menuItemCount++] = GAME_MOUSE_ACTION_MENU_ITEM_TALK;
+        }
+        if (settings.qol.party_trade_from_menu && objectIsPartyMember(targetObj) && !isInCombat()) {
+            menuItems[menuItemCount++] = GAME_MOUSE_ACTION_MENU_ITEM_USE;
+        }
+    } else if (!critterFlagCheck(targetObj, CRITTER_NO_STEAL)) {
+        menuItems[menuItemCount++] = GAME_MOUSE_ACTION_MENU_ITEM_USE;
+    }
+    if (actionCheckPush(gDude, targetObj)) {
+        menuItems[menuItemCount++] = GAME_MOUSE_ACTION_MENU_ITEM_PUSH;
+    }
+    menuItems[menuItemCount++] = GAME_MOUSE_ACTION_MENU_ITEM_LOOK;
+    menuItems[menuItemCount++] = GAME_MOUSE_ACTION_MENU_ITEM_INVENTORY;
+    menuItems[menuItemCount++] = GAME_MOUSE_ACTION_MENU_ITEM_USE_SKILL;
+    menuItems[menuItemCount++] = GAME_MOUSE_ACTION_MENU_ITEM_CANCEL;
+
+    Rect isoWindowRect;
+    if (windowGetRect(gIsoWindow, &isoWindowRect) != 0
+        || gameMouseRenderActionMenuItems(mouseX, mouseY,
+               menuItems, menuItemCount,
+               _scr_size.right - _scr_size.left + 1,
+               _scr_size.bottom - _scr_size.top - 99) != 0) {
+        return;
+    }
+
+    const bool mouseWasReleased = gFirstPersonPreviewMouseReleased;
+    const bool relativeModeWasEnabled = mouseDeviceUsesRelativeMode();
+    if (relativeModeWasEnabled) {
+        mouseDeviceSetRelativeModeForced(false);
+    }
+    mouseShowCursor();
+    const bool isoWasEnabled = !isoIsDisabled();
+    if (isoWasEnabled) {
+        isoDisable();
+    }
+    tileFirstPersonPreviewRefresh();
+    const int menuWindow = windowCreate(0, 0,
+        screenGetWidth(), screenGetHeight(),
+        COLOR_FIRST, WINDOW_HIDDEN | WINDOW_MOVE_ON_TOP | WINDOW_TRANSPARENT);
+    if (menuWindow == -1) {
+        if (isoWasEnabled) isoEnable();
+        if (relativeModeWasEnabled) mouseDeviceSetRelativeModeForced(true);
+        gFirstPersonPreviewMouseReleased = mouseWasReleased;
+        if (mouseWasReleased) mouseShowCursor(); else mouseHideCursor();
+        return;
+    }
+    if (menuWindow != -1) {
+        unsigned char* menuBuffer = windowGetBuffer(menuWindow);
+        if (menuBuffer != nullptr) {
+            memset(menuBuffer, 0, windowGetWidth(menuWindow) * windowGetHeight(menuWindow));
+            gameMouseCopyActionMenuBuffer(menuBuffer, windowGetWidth(menuWindow),
+                windowGetWidth(menuWindow), windowGetHeight(menuWindow),
+                mouseX, mouseY);
+            windowShow(menuWindow);
+        }
+    }
+
+    int selectedIndex = 0;
+    mouseDeviceSetLogicalPosition(mouseX, mouseY);
+    _mouse_set_position(mouseX, mouseY);
+    while ((mouseGetEvent() & MOUSE_EVENT_LEFT_BUTTON_UP) == 0) {
+        sharedFpsLimiter.mark();
+        inputGetInput();
+
+        int updatedMouseX;
+        int updatedMouseY;
+        mouseGetPosition(&updatedMouseX, &updatedMouseY);
+        if (abs(updatedMouseY - mouseY) > 10) {
+            int nextIndex = selectedIndex + (mouseY >= updatedMouseY ? -1 : 1);
+            if (nextIndex < 0) nextIndex = 0;
+            if (nextIndex >= menuItemCount) nextIndex = menuItemCount - 1;
+            if (gameMouseHighlightActionMenuItemAtIndex(nextIndex) == 0) {
+                selectedIndex = nextIndex;
+                if (menuWindow != -1 && windowGetBuffer(menuWindow) != nullptr) {
+                    unsigned char* menuBuffer = windowGetBuffer(menuWindow);
+                    memset(menuBuffer, 0, windowGetWidth(menuWindow) * windowGetHeight(menuWindow));
+                    gameMouseCopyActionMenuBuffer(menuBuffer, windowGetWidth(menuWindow),
+                        windowGetWidth(menuWindow), windowGetHeight(menuWindow),
+                        updatedMouseX, updatedMouseY);
+                    windowRefresh(menuWindow);
+                }
+            }
+            mouseY = updatedMouseY;
+        }
+        renderPresent();
+        sharedFpsLimiter.throttle();
+    }
+
+    windowDestroy(menuWindow);
+    if (isoWasEnabled) {
+        isoEnable();
+    }
+    tileFirstPersonPreviewRefresh();
+    mouseDeviceSetLogicalPosition(mouseX, mouseY);
+    _mouse_set_position(mouseX, mouseY);
+
+    const GameMouseActionMenuItem selectedAction = gameMouseGetHighlightedActionMenuItem();
+
+    switch (selectedAction) {
+    case GAME_MOUSE_ACTION_MENU_ITEM_TALK:
+        actionTalk(gDude, targetObj);
+        break;
+    case GAME_MOUSE_ACTION_MENU_ITEM_USE:
+        if (objectIsPartyMember(targetObj)) {
+            actionUseSkill(gDude, targetObj, SKILL_STEAL);
+        } else {
+            actionLootCritter(gDude, targetObj);
+        }
+        break;
+    case GAME_MOUSE_ACTION_MENU_ITEM_PUSH:
+        actionPush(gDude, targetObj);
+        break;
+    case GAME_MOUSE_ACTION_MENU_ITEM_LOOK:
+        if (objectExamine(gDude, targetObj) == -1) {
+            objectLookAt(gDude, targetObj);
+        }
+        break;
+    case GAME_MOUSE_ACTION_MENU_ITEM_INVENTORY:
+        inventoryOpenUseItemOn(targetObj);
+        break;
+    case GAME_MOUSE_ACTION_MENU_ITEM_USE_SKILL: {
+        Skill skill = SKILL_INVALID;
+        switch (skilldexOpen()) {
+        case SKILLDEX_RC_SNEAK: _action_skill_use(SKILL_SNEAK); break;
+        case SKILLDEX_RC_LOCKPICK: skill = SKILL_LOCKPICK; break;
+        case SKILLDEX_RC_STEAL: skill = SKILL_STEAL; break;
+        case SKILLDEX_RC_TRAPS: skill = SKILL_TRAPS; break;
+        case SKILLDEX_RC_FIRST_AID: skill = SKILL_FIRST_AID; break;
+        case SKILLDEX_RC_DOCTOR: skill = SKILL_DOCTOR; break;
+        case SKILLDEX_RC_SCIENCE: skill = SKILL_SCIENCE; break;
+        case SKILLDEX_RC_REPAIR: skill = SKILL_REPAIR; break;
+        default: break;
+        }
+        if (skill != SKILL_INVALID) {
+            actionUseSkill(gDude, targetObj, skill);
+        }
+        break;
+    }
+    default:
+        break;
+    }
+    gFirstPersonPreviewMouseReleased = mouseWasReleased;
+    if (relativeModeWasEnabled) {
+        mouseDeviceSetRelativeModeForced(true);
+    }
+    if (mouseWasReleased) {
+        mouseShowCursor();
+    } else {
+        mouseHideCursor();
     }
 }
 
@@ -610,11 +775,12 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
 
     if (tileFirstPersonPreviewIsEnabled()
         && eventCode == INPUT_EVENT_FIRST_PERSON_RIGHT_CLICK) {
+        tileFirstPersonPreviewSetMoveMarkerTile(-1);
         return 0;
     }
 
     if (tileFirstPersonPreviewIsEnabled()
-        && (eventCode == -2 || eventCode == INPUT_EVENT_FIRST_PERSON_LEFT_CLICK)) {
+        && (eventCode == -1 || eventCode == -2 || eventCode == INPUT_EVENT_FIRST_PERSON_LEFT_CLICK)) {
         const int mouseState = mouseGetEvent();
         if (firstPersonPreviewMouseWasReleased
             && eventCode == -2
@@ -660,6 +826,7 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                                 actionPoints -= itemGetActionPointCost(gDude, hitMode, aiming);
                             }
                             if (actionPoints > 0) {
+                                tileFirstPersonPreviewSetMoveMarkerTile(destinationTile);
                                 tileFirstPersonPreviewTurnToTile(destinationTile);
                                 if (reg_anim_begin(ANIMATION_REQUEST_RESERVED) == 0) {
                                     if (settings.preferences.running) {
@@ -682,67 +849,94 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
             }
         } else {
             if (eventCode == INPUT_EVENT_FIRST_PERSON_LEFT_CLICK) {
-                Object* critter = tileFirstPersonPreviewPickCritter();
-                if (critter != nullptr) {
-                    if (_obj_action_can_talk_to(critter)) {
-                        actionTalk(gDude, critter);
-                    } else {
-                        actionLootCritter(gDude, critter);
-                    }
-                }
+                gFirstPersonPreviewLeftClickStartTime = getTicks();
                 return 0;
             }
 
-            if (gFirstPersonPreviewMouseReleased) {
+            if (eventCode == -1 || eventCode == -2) {
                 int mouseX;
                 int mouseY;
                 mouseGetPosition(&mouseX, &mouseY);
-                Rect isoWindowRect;
-                if (windowGetRect(gIsoWindow, &isoWindowRect) == 0
-                    && mouseX >= isoWindowRect.left
-                    && mouseX <= isoWindowRect.right
-                    && mouseY >= isoWindowRect.top
-                    && mouseY <= isoWindowRect.bottom) {
-                    if ((mouseState & MOUSE_EVENT_LEFT_BUTTON_DOWN) != 0
-                        && (mouseState & MOUSE_EVENT_LEFT_BUTTON_REPEAT) == 0) {
-                        Object* critter = tileFirstPersonPreviewPickCritterAt(mouseX, mouseY);
-                        if (critter != nullptr) {
-                            if (_obj_action_can_talk_to(critter)) {
-                                actionTalk(gDude, critter);
-                            } else {
-                                actionLootCritter(gDude, critter);
+                const Uint32 sdlMouseButtons = SDL_GetMouseState(nullptr, nullptr);
+                const bool leftButtonDown = !gFirstPersonPreviewMouseReleased
+                    ? (sdlMouseButtons & SDL_BUTTON_LMASK) != 0
+                    : (mouseState & MOUSE_EVENT_LEFT_BUTTON_DOWN) != 0;
+                const bool leftButtonHeld = leftButtonDown
+                    && getTicksSince(gFirstPersonPreviewLeftClickStartTime) >= BUTTON_REPEAT_TIME;
+
+                if (gFirstPersonPreviewMouseReleased) {
+                    Rect isoWindowRect;
+                    if (windowGetRect(gIsoWindow, &isoWindowRect) == 0
+                        && mouseX >= isoWindowRect.left
+                        && mouseX <= isoWindowRect.right
+                        && mouseY >= isoWindowRect.top
+                        && mouseY <= isoWindowRect.bottom) {
+                        if ((mouseState & MOUSE_EVENT_LEFT_BUTTON_DOWN) != 0
+                            && (mouseState & MOUSE_EVENT_LEFT_BUTTON_REPEAT) == 0) {
+                            gFirstPersonPreviewLeftClickStartTime = getTicks();
+                        }
+                        if (leftButtonHeld) {
+                            if (!gFirstPersonPreviewActionMenuShown) {
+                                gFirstPersonPreviewActionMenuShown = true;
+                                Object* critter = tileFirstPersonPreviewPickCritterAt(mouseX, mouseY);
+                                if (critter != nullptr) {
+                                    gameFirstPersonPreviewShowCritterMenu(critter, mouseX, mouseY);
+                                }
                             }
-                        } else {
-                            const int destinationTile = tileFirstPersonPreviewPickGroundTileAt(
-                                mouseX - isoWindowRect.left,
-                                mouseY - isoWindowRect.top);
-                            if (tileIsValid(destinationTile)) {
-                                tileFirstPersonPreviewTurnToTile(destinationTile);
-                                int actionPoints = isInCombat()
-                                    ? gDude->data.critter.combat.ap + _combat_free_move
-                                    : -1;
-                                // Match _check_move: a new real-time move click
-                                // interrupts the player's current path when the
-                                // interrupt-walk option is enabled.
-                                if (!isInCombat() && settings.system.interrupt_walk) {
-                                    reg_anim_clear(gDude);
-                                }
-                                if (reg_anim_begin(ANIMATION_REQUEST_RESERVED) == 0) {
-                                    if (settings.preferences.running) {
-                                        animationRegisterRunToTile(gDude, destinationTile,
-                                            gDude->elevation, actionPoints, 0);
-                                    } else {
-                                        animationRegisterMoveToTile(gDude, destinationTile,
-                                            gDude->elevation, actionPoints, 0);
+                        } else if ((mouseState & MOUSE_EVENT_LEFT_BUTTON_UP) != 0) {
+                            if (!gFirstPersonPreviewActionMenuShown
+                                && gFirstPersonPreviewLeftClickStartTime != 0) {
+                                Object* critter = tileFirstPersonPreviewPickCritterAt(mouseX, mouseY);
+                                if (critter != nullptr) {
+                                    if (_obj_action_can_talk_to(critter)) actionTalk(gDude, critter);
+                                    else actionLootCritter(gDude, critter);
+                                } else {
+                                    const int destinationTile = tileFirstPersonPreviewPickGroundTileAt(
+                                        mouseX - isoWindowRect.left,
+                                        mouseY - isoWindowRect.top);
+                                    if (tileIsValid(destinationTile)) {
+                                        tileFirstPersonPreviewSetMoveMarkerTile(destinationTile);
+                                        tileFirstPersonPreviewTurnToTile(destinationTile);
+                                        if (settings.system.interrupt_walk) {
+                                            reg_anim_clear(gDude);
+                                        }
+                                        if (reg_anim_begin(ANIMATION_REQUEST_RESERVED) == 0) {
+                                            if (settings.preferences.running) {
+                                                animationRegisterRunToTile(gDude, destinationTile,
+                                                    gDude->elevation, -1, 0);
+                                            } else {
+                                                animationRegisterMoveToTile(gDude, destinationTile,
+                                                    gDude->elevation, -1, 0);
+                                            }
+                                            reg_anim_end();
+                                        }
                                     }
-                                    reg_anim_end();
                                 }
+                            }
+                            gFirstPersonPreviewActionMenuShown = false;
+                            gFirstPersonPreviewLeftClickStartTime = 0;
+                        }
+                        return 0;
+                    }
+                } else {
+                    if (leftButtonHeld
+                        && getTicksSince(gFirstPersonPreviewLeftClickStartTime) >= BUTTON_REPEAT_TIME
+                        && !gFirstPersonPreviewActionMenuShown) {
+                        gFirstPersonPreviewActionMenuShown = true;
+                        gameFirstPersonPreviewShowCritterMenu(tileFirstPersonPreviewPickCritter(),
+                            screenGetWidth() / 2, screenGetHeight() / 2);
+                    } else if (!leftButtonHeld && gFirstPersonPreviewLeftClickStartTime != 0) {
+                        if (!gFirstPersonPreviewActionMenuShown) {
+                            Object* critter = tileFirstPersonPreviewPickCritter();
+                            if (critter != nullptr) {
+                                if (_obj_action_can_talk_to(critter)) actionTalk(gDude, critter);
+                                else actionLootCritter(gDude, critter);
                             }
                         }
+                        gFirstPersonPreviewActionMenuShown = false;
+                        gFirstPersonPreviewLeftClickStartTime = 0;
                     }
-                    return 0;
                 }
-            } else {
                 return 0;
             }
         }
@@ -1175,6 +1369,8 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
             tileFirstPersonPreviewToggle();
             mouseShowCursor();
             gFirstPersonPreviewMouseReleased = false;
+            gFirstPersonPreviewActionMenuShown = false;
+            gFirstPersonPreviewLeftClickStartTime = 0;
             if (!mouseDeviceSetRelativeModeForced(false)) {
                 debugPrint("Failed to restore mouse mode: %s\n", SDL_GetError());
             }

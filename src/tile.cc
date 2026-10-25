@@ -116,6 +116,7 @@ static void tileFirstPersonTopologyMarkObject(Object* object, void* context);
 static void tileFirstPersonGrayboxMarkObject(Object* object, void* context);
 static void tileFirstPersonRenderActor(Object* object, void* context);
 static void tileFirstPersonDrawCrosshair();
+static void tileFirstPersonDrawMoveMarker();
 static void tileFirstPersonDrawDiagnosticLine(int x1, int y1, int x2, int y2, Color color);
 static bool tileFirstPersonGetWorldPosition(int tile, double* x, double* y);
 static double tileFirstPersonPreviewGetYaw();
@@ -157,6 +158,7 @@ static double gFirstPersonPreviewYawStart = 0.0;
 static double gFirstPersonPreviewYawTarget = 0.0;
 static unsigned int gFirstPersonPreviewYawStartTime = 0;
 static bool gFirstPersonPreviewYawTurning = false;
+static int gFirstPersonPreviewMoveMarkerTile = -1;
 static bool gFirstPersonPreviewCameraInitialized = false;
 static int gFirstPersonPreviewCameraTile = -1;
 static MapElevation gFirstPersonPreviewCameraElevation;
@@ -1142,6 +1144,7 @@ static void tileRenderFirstPersonPreview()
         &gFirstPersonPreviewActorHitTargets,
     };
     objectVisitAll(tileFirstPersonRenderActor, &actorContext);
+    tileFirstPersonDrawMoveMarker();
     tileFirstPersonDrawCrosshair();
 }
 
@@ -1506,6 +1509,67 @@ static void tileFirstPersonDrawCrosshair()
         COLOR_WHITE);
 }
 
+static void tileFirstPersonDrawMoveMarker()
+{
+    if (!tileIsValid(gFirstPersonPreviewMoveMarkerTile)
+        || gDude == nullptr || gDude->elevation != gElevation) {
+        return;
+    }
+
+    constexpr double kPi = 3.14159265358979323846;
+    constexpr double kFieldOfViewScale = 0.66;
+    double cameraX;
+    double cameraY;
+    double targetX;
+    double targetY;
+    if (!tileFirstPersonGetWorldPosition(gDude->tile, &cameraX, &cameraY)
+        || !tileFirstPersonGetWorldPosition(gFirstPersonPreviewMoveMarkerTile, &targetX, &targetY)) {
+        return;
+    }
+
+    const double yaw = tileFirstPersonPreviewGetYaw() * kPi / 180.0;
+    const double directionX = sin(yaw);
+    const double directionY = -cos(yaw);
+    const double cameraPlaneX = -directionY * kFieldOfViewScale;
+    const double cameraPlaneY = directionX * kFieldOfViewScale;
+    const double relativeX = targetX - cameraX;
+    const double relativeY = targetY - cameraY;
+    const double determinant = cameraPlaneX * directionY - directionX * cameraPlaneY;
+    if (determinant == 0.0) {
+        return;
+    }
+
+    const double inverseDeterminant = 1.0 / determinant;
+    const double transformX = inverseDeterminant
+        * (directionY * relativeX - directionX * relativeY);
+    const double transformY = inverseDeterminant
+        * (-cameraPlaneY * relativeX + cameraPlaneX * relativeY);
+    if (transformY <= 0.1) {
+        return;
+    }
+
+    const int centerX = static_cast<int>((gTileWindowWidth / 2.0) * (1.0 + transformX / transformY));
+    const int centerY = gTileWindowHeight / 2
+        + static_cast<int>((gTileWindowHeight * 0.5) / transformY);
+    if (centerX < 0 || centerX >= gTileWindowWidth || centerY < 0 || centerY >= gTileWindowHeight
+        || (gFirstPersonPreviewWallDepths.size() == static_cast<size_t>(gTileWindowWidth)
+            && transformY >= gFirstPersonPreviewWallDepths[centerX])) {
+        return;
+    }
+
+    const int radius = std::max(3, std::min(18, static_cast<int>(gTileWindowHeight * 0.08 / transformY)));
+    const int thickness = 3;
+
+    for (int t = 0; t < thickness; t++) {
+        int r = radius - t;
+
+        tileFirstPersonDrawDiagnosticLine(centerX, centerY - r, centerX + r, centerY, COLOR_RED);
+        tileFirstPersonDrawDiagnosticLine(centerX + r, centerY, centerX, centerY + r, COLOR_RED);
+        tileFirstPersonDrawDiagnosticLine(centerX, centerY + r, centerX - r, centerY, COLOR_RED);
+        tileFirstPersonDrawDiagnosticLine(centerX - r, centerY, centerX, centerY - r, COLOR_RED);
+    }
+}
+
 static void tileFirstPersonDrawDiagnosticLine(int x1, int y1, int x2, int y2, Color color)
 {
     const int deltaX = abs(x2 - x1);
@@ -1860,6 +1924,20 @@ int tileFirstPersonPreviewPickGroundTileAt(int screenX, int screenY)
     return tileIsValid(tile) ? tile : -1;
 }
 
+void tileFirstPersonPreviewSetMoveMarkerTile(int tile)
+{
+    if (!gFirstPersonPreviewEnabled || gFirstPersonPreviewTopologyEnabled) {
+        tile = -1;
+    } else if (!tileIsValid(tile)) {
+        tile = -1;
+    }
+
+    if (gFirstPersonPreviewMoveMarkerTile != tile) {
+        gFirstPersonPreviewMoveMarkerTile = tile;
+        tileFirstPersonPreviewRefresh();
+    }
+}
+
 bool tileFirstPersonPreviewMove(int relativeDirection)
 {
     if (!gFirstPersonPreviewEnabled
@@ -2019,6 +2097,7 @@ void tileFirstPersonPreviewToggle()
 
     gFirstPersonPreviewEnabled = !gFirstPersonPreviewEnabled;
     gFirstPersonPreviewCameraInitialized = false;
+    gFirstPersonPreviewMoveMarkerTile = -1;
     if (gFirstPersonPreviewEnabled) {
         gFirstPersonPreviewTopologyEnabled = false;
         gFirstPersonPreviewYaw = 0;

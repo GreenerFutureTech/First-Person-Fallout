@@ -2128,6 +2128,51 @@ int gameMouseHighlightActionMenuItemAtIndex(int menuItemIndex)
     return 0;
 }
 
+GameMouseActionMenuItem gameMouseGetHighlightedActionMenuItem()
+{
+    if (gGameMouseActionMenuHighlightedItemIndex < 0
+        || gGameMouseActionMenuHighlightedItemIndex >= gGameMouseActionMenuItemsLength) {
+        return GAME_MOUSE_ACTION_MENU_ITEM_CANCEL;
+    }
+    return static_cast<GameMouseActionMenuItem>(gGameMouseActionMenuItems[gGameMouseActionMenuHighlightedItemIndex]);
+}
+
+int gameMouseCopyActionMenuBuffer(unsigned char* destination, int destinationPitch, int destinationWidth, int destinationHeight, int x, int y)
+{
+    if (destination == nullptr || gGameMouseActionMenuFrmData == nullptr
+        || destinationPitch <= 0 || destinationWidth <= 0 || destinationHeight <= 0) {
+        return -1;
+    }
+
+    // Match the interface action-menu object's hotspot: centered horizontally
+    // on the click and anchored at its bottom edge.
+    x -= gGameMouseActionMenuFrmWidth / 2;
+    y -= gGameMouseActionMenuFrmHeight - 1;
+
+    int width = std::min(gGameMouseActionMenuFrmWidth, destinationWidth - x);
+    int height = std::min(gGameMouseActionMenuFrmHeight, destinationHeight - y);
+    int sourceX = 0;
+    int sourceY = 0;
+    if (x < 0) {
+        sourceX = -x;
+        width -= sourceX;
+        x = 0;
+    }
+    if (y < 0) {
+        sourceY = -y;
+        height -= sourceY;
+        y = 0;
+    }
+    if (width <= 0 || height <= 0) {
+        return 0;
+    }
+
+    blitBufferToBufferTrans(gGameMouseActionMenuFrmData + gGameMouseActionMenuFrmWidth * sourceY + sourceX,
+        width, height, gGameMouseActionMenuFrmWidth,
+        destination + destinationPitch * y + x, destinationPitch);
+    return 0;
+}
+
 // 0x44D774 gmouse_3d_build_to_hit_frame
 int gameMouseRenderAccuracy(const char* string, Color color)
 {
