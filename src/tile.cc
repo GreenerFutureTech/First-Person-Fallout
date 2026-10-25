@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <limits>
 #include <stack>
+#include <utility>
 #include <vector>
 
 #include "art.h"
@@ -917,6 +918,88 @@ static void tileRenderFirstPersonPreview()
         }
     }
 
+    // Compose the isometric tile overlap once per floor layout. The old
+    // per-pixel neighbor search repeated map/FID/texture lookups hundreds of
+    // thousands of times every frame.
+    constexpr int kFloorCacheCellResolution = 16;
+    constexpr int kFloorCacheCellArea = kFloorCacheCellResolution * kFloorCacheCellResolution;
+    static std::vector<int> cachedFloorFids;
+    static std::vector<unsigned char> cachedFloorColors;
+    static int cachedFloorElevation = -1;
+    std::vector<int> currentFloorFids(SQUARE_GRID_SIZE);
+    std::copy_n(gTileSquares[gElevation]->tileFid, SQUARE_GRID_SIZE, currentFloorFids.begin());
+    if (cachedFloorElevation != static_cast<int>(gElevation) || currentFloorFids != cachedFloorFids) {
+        cachedFloorColors.assign(SQUARE_GRID_SIZE * kFloorCacheCellArea, COLOR_DULL_BROWN);
+        for (int mapY = 0; mapY < SQUARE_GRID_HEIGHT; mapY++) {
+            for (int mapX = 0; mapX < SQUARE_GRID_WIDTH; mapX++) {
+                for (int sampleY = 0; sampleY < kFloorCacheCellResolution; sampleY++) {
+                    for (int sampleX = 0; sampleX < kFloorCacheCellResolution; sampleX++) {
+                        const double worldX = mapX + (sampleX + 0.5) / kFloorCacheCellResolution;
+                        const double worldY = mapY + (sampleY + 0.5) / kFloorCacheCellResolution;
+                        unsigned char floorColor = COLOR_DULL_BROWN;
+                        double bestDistance = std::numeric_limits<double>::infinity();
+                        for (int neighborY = std::max(0, mapY - 1);
+                             neighborY <= std::min(SQUARE_GRID_HEIGHT - 1, mapY + 1);
+                             neighborY++) {
+                            for (int neighborX = std::max(0, mapX - 1);
+                                 neighborX <= std::min(SQUARE_GRID_WIDTH - 1, mapX + 1);
+                                 neighborX++) {
+                                const double deltaX = worldX - neighborX;
+                                const double deltaY = worldY - neighborY;
+                                const double distance = deltaX * deltaX + deltaY * deltaY;
+                                if (distance >= bestDistance) {
+                                    continue;
+                                }
+
+                                const int neighborTile = neighborY * SQUARE_GRID_WIDTH
+                                    + (SQUARE_GRID_WIDTH - 1 - neighborX);
+                                const FloorTileFrmId neighborFid(currentFloorFids[neighborTile]);
+                                if ((neighborFid.flags() & TileFlags::TemporarilyHidden) != TileFlags::None) {
+                                    continue;
+                                }
+
+                                const int neighborFrame = static_cast<int>(neighborFid.frameId<TileFrameId>());
+                                if (neighborFrame < 0 || neighborFrame >= static_cast<int>(floorTextureIndices.size())) {
+                                    continue;
+                                }
+                                const int textureIndex = floorTextureIndices[neighborFrame];
+                                if (textureIndex < 0) {
+                                    continue;
+                                }
+
+                                const ConstBuffer2D texture = floorTextures[textureIndex].getBuffer();
+                                if (!texture || texture.width <= 0 || texture.height <= 0) {
+                                    continue;
+                                }
+                                const double textureX = texture.width * 0.5
+                                    + deltaX * (48.0 * texture.width / 80.0)
+                                    + deltaY * (32.0 * texture.width / 80.0);
+                                const double textureY = texture.height * 0.5
+                                    - deltaX * (12.0 * texture.height / 36.0)
+                                    + deltaY * (24.0 * texture.height / 36.0);
+                                if (textureX < 0.0 || textureX >= texture.width
+                                    || textureY < 0.0 || textureY >= texture.height) {
+                                    continue;
+                                }
+                                const unsigned char color = texture.data[
+                                    static_cast<int>(textureY) * texture.width + static_cast<int>(textureX)];
+                                if (color != 0) {
+                                    floorColor = color;
+                                    bestDistance = distance;
+                                }
+                            }
+                        }
+                        const int cacheIndex = (mapY * SQUARE_GRID_WIDTH + mapX) * kFloorCacheCellArea
+                            + sampleY * kFloorCacheCellResolution + sampleX;
+                        cachedFloorColors[cacheIndex] = floorColor;
+                    }
+                }
+            }
+        }
+        cachedFloorFids = std::move(currentFloorFids);
+        cachedFloorElevation = static_cast<int>(gElevation);
+    }
+
     for (int y = horizonY + 1; y < gTileWindowHeight; y++) {
         const double rowDistance = (gTileWindowHeight * 0.5) / (y - horizonY);
         for (int x = 0; x < gTileWindowWidth; x++) {
@@ -932,39 +1015,13 @@ static void tileRenderFirstPersonPreview()
                 continue;
             }
 
-            const int squareTile = mapY * SQUARE_GRID_WIDTH + mapX;
-            const FloorTileFrmId floorTileFrmId(gTileSquares[gElevation]->tileFid[squareTile]);
-            if ((floorTileFrmId.flags() & TileFlags::TemporarilyHidden) != TileFlags::None) {
-                continue;
-            }
-
-            const int frameIndex = static_cast<int>(floorTileFrmId.frameId<TileFrameId>());
-            if (frameIndex < 0 || frameIndex >= static_cast<int>(floorTextureIndices.size())) {
-                continue;
-            }
-
-            const int textureIndex = floorTextureIndices[frameIndex];
-            if (textureIndex < 0) {
-                continue;
-            }
-
-            const ConstBuffer2D floorTextureFrame = floorTextures[textureIndex].getBuffer();
-            if (!floorTextureFrame || floorTextureFrame.width <= 0 || floorTextureFrame.height <= 0) {
-                continue;
-            }
-
-            const double fractionX = worldX - floor(worldX);
-            const double fractionY = worldY - floor(worldY);
-            const double textureU = 0.5 + (fractionX - fractionY) * 0.5;
-            const double textureV = (fractionX + fractionY) * 0.5;
-            const int textureX = std::min(floorTextureFrame.width - 1,
-                static_cast<int>(textureU * floorTextureFrame.width));
-            const int textureY = std::min(floorTextureFrame.height - 1,
-                static_cast<int>(textureV * floorTextureFrame.height));
-            const unsigned char color = floorTextureFrame.data[textureY * floorTextureFrame.width + textureX];
-            if (color != 0) {
-                gTileWindowBuffer[y * gTileWindowPitch + x] = color;
-            }
+            const int sampleX = std::min(kFloorCacheCellResolution - 1,
+                static_cast<int>((worldX - mapX) * kFloorCacheCellResolution));
+            const int sampleY = std::min(kFloorCacheCellResolution - 1,
+                static_cast<int>((worldY - mapY) * kFloorCacheCellResolution));
+            const int cacheIndex = (mapY * SQUARE_GRID_WIDTH + mapX) * kFloorCacheCellArea
+                + sampleY * kFloorCacheCellResolution + sampleX;
+            gTileWindowBuffer[y * gTileWindowPitch + x] = cachedFloorColors[cacheIndex];
         }
     }
 
@@ -1910,7 +1967,8 @@ int tileFirstPersonPreviewPickGroundTileAt(int screenX, int screenY)
         return -1;
     }
 
-    const int squareTile = mapY * SQUARE_GRID_WIDTH + mapX;
+    const int squareTile = mapY * SQUARE_GRID_WIDTH
+        + (SQUARE_GRID_WIDTH - 1 - mapX);
     const FloorTileFrmId floorTileFrmId(gTileSquares[gElevation]->tileFid[squareTile]);
     if (floorTileFrmId.frameId<TileFrameId>() == TileFrameId::Invalid
         || (floorTileFrmId.flags() & TileFlags::TemporarilyHidden) != TileFlags::None) {
