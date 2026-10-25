@@ -253,18 +253,26 @@ combat system.
 Graybox wall side faces use distinct saturated debug colors instead of gray
 and brown shades that can disappear against the sky and ground.
 
-Wall objects with the prototype's North/South or East/West orientation are
-currently drawn as thin, finite-thickness wall slabs across their square-grid
-cell, using prototype orientation rather than the object's six-way art
-rotation. This avoids the angle-dependent gaps of zero-thickness planes.
+Wall raycasting uses the hex object grid at twice the square-floor resolution,
+preserving each wall object's position instead of collapsing it into a square
+floor cell. North/South and East/West walls are thin, finite-thickness slabs
+spanning one half-square hex cell, using prototype orientation rather than the
+object's six-way art rotation. This avoids the angle-dependent gaps of
+zero-thickness planes and keeps nearby objects from automatically filling the
+same square cell. The F9 topology markers are placed at the corresponding
+hex-grid positions, though the full-map diagnostic remains pixel-limited.
 Non-blocking and light-through wall/scenery objects are treated as openings,
 matching the game's separate movement and sight flags. Walls marked as
 corners, blocking scenery, and closed doors still use the conservative
-full-cell blocker when they block sight. This is an incremental geometry
+hex-cell blocker when they block sight. This is an incremental geometry
 improvement, not a complete reconstruction of wall segments: validate it
 against representative maps before extending corner handling. Map/object
 refreshes redraw the preview; the interface bar and modal UI remain existing
 windows.
+
+Blocking wall objects carrying Fallout's transparent-glass, transparent-wall,
+or light-through flag render as half-height barriers, so windows do not become
+full-height gaps. Explicitly non-blocking wall objects remain openings.
 
 ### 4. Add a small texture proof
 

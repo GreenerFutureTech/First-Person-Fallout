@@ -75,6 +75,7 @@ struct TileFirstPersonTopologyRenderContext {
 
 struct TileFirstPersonGrayboxRenderContext {
     MapElevation elevation;
+    int gridWidth;
     unsigned char* wallCells;
     unsigned char* wallOrientations;
 };
@@ -869,12 +870,13 @@ static void tileRenderFirstPersonPreview()
         gTileWindowPitch,
         COLOR_DULL_BROWN);
 
-    unsigned char wallCells[SQUARE_GRID_SIZE] = {};
-    unsigned char wallOrientations[SQUARE_GRID_SIZE] = {};
+    std::vector<unsigned char> wallCells(gHexGridSize, 0);
+    std::vector<unsigned char> wallOrientations(gHexGridSize, 0);
     TileFirstPersonGrayboxRenderContext context = {
         gElevation,
-        wallCells,
-        wallOrientations,
+        gHexGridWidth,
+        wallCells.data(),
+        wallOrientations.data(),
     };
     objectVisitAll(tileFirstPersonGrayboxMarkObject, &context);
 
@@ -1033,8 +1035,12 @@ static void tileRenderFirstPersonPreview()
         const double rayDirectionX = directionX + cameraPlaneX * cameraOffset;
         const double rayDirectionY = directionY + cameraPlaneY * cameraOffset;
 
-        int mapX = static_cast<int>(cameraX);
-        int mapY = static_cast<int>(cameraY);
+        // Wall objects are stored on the hex grid, which is twice as dense as
+        // the square floor grid used by the ground projection.
+        const double rayCameraX = cameraX * 2.0;
+        const double rayCameraY = cameraY * 2.0;
+        int mapX = static_cast<int>(rayCameraX);
+        int mapY = static_cast<int>(rayCameraY);
         const double deltaDistanceX = rayDirectionX == 0.0
             ? 1.0e30
             : fabs(1.0 / rayDirectionX);
@@ -1044,32 +1050,33 @@ static void tileRenderFirstPersonPreview()
         const int stepX = rayDirectionX < 0.0 ? -1 : 1;
         const int stepY = rayDirectionY < 0.0 ? -1 : 1;
         double sideDistanceX = (rayDirectionX < 0.0
-                ? cameraX - mapX
-                : mapX + 1.0 - cameraX)
+                ? rayCameraX - mapX
+                : mapX + 1.0 - rayCameraX)
             * deltaDistanceX;
         double sideDistanceY = (rayDirectionY < 0.0
-                ? cameraY - mapY
-                : mapY + 1.0 - cameraY)
+                ? rayCameraY - mapY
+                : mapY + 1.0 - rayCameraY)
             * deltaDistanceY;
         int side = 0;
         unsigned char wallType = 0;
+        TileFirstPersonWallOrientation wallOrientation = TILE_FIRST_PERSON_WALL_ORIENTATION_CELL;
         double wallDistance = std::numeric_limits<double>::infinity();
         double cellEntryDistance = 0.0;
-        while (mapX >= 0 && mapX < SQUARE_GRID_WIDTH
-            && mapY >= 0 && mapY < SQUARE_GRID_HEIGHT) {
-            const int cellIndex = mapY * SQUARE_GRID_WIDTH + mapX;
+        while (mapX >= 0 && mapX < gHexGridWidth
+            && mapY >= 0 && mapY < gHexGridHeight) {
+            const int cellIndex = mapY * gHexGridWidth + mapX;
             wallType = wallCells[cellIndex];
             if (wallType != 0) {
-                const TileFirstPersonWallOrientation wallOrientation =
+                wallOrientation =
                     static_cast<TileFirstPersonWallOrientation>(wallOrientations[cellIndex]);
                 if (wallOrientation == TILE_FIRST_PERSON_WALL_ORIENTATION_CELL) {
-                    wallDistance = std::max(0.1, cellEntryDistance);
+                    wallDistance = std::max(0.1, cellEntryDistance / 2.0);
                     break;
                 }
 
                 const double cellExitDistance = std::min(sideDistanceX, sideDistanceY);
                 constexpr double kIntersectionEpsilon = 1.0e-8;
-                constexpr double kWallThickness = 0.2;
+                constexpr double kWallThickness = 0.4;
                 const bool wallRunsNorthSouth =
                     wallOrientation == TILE_FIRST_PERSON_WALL_ORIENTATION_NORTH_SOUTH;
                 const double wallMinX = wallRunsNorthSouth
@@ -1090,11 +1097,11 @@ static void tileRenderFirstPersonPreview()
                 double farY = std::numeric_limits<double>::infinity();
                 bool rayIntersectsWallBounds = true;
                 if (fabs(rayDirectionX) <= kIntersectionEpsilon) {
-                    rayIntersectsWallBounds = cameraX >= wallMinX - kIntersectionEpsilon
-                        && cameraX <= wallMaxX + kIntersectionEpsilon;
+                    rayIntersectsWallBounds = rayCameraX >= wallMinX - kIntersectionEpsilon
+                        && rayCameraX <= wallMaxX + kIntersectionEpsilon;
                 } else {
-                    nearX = (wallMinX - cameraX) / rayDirectionX;
-                    farX = (wallMaxX - cameraX) / rayDirectionX;
+                    nearX = (wallMinX - rayCameraX) / rayDirectionX;
+                    farX = (wallMaxX - rayCameraX) / rayDirectionX;
                     if (nearX > farX) {
                         std::swap(nearX, farX);
                     }
@@ -1102,11 +1109,11 @@ static void tileRenderFirstPersonPreview()
 
                 if (rayIntersectsWallBounds) {
                     if (fabs(rayDirectionY) <= kIntersectionEpsilon) {
-                        rayIntersectsWallBounds = cameraY >= wallMinY - kIntersectionEpsilon
-                            && cameraY <= wallMaxY + kIntersectionEpsilon;
+                        rayIntersectsWallBounds = rayCameraY >= wallMinY - kIntersectionEpsilon
+                            && rayCameraY <= wallMaxY + kIntersectionEpsilon;
                     } else {
-                        nearY = (wallMinY - cameraY) / rayDirectionY;
-                        farY = (wallMaxY - cameraY) / rayDirectionY;
+                        nearY = (wallMinY - rayCameraY) / rayDirectionY;
+                        farY = (wallMaxY - rayCameraY) / rayDirectionY;
                         if (nearY > farY) {
                             std::swap(nearY, farY);
                         }
@@ -1120,7 +1127,7 @@ static void tileRenderFirstPersonPreview()
                 if (rayIntersectsWallBounds
                     && wallExitDistance >= clippedWallEntryDistance - kIntersectionEpsilon
                     && clippedWallEntryDistance <= cellExitDistance + kIntersectionEpsilon) {
-                    wallDistance = std::max(0.1, clippedWallEntryDistance);
+                    wallDistance = std::max(0.1, clippedWallEntryDistance / 2.0);
                     if (wallEntryDistance >= cellEntryDistance - kIntersectionEpsilon) {
                         side = nearX > nearY ? 0 : 1;
                     }
@@ -1139,8 +1146,8 @@ static void tileRenderFirstPersonPreview()
                 side = 1;
             }
 
-            if (mapX < 0 || mapX >= SQUARE_GRID_WIDTH
-                || mapY < 0 || mapY >= SQUARE_GRID_HEIGHT) {
+            if (mapX < 0 || mapX >= gHexGridWidth
+                || mapY < 0 || mapY >= gHexGridHeight) {
                 break;
             }
 
@@ -1152,36 +1159,32 @@ static void tileRenderFirstPersonPreview()
         }
 
         wallDepths[x] = wallDistance;
-        const int wallHeight = std::min(gTileWindowHeight,
+        const int fullWallHeight = std::min(gTileWindowHeight,
             static_cast<int>(gTileWindowHeight / wallDistance));
-        const int wallTop = std::max(0, horizonY - wallHeight / 2);
-        const int wallBottom = std::min(gTileWindowHeight - 1, horizonY + wallHeight / 2);
-        Color wallColor = COLOR_LIGHT_RED;
-        switch (wallType) {
-        case 3:
-            wallColor = COLOR_LIGHT_GOLD;
-            break;
-        case 4:
-            wallColor = COLOR_YELLOW_2;
-            break;
-        default:
-            break;
-        }
-
-        if (side == 1) {
-            switch (wallType) {
-            case 1:
-                wallColor = COLOR_DARK_RED;
+        const bool halfHeightWall = wallType == 2;
+        const int wallHeight = halfHeightWall ? std::max(1, fullWallHeight / 2) : fullWallHeight;
+        const int wallTop = halfHeightWall
+            ? horizonY
+            : std::max(0, horizonY - wallHeight / 2);
+        const int wallBottom = std::min(gTileWindowHeight - 1,
+            halfHeightWall ? horizonY + wallHeight : horizonY + wallHeight / 2);
+        Color wallColor;
+        if (wallType == 1 || wallType == 2) {
+            switch (wallOrientation) {
+            case TILE_FIRST_PERSON_WALL_ORIENTATION_NORTH_SOUTH:
+                wallColor = side == 0 ? COLOR_LIGHT_RED : COLOR_DARK_RED;
                 break;
-            case 3:
-                wallColor = COLOR_MAGENTA;
-                break;
-            case 4:
-                wallColor = COLOR_LIGHT_GREEN_2;
+            case TILE_FIRST_PERSON_WALL_ORIENTATION_EAST_WEST:
+                wallColor = side == 0 ? COLOR_CYAN : COLOR_BLUE;
                 break;
             default:
+                wallColor = side == 0 ? COLOR_MAGENTA : COLOR_BLUE_2;
                 break;
             }
+        } else if (wallType == 3) {
+            wallColor = side == 0 ? COLOR_LIGHT_GOLD : COLOR_MAGENTA;
+        } else {
+            wallColor = side == 0 ? COLOR_YELLOW_2 : COLOR_LIGHT_GREEN_2;
         }
         for (int y = wallTop; y <= wallBottom; y++) {
             gTileWindowBuffer[y * gTileWindowPitch + x] = wallColor;
@@ -1220,22 +1223,32 @@ static void tileFirstPersonGrayboxMarkObject(Object* object, void* context)
         return;
     }
 
-    if ((object->flags & (OBJECT_NO_BLOCK | OBJECT_LIGHT_THRU)) != OBJECT_NONE) {
+    const bool halfHeightWall = objectType == OBJ_TYPE_WALL
+        && (object->flags & OBJECT_NO_BLOCK) == OBJECT_NONE
+        && (object->flags & (OBJECT_TRANS_GLASS | OBJECT_TRANS_WALL | OBJECT_LIGHT_THRU)) != OBJECT_NONE;
+    if (!halfHeightWall
+        && (object->flags & (OBJECT_NO_BLOCK | OBJECT_LIGHT_THRU)) != OBJECT_NONE) {
         return;
     }
 
-    const int squareTile = squareTileFromTile(object->tile);
-    if (!squareGridTileIsValid(squareTile)) {
+    if (renderContext->gridWidth <= 0) {
+        return;
+    }
+    const int hexRow = object->tile / renderContext->gridWidth;
+    const int hexColumn = renderContext->gridWidth - 1 - object->tile % renderContext->gridWidth;
+    const int renderHexTile = hexRow * renderContext->gridWidth + hexColumn;
+    if (renderHexTile < 0 || renderHexTile >= gHexGridSize) {
         return;
     }
 
     unsigned char wallType = 0;
     TileFirstPersonWallOrientation wallOrientation =
         TILE_FIRST_PERSON_WALL_ORIENTATION_CELL;
+    Proto* proto = nullptr;
+    const bool hasProto = protoGetProto(object, &proto) == 0;
     if (objectType == OBJ_TYPE_WALL) {
-        wallType = 1;
-        Proto* proto = nullptr;
-        if (protoGetProto(object, &proto) == 0) {
+        wallType = halfHeightWall ? 2 : 1;
+        if (hasProto) {
             constexpr unsigned int kCornerFlags = PROTO_EXT_FLAG_NORTH_CORNER
                 | PROTO_EXT_FLAG_SOUTH_CORNER
                 | PROTO_EXT_FLAG_EAST_CORNER
@@ -1248,23 +1261,25 @@ static void tileFirstPersonGrayboxMarkObject(Object* object, void* context)
             }
         }
     } else {
-        Proto* proto;
-        if (protoGetProto(object, &proto) == 0 && proto->scenery.type == SCENERY_TYPE_DOOR) {
+        if (hasProto && proto->scenery.type == SCENERY_TYPE_DOOR) {
+            // Some door objects do not keep the generic pass-through object
+            // flags in sync with their authoritative door state.
+            if ((object->data.scenery.door.openFlags & DOOR_FLAG_OPEN) != 0
+                || (object->flags & OBJECT_OPEN_DOOR) != OBJECT_NONE) {
+                return;
+            }
             wallType = 3;
         } else {
             wallType = 4;
         }
     }
 
-    // squareTileFromTile uses Fallout's west-to-east map indexing, while the
-    // first-person world X axis runs east-to-west. Mirror the cell into the
-    // renderer's coordinate space before inserting it into the raycast grid.
-    const int renderSquareTile = squareTile / SQUARE_GRID_WIDTH * SQUARE_GRID_WIDTH
-        + (SQUARE_GRID_WIDTH - 1 - squareTile % SQUARE_GRID_WIDTH);
-    unsigned char& cellWallType = renderContext->wallCells[renderSquareTile];
+    // Fallout's object grid stores X in reverse order. Convert it to the
+    // renderer's east-to-west world coordinates without collapsing to a square tile.
+    unsigned char& cellWallType = renderContext->wallCells[renderHexTile];
     if (cellWallType == 0 || wallType == 3) {
         cellWallType = wallType;
-        renderContext->wallOrientations[renderSquareTile] = wallOrientation;
+        renderContext->wallOrientations[renderHexTile] = wallOrientation;
     }
 }
 
@@ -1709,8 +1724,13 @@ static void tileRenderFirstPersonTopology()
         if (squareGridTileIsValid(squareTile)) {
             const int cellX = mapLeft + (squareTile % SQUARE_GRID_WIDTH) * cellSize;
             const int cellY = mapTop + (squareTile / SQUARE_GRID_WIDTH) * cellSize;
-            bufferFill(gTileWindowBuffer + (cellY + (cellSize - 1) / 2) * gTileWindowPitch
-                    + cellX + (cellSize - 1) / 2,
+            const int hexColumn = gHexGridWidth - 1 - gDude->tile % gHexGridWidth;
+            const int hexRow = gDude->tile / gHexGridWidth;
+            const int localX = (hexColumn & 1) == 0 ? 3 * cellSize / 4 : cellSize / 4;
+            const int localY = (hexRow & 1) == 0 ? cellSize / 4 : 3 * cellSize / 4;
+            const int maxLocal = std::max(0, cellSize - 2);
+            bufferFill(gTileWindowBuffer + (cellY + std::min(maxLocal, localY)) * gTileWindowPitch
+                    + cellX + std::min(maxLocal, localX),
                 1,
                 1,
                 gTileWindowPitch,
@@ -1741,6 +1761,13 @@ static void tileFirstPersonTopologyMarkObject(Object* object, void* context)
 
     const int cellX = renderContext->mapLeft + (squareTile % SQUARE_GRID_WIDTH) * renderContext->cellSize;
     const int cellY = renderContext->mapTop + (squareTile / SQUARE_GRID_WIDTH) * renderContext->cellSize;
+    const int hexColumn = gHexGridWidth - 1 - object->tile % gHexGridWidth;
+    const int hexRow = object->tile / gHexGridWidth;
+    const int markerMaxLocal = std::max(0, renderContext->cellSize - 2);
+    const int markerX = cellX + std::min(markerMaxLocal,
+        (hexColumn & 1) == 0 ? 3 * renderContext->cellSize / 4 : renderContext->cellSize / 4);
+    const int markerY = cellY + std::min(markerMaxLocal,
+        (hexRow & 1) == 0 ? renderContext->cellSize / 4 : 3 * renderContext->cellSize / 4);
 
     Color markerColor = COLOR_LIGHT_GREY;
     Proto* proto = nullptr;
@@ -1749,17 +1776,20 @@ static void tileFirstPersonTopologyMarkObject(Object* object, void* context)
     switch (objectType) {
     case OBJ_TYPE_WALL:
         markerColor = (object->flags & OBJECT_NO_BLOCK) == OBJECT_NONE
-            ? COLOR_LIGHT_RED
-            : COLOR_AMBER;
+                && (object->flags & (OBJECT_TRANS_GLASS | OBJECT_TRANS_WALL | OBJECT_LIGHT_THRU)) != OBJECT_NONE
+            ? COLOR_LIGHT_BLUE
+            : (object->flags & OBJECT_NO_BLOCK) == OBJECT_NONE ? COLOR_LIGHT_RED : COLOR_AMBER;
         if (hasProto) {
             cornerFlags = proto->wall.extendedFlags;
         }
         break;
     case OBJ_TYPE_SCENERY:
         if (hasProto && proto->scenery.type == SCENERY_TYPE_DOOR) {
-            markerColor = (object->flags & OBJECT_NO_BLOCK) == OBJECT_NONE
-                ? COLOR_LIGHT_RED
-                : COLOR_LIGHT_GREEN_3;
+            const bool doorOpen = (object->data.scenery.door.openFlags & DOOR_FLAG_OPEN) != 0
+                || (object->flags & OBJECT_OPEN_DOOR) != OBJECT_NONE;
+            markerColor = doorOpen || (object->flags & OBJECT_NO_BLOCK) != OBJECT_NONE
+                ? COLOR_LIGHT_GREEN_3
+                : COLOR_LIGHT_RED;
         } else {
             markerColor = (object->flags & OBJECT_NO_BLOCK) == OBJECT_NONE
                 ? COLOR_LIGHT_GOLD
@@ -1779,11 +1809,9 @@ static void tileFirstPersonTopologyMarkObject(Object* object, void* context)
         break;
     }
 
-    const int markerSize = std::min(renderContext->cellSize - 1, 3);
+    const int markerSize = 1;
     if (markerSize > 0) {
-        bufferFill(gTileWindowBuffer
-                + (cellY + (renderContext->cellSize - markerSize) / 2) * gTileWindowPitch
-                + cellX + (renderContext->cellSize - markerSize) / 2,
+        bufferFill(gTileWindowBuffer + markerY * gTileWindowPitch + markerX,
             markerSize,
             markerSize,
             gTileWindowPitch,
@@ -1797,8 +1825,8 @@ static void tileFirstPersonTopologyMarkObject(Object* object, void* context)
     if (rotationIsValid(object->rotation)) {
         static constexpr int kRotationX[ROTATION_COUNT] = { 1, 1, 1, -1, -1, -1 };
         static constexpr int kRotationY[ROTATION_COUNT] = { -1, 0, 1, 1, 0, -1 };
-        const int centerX = cellX + renderContext->cellSize / 2;
-        const int centerY = cellY + renderContext->cellSize / 2;
+        const int centerX = markerX;
+        const int centerY = markerY;
         const int arrowLength = std::max(1, (renderContext->cellSize - 1) / 2);
         const int arrowX = centerX + kRotationX[object->rotation] * arrowLength;
         const int arrowY = centerY + kRotationY[object->rotation] * arrowLength;
@@ -1858,6 +1886,52 @@ static void tileFirstPersonTopologyMarkObject(Object* object, void* context)
                 cornerSize,
                 gTileWindowPitch,
                 cornerColor);
+        }
+    }
+
+    // Show the shape consumed by the graybox wall grid. A vertical line is a
+    // north/south wall (thin on X); a horizontal line is east/west (thin on Y).
+    // Cell blockers and corner pieces use a box so their conservative geometry
+    // is apparent in the topology view.
+    const bool openDoor = objectType == OBJ_TYPE_SCENERY && hasProto
+        && proto->scenery.type == SCENERY_TYPE_DOOR
+        && ((object->data.scenery.door.openFlags & DOOR_FLAG_OPEN) != 0
+            || (object->flags & OBJECT_OPEN_DOOR) != OBJECT_NONE);
+    const bool halfHeightWall = objectType == OBJ_TYPE_WALL
+        && (object->flags & OBJECT_NO_BLOCK) == OBJECT_NONE
+        && (object->flags & (OBJECT_TRANS_GLASS | OBJECT_TRANS_WALL | OBJECT_LIGHT_THRU)) != OBJECT_NONE;
+    if ((objectType == OBJ_TYPE_WALL || objectType == OBJ_TYPE_SCENERY)
+        && !openDoor
+        && (halfHeightWall
+            || (object->flags & (OBJECT_NO_BLOCK | OBJECT_LIGHT_THRU)) == OBJECT_NONE)) {
+        TileFirstPersonWallOrientation orientation = TILE_FIRST_PERSON_WALL_ORIENTATION_CELL;
+        if (objectType == OBJ_TYPE_WALL && hasProto) {
+            constexpr unsigned int kCornerFlags = PROTO_EXT_FLAG_NORTH_CORNER
+                | PROTO_EXT_FLAG_SOUTH_CORNER | PROTO_EXT_FLAG_EAST_CORNER
+                | PROTO_EXT_FLAG_WEST_CORNER;
+            const unsigned int flags = static_cast<unsigned int>(proto->wall.extendedFlags);
+            if ((flags & kCornerFlags) == 0) {
+                orientation = (flags & PROTO_EXT_FLAG_HIDDEN) != 0
+                    ? TILE_FIRST_PERSON_WALL_ORIENTATION_EAST_WEST
+                    : TILE_FIRST_PERSON_WALL_ORIENTATION_NORTH_SOUTH;
+            }
+        }
+
+        const int centerX = cellX + renderContext->cellSize / 2;
+        const int centerY = cellY + renderContext->cellSize / 2;
+        if (orientation == TILE_FIRST_PERSON_WALL_ORIENTATION_NORTH_SOUTH) {
+            tileFirstPersonDrawDiagnosticLine(centerX, cellY, centerX, cellY + renderContext->cellSize - 1,
+                COLOR_WHITE);
+            tileFirstPersonDrawDiagnosticLine(centerX - 1, cellY, centerX - 1,
+                cellY + renderContext->cellSize - 1, COLOR_CYAN);
+        } else if (orientation == TILE_FIRST_PERSON_WALL_ORIENTATION_EAST_WEST) {
+            tileFirstPersonDrawDiagnosticLine(cellX, centerY, cellX + renderContext->cellSize - 1, centerY,
+                COLOR_WHITE);
+            tileFirstPersonDrawDiagnosticLine(cellX, centerY - 1, cellX + renderContext->cellSize - 1,
+                centerY - 1, COLOR_CYAN);
+        } else {
+            bufferDrawRect(gTileWindowBuffer, gTileWindowPitch, cellX + 1, cellY + 1,
+                cellX + renderContext->cellSize - 2, cellY + renderContext->cellSize - 2, COLOR_WHITE);
         }
     }
 }
