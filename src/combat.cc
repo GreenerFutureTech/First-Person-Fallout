@@ -3237,7 +3237,11 @@ void _combat_turn_run()
     while (_combat_turn_running > 0) {
         sharedFpsLimiter.mark();
 
-        _process_bk();
+        // NPC turns do not enter _combat_input, so continue polling only the
+        // first-person camera controls while their animations are playing.
+        // Other events are intentionally discarded: the player cannot act
+        // until COMBAT_STATE_PLAYER_TURN is set again.
+        gameHandleFirstPersonPreviewInput(inputGetInput());
 
         renderPresent();
         sharedFpsLimiter.throttle();
@@ -3517,7 +3521,7 @@ static void waitForGorisAnimation(Object* critter)
 {
     while (animationIsBusy(critter)) {
         sharedFpsLimiter.mark();
-        _process_bk();
+        gameHandleFirstPersonPreviewInput(inputGetInput());
         renderPresent();
         sharedFpsLimiter.throttle();
     }

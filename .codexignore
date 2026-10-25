@@ -1,0 +1,44 @@
+# --------------------------------------------------
+# 1. Heavy Game Data Archives & Binaries (CRITICAL)
+# --------------------------------------------------
+files/*.dat             # ce.dat, f2_res.dat (Game archives hold hundreds of MBs of compressed data)
+*.dat
+*.sav
+*.pro
+*.acm
+*.frm
+
+# --------------------------------------------------
+# 2. Build Artifacts & Output Binaries
+# --------------------------------------------------
+out/                    # Compiled executables, .obj, .o, and build outputs
+out/**
+bin/
+build/
+*.exe
+*.dll
+*.so
+*.dylib
+*.pdb
+
+# --------------------------------------------------
+# 3. Third-Party Libraries & Engine Dependencies
+# --------------------------------------------------
+third_party/            # External C/C++ libs (SDL, glad, etc. - Codex should read headers on-demand, not index entire vendor folders)
+sfall_testing/          # Auxiliary testing scripts/dumps if not actively editing sfall hooks
+
+# --------------------------------------------------
+# 4. Documentation & Non-Code Meta Files
+# --------------------------------------------------
+docs/images/            # Screenshots & assets
+docs/                   # Large markdown guides (only tag explicitly when asking conversion questions)
+.github/                # CI/CD workflows and actions
+tools/                  # Exte1rnal binary helper utilities
+*.md                    # Exclude general docs like CONTRIBUTING.md, LICENSE.md (except active work)
+!README.md              # Keep README as lightweight project context if needed
+
+# --------------------------------------------------
+# 5. Local INI & Config Files
+# --------------------------------------------------
+files/*.ini
+files/*.cfg

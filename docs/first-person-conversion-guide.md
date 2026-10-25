@@ -228,7 +228,8 @@ and same-team critters in green, non-party critters in amber outside combat,
 and opposing teams in red during combat. Mouse look turns the view; F9 still
 switches to the top-down source diagnostic. F11 restores the isometric view
 and normal mouse mode. Aim the crosshair at a visible critter and left-click
-to use the existing talk action. WASD moves one hex step relative to the
+to talk to a living, talkable critter or loot a non-talkable critter using
+Fallout's existing looting action. WASD moves one hex step relative to the
 view direction, using the game's existing movement animation and collision
 path. During combat, movement spends the existing movement AP (including
 bonus move AP) and is unavailable when no movement AP remains. Actor and
@@ -241,7 +242,8 @@ person world coordinates.
 During real-time operation and turn-based combat, mouse-look remains active
 by default. Right-click to show the normal cursor and freeze the view. In
 real-time, use the cursor on the interface bar or click a visible critter to
-talk; clicks in the 3D viewport do not fall through to isometric picking.
+talk or loot; clicks in the 3D viewport do not fall through to isometric
+picking.
 During combat, select the weapon/action from the interface bar, then click a
 visible enemy to send that target to Fallout's existing combat attack logic.
 Right-click again to return to mouse-look. Attack range, line of sight, hit

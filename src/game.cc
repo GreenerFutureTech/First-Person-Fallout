@@ -550,26 +550,45 @@ void gameExit()
     sfallConfigExit();
 }
 
-// 0x442D44
-int gameHandleKey(int eventCode, bool isInCombatMode)
+void gameHandleFirstPersonPreviewInput(int eventCode)
 {
-    if (tileFirstPersonPreviewIsEnabled()) {
-        if (gFirstPersonPreviewMouseReleased != !mouseDeviceUsesRelativeMode()) {
-            gameFirstPersonPreviewSetMouseReleased(gFirstPersonPreviewMouseReleased);
-        } else if (gFirstPersonPreviewMouseReleased) {
-            mouseShowCursor();
-        } else {
-            mouseHideCursor();
-        }
+    if (!tileFirstPersonPreviewIsEnabled()) {
+        return;
     }
 
-    if (tileFirstPersonPreviewIsEnabled() && mouseDeviceUsesRelativeMode()) {
+    if (gFirstPersonPreviewMouseReleased != !mouseDeviceUsesRelativeMode()) {
+        gameFirstPersonPreviewSetMouseReleased(gFirstPersonPreviewMouseReleased);
+    } else if (gFirstPersonPreviewMouseReleased) {
+        mouseShowCursor();
+    } else {
+        mouseHideCursor();
+    }
+
+    if (mouseDeviceUsesRelativeMode()) {
         int deltaX;
         int deltaY;
         mouseDeviceGetRelativeMotion(&deltaX, &deltaY);
         (void)deltaY;
         tileFirstPersonPreviewLook(static_cast<int>(deltaX * settings.preferences.mouse_sensitivity));
     }
+
+    if (eventCode == INPUT_EVENT_FIRST_PERSON_RIGHT_CLICK) {
+        gameFirstPersonPreviewSetMouseReleased(true);
+    } else if (eventCode == -2) {
+        const int mouseState = mouseGetEvent();
+        if (gFirstPersonPreviewMouseReleased
+            && (mouseState & MOUSE_EVENT_RIGHT_BUTTON_DOWN) != 0
+            && (mouseState & MOUSE_EVENT_RIGHT_BUTTON_REPEAT) == 0) {
+            gameFirstPersonPreviewSetMouseReleased(false);
+        }
+    }
+}
+
+// 0x442D44
+int gameHandleKey(int eventCode, bool isInCombatMode)
+{
+    const bool firstPersonPreviewMouseWasReleased = gFirstPersonPreviewMouseReleased;
+    gameHandleFirstPersonPreviewInput(eventCode);
 
     // NOTE: Uninline.
     if (gameGetState() == GameState::DialogRequested) {
@@ -591,17 +610,16 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
 
     if (tileFirstPersonPreviewIsEnabled()
         && eventCode == INPUT_EVENT_FIRST_PERSON_RIGHT_CLICK) {
-        gameFirstPersonPreviewSetMouseReleased(true);
         return 0;
     }
 
     if (tileFirstPersonPreviewIsEnabled()
         && (eventCode == -2 || eventCode == INPUT_EVENT_FIRST_PERSON_LEFT_CLICK)) {
         const int mouseState = mouseGetEvent();
-        if (gFirstPersonPreviewMouseReleased
+        if (firstPersonPreviewMouseWasReleased
+            && eventCode == -2
             && (mouseState & MOUSE_EVENT_RIGHT_BUTTON_DOWN) != 0
             && (mouseState & MOUSE_EVENT_RIGHT_BUTTON_REPEAT) == 0) {
-            gameFirstPersonPreviewSetMouseReleased(false);
             return 0;
         }
 
@@ -615,7 +633,11 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                 mouseGetPosition(&mouseX, &mouseY);
                 Object* critter = tileFirstPersonPreviewPickCritterAt(mouseX, mouseY);
                 if (critter != nullptr) {
-                    _combat_attack_this(critter);
+                    if (critterIsDead(critter)) {
+                        actionLootCritter(gDude, critter);
+                    } else {
+                        _combat_attack_this(critter);
+                    }
                 }
                 return 0;
             }
@@ -625,8 +647,12 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
         } else {
             if (eventCode == INPUT_EVENT_FIRST_PERSON_LEFT_CLICK) {
                 Object* critter = tileFirstPersonPreviewPickCritter();
-                if (critter != nullptr && _obj_action_can_talk_to(critter)) {
-                    actionTalk(gDude, critter);
+                if (critter != nullptr) {
+                    if (_obj_action_can_talk_to(critter)) {
+                        actionTalk(gDude, critter);
+                    } else {
+                        actionLootCritter(gDude, critter);
+                    }
                 }
                 return 0;
             }
@@ -644,8 +670,38 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                     if ((mouseState & MOUSE_EVENT_LEFT_BUTTON_DOWN) != 0
                         && (mouseState & MOUSE_EVENT_LEFT_BUTTON_REPEAT) == 0) {
                         Object* critter = tileFirstPersonPreviewPickCritterAt(mouseX, mouseY);
-                        if (critter != nullptr && _obj_action_can_talk_to(critter)) {
-                            actionTalk(gDude, critter);
+                        if (critter != nullptr) {
+                            if (_obj_action_can_talk_to(critter)) {
+                                actionTalk(gDude, critter);
+                            } else {
+                                actionLootCritter(gDude, critter);
+                            }
+                        } else {
+                            const int destinationTile = tileFirstPersonPreviewPickGroundTileAt(
+                                mouseX - isoWindowRect.left,
+                                mouseY - isoWindowRect.top);
+                            if (tileIsValid(destinationTile)) {
+                                tileFirstPersonPreviewTurnToTile(destinationTile);
+                                int actionPoints = isInCombat()
+                                    ? gDude->data.critter.combat.ap + _combat_free_move
+                                    : -1;
+                                // Match _check_move: a new real-time move click
+                                // interrupts the player's current path when the
+                                // interrupt-walk option is enabled.
+                                if (!isInCombat() && settings.system.interrupt_walk) {
+                                    reg_anim_clear(gDude);
+                                }
+                                if (reg_anim_begin(ANIMATION_REQUEST_RESERVED) == 0) {
+                                    if (settings.preferences.running) {
+                                        animationRegisterRunToTile(gDude, destinationTile,
+                                            gDude->elevation, actionPoints, 0);
+                                    } else {
+                                        animationRegisterMoveToTile(gDude, destinationTile,
+                                            gDude->elevation, actionPoints, 0);
+                                    }
+                                    reg_anim_end();
+                                }
+                            }
                         }
                     }
                     return 0;

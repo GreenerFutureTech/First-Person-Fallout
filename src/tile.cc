@@ -118,6 +118,7 @@ static void tileFirstPersonRenderActor(Object* object, void* context);
 static void tileFirstPersonDrawCrosshair();
 static void tileFirstPersonDrawDiagnosticLine(int x1, int y1, int x2, int y2, Color color);
 static bool tileFirstPersonGetWorldPosition(int tile, double* x, double* y);
+static double tileFirstPersonPreviewGetYaw();
 static void tileFirstPersonGetCameraPosition(int tile, MapElevation elevation, double* x, double* y);
 static void roof_fill_push_task_if_in_bounds(std::stack<roof_fill_task>& tasks_stack, int x, int y);
 static void roof_fill_off_process_task(std::stack<roof_fill_task>& tasks_stack, MapElevation elevation, bool on);
@@ -152,6 +153,10 @@ static bool gTileEnabled = true;
 static bool gFirstPersonPreviewEnabled = false;
 static bool gFirstPersonPreviewTopologyEnabled = false;
 static int gFirstPersonPreviewYaw = 0;
+static double gFirstPersonPreviewYawStart = 0.0;
+static double gFirstPersonPreviewYawTarget = 0.0;
+static unsigned int gFirstPersonPreviewYawStartTime = 0;
+static bool gFirstPersonPreviewYawTurning = false;
 static bool gFirstPersonPreviewCameraInitialized = false;
 static int gFirstPersonPreviewCameraTile = -1;
 static MapElevation gFirstPersonPreviewCameraElevation;
@@ -876,7 +881,7 @@ static void tileRenderFirstPersonPreview()
         tileFirstPersonGetCameraPosition(gDude->tile, gDude->elevation, &cameraX, &cameraY);
     }
 
-    const double yaw = gFirstPersonPreviewYaw * kPi / 180.0;
+    const double yaw = tileFirstPersonPreviewGetYaw() * kPi / 180.0;
     const double directionX = sin(yaw);
     const double directionY = -cos(yaw);
     const double cameraPlaneX = -directionY * kFieldOfViewScale;
@@ -1191,10 +1196,15 @@ static void tileFirstPersonGrayboxMarkObject(Object* object, void* context)
         }
     }
 
-    unsigned char& cellWallType = renderContext->wallCells[squareTile];
+    // squareTileFromTile uses Fallout's west-to-east map indexing, while the
+    // first-person world X axis runs east-to-west. Mirror the cell into the
+    // renderer's coordinate space before inserting it into the raycast grid.
+    const int renderSquareTile = squareTile / SQUARE_GRID_WIDTH * SQUARE_GRID_WIDTH
+        + (SQUARE_GRID_WIDTH - 1 - squareTile % SQUARE_GRID_WIDTH);
+    unsigned char& cellWallType = renderContext->wallCells[renderSquareTile];
     if (cellWallType == 0 || wallType == 3) {
         cellWallType = wallType;
-        renderContext->wallOrientations[squareTile] = wallOrientation;
+        renderContext->wallOrientations[renderSquareTile] = wallOrientation;
     }
 }
 
@@ -1390,9 +1400,30 @@ static bool tileFirstPersonGetWorldPosition(int tile, double* x, double* y)
         return false;
     }
 
-    *x = (tile % gHexGridWidth) / 2.0 + 0.25;
+    *x = (gHexGridWidth - 1 - tile % gHexGridWidth) / 2.0 + 0.25;
     *y = (tile / gHexGridWidth) / 2.0 + 0.25;
     return true;
+}
+
+static double tileFirstPersonPreviewGetYaw()
+{
+    if (!gFirstPersonPreviewYawTurning) {
+        return gFirstPersonPreviewYaw;
+    }
+
+    constexpr unsigned int kTurnDuration = 140;
+    const unsigned int now = getTicks();
+    const double progress = std::min(1.0,
+        static_cast<double>(getTicksBetween(now, gFirstPersonPreviewYawStartTime)) / kTurnDuration);
+    const double easedProgress = progress * progress * (3.0 - 2.0 * progress);
+    const double yaw = gFirstPersonPreviewYawStart
+        + (gFirstPersonPreviewYawTarget - gFirstPersonPreviewYawStart) * easedProgress;
+    if (progress >= 1.0) {
+        gFirstPersonPreviewYawTurning = false;
+        gFirstPersonPreviewYaw = static_cast<int>(gFirstPersonPreviewYawTarget + 360.0) % 360;
+        return gFirstPersonPreviewYaw;
+    }
+    return yaw;
 }
 
 static void tileFirstPersonGetCameraPosition(int tile, MapElevation elevation, double* x, double* y)
@@ -1781,6 +1812,54 @@ Object* tileFirstPersonPreviewPickCritterAt(int screenX, int screenY)
         screenY - isoWindowRect.top);
 }
 
+int tileFirstPersonPreviewPickGroundTileAt(int screenX, int screenY)
+{
+    constexpr double kPi = 3.14159265358979323846;
+    constexpr double kFieldOfViewScale = 0.66;
+    if (!gFirstPersonPreviewEnabled || gFirstPersonPreviewTopologyEnabled
+        || gDude == nullptr || !elevationIsValid(gElevation)
+        || screenY < gTileWindowHeight / 2 || screenY >= gTileWindowHeight
+        || screenX < 0 || screenX >= gTileWindowWidth
+        || gFirstPersonPreviewWallDepths.size() != static_cast<size_t>(gTileWindowWidth)) {
+        return -1;
+    }
+
+    double cameraX;
+    double cameraY;
+    tileFirstPersonGetCameraPosition(gDude->tile, gDude->elevation, &cameraX, &cameraY);
+    const double yaw = tileFirstPersonPreviewGetYaw() * kPi / 180.0;
+    const double directionX = sin(yaw);
+    const double directionY = -cos(yaw);
+    const double cameraPlaneX = -directionY * kFieldOfViewScale;
+    const double cameraPlaneY = directionX * kFieldOfViewScale;
+    const double cameraOffset = 2.0 * screenX / gTileWindowWidth - 1.0;
+    const double rayDirectionX = directionX + cameraPlaneX * cameraOffset;
+    const double rayDirectionY = directionY + cameraPlaneY * cameraOffset;
+    const double distance = (gTileWindowHeight * 0.5) / (screenY - gTileWindowHeight / 2);
+    if (distance >= gFirstPersonPreviewWallDepths[screenX]) {
+        return -1;
+    }
+
+    const int mapX = static_cast<int>(floor(cameraX + rayDirectionX * distance));
+    const int mapY = static_cast<int>(floor(cameraY + rayDirectionY * distance));
+    if (mapX < 0 || mapX >= SQUARE_GRID_WIDTH || mapY < 0 || mapY >= SQUARE_GRID_HEIGHT) {
+        return -1;
+    }
+
+    const int squareTile = mapY * SQUARE_GRID_WIDTH + mapX;
+    const FloorTileFrmId floorTileFrmId(gTileSquares[gElevation]->tileFid[squareTile]);
+    if (floorTileFrmId.frameId<TileFrameId>() == TileFrameId::Invalid
+        || (floorTileFrmId.flags() & TileFlags::TemporarilyHidden) != TileFlags::None) {
+        return -1;
+    }
+
+    const int tileColumn = gHexGridWidth - 1
+        - static_cast<int>(floor((cameraX + rayDirectionX * distance - 0.25) * 2.0 + 0.5));
+    const int tileRow = static_cast<int>(floor((cameraY + rayDirectionY * distance - 0.25) * 2.0 + 0.5));
+    const int tile = tileRow * gHexGridWidth + tileColumn;
+    return tileIsValid(tile) ? tile : -1;
+}
+
 bool tileFirstPersonPreviewMove(int relativeDirection)
 {
     if (!gFirstPersonPreviewEnabled
@@ -1886,12 +1965,50 @@ void tileFirstPersonPreviewLook(int deltaX)
         return;
     }
 
+    gFirstPersonPreviewYaw = static_cast<int>(tileFirstPersonPreviewGetYaw());
     gFirstPersonPreviewYaw = (gFirstPersonPreviewYaw + deltaX) % 360;
     if (gFirstPersonPreviewYaw < 0) {
         gFirstPersonPreviewYaw += 360;
     }
+    gFirstPersonPreviewYawTurning = false;
 
     tileFirstPersonPreviewRefresh();
+}
+
+void tileFirstPersonPreviewTurnToTile(int tile)
+{
+    if (!gFirstPersonPreviewEnabled || gDude == nullptr || !tileIsValid(tile)) {
+        return;
+    }
+
+    double currentX;
+    double currentY;
+    double targetX;
+    double targetY;
+    if (!tileFirstPersonGetWorldPosition(gDude->tile, &currentX, &currentY)
+        || !tileFirstPersonGetWorldPosition(tile, &targetX, &targetY)) {
+        return;
+    }
+
+    constexpr double kPi = 3.14159265358979323846;
+    double targetYaw = atan2(targetX - currentX, -(targetY - currentY)) * 180.0 / kPi;
+    if (targetYaw < 0.0) {
+        targetYaw += 360.0;
+    }
+
+    const double currentYaw = tileFirstPersonPreviewGetYaw();
+    double delta = targetYaw - currentYaw;
+    while (delta > 180.0) {
+        delta -= 360.0;
+    }
+    while (delta < -180.0) {
+        delta += 360.0;
+    }
+
+    gFirstPersonPreviewYawStart = currentYaw;
+    gFirstPersonPreviewYawTarget = currentYaw + delta;
+    gFirstPersonPreviewYawStartTime = getTicks();
+    gFirstPersonPreviewYawTurning = true;
 }
 
 void tileFirstPersonPreviewToggle()

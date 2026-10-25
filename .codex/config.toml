@@ -1,0 +1,6 @@
+# Default "Cheap & Fast" Mode
+model = "gpt-5.4-mini"          # Lightweight model for daily edits
+reasoning_effort = "low"        # Minimal internal thinking budget
+
+[approval]
+approval_mode = "agent"         # Standard agent mode for file edits

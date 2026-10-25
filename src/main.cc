@@ -38,6 +38,7 @@
 #include "sfall_global_scripts.h"
 #include "svga.h"
 #include "text_font.h"
+#include "tile.h"
 #include "window.h"
 #include "window_manager.h"
 #include "window_manager_private.h"
@@ -430,6 +431,13 @@ static void mainLoop()
         scriptsHandleRequests();
 
         mapHandleTransition();
+
+        // The first-person camera follows tile-based movement with a timed
+        // interpolation. Refresh every frame so combat animations sample it
+        // continuously even when no other map refresh is requested.
+        if (tileFirstPersonPreviewIsEnabled()) {
+            tileFirstPersonPreviewRefresh();
+        }
 
         if (_main_game_paused != 0) {
             _main_game_paused = 0;
