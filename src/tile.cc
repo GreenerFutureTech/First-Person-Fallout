@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <stack>
 #include <utility>
@@ -114,6 +115,8 @@ static void tileSetBorder(int windowWidth, int windowHeight, int hexGridWidth, i
 static void tileRefreshMapper(Rect* rect, MapElevation elevation);
 static void tileRefreshGame(Rect* rect, MapElevation elevation);
 static void tileRenderFirstPersonPreview();
+static void tileFirstPersonInitializeWallTextures();
+static unsigned int tileFirstPersonTextureNoise(int x, int y, unsigned int seed);
 static void tileFirstPersonTopologyMarkObject(Object* object, void* context);
 static void tileFirstPersonGrayboxMarkObject(Object* object, void* context);
 static void tileFirstPersonRenderActor(Object* object, void* context);
@@ -155,6 +158,11 @@ static TileWindowRefreshElevationProc* gTileWindowRefreshElevationProc = tileRef
 static bool gTileEnabled = true;
 static bool gFirstPersonPreviewEnabled = false;
 static bool gFirstPersonPreviewTopologyEnabled = false;
+static int gFirstPersonPreviewTopologyZoom = 0;
+static constexpr int kFirstPersonWallTextureSize = 64;
+static std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize> gFirstPersonStoneWallTexture;
+static std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize> gFirstPersonDoorWallTexture;
+static bool gFirstPersonWallTexturesInitialized = false;
 static int gFirstPersonPreviewYaw = 0;
 static double gFirstPersonPreviewYawStart = 0.0;
 static double gFirstPersonPreviewYawTarget = 0.0;
@@ -841,6 +849,97 @@ static void tileRefreshGame(Rect* rect, MapElevation elevation)
     gTileWindowRefreshProc(didClear ? &rectToUpdate : &renderRect);
 }
 
+static unsigned int tileFirstPersonTextureNoise(int x, int y, unsigned int seed)
+{
+    unsigned int value = static_cast<unsigned int>(x) * 0x9E3779B9u
+        ^ static_cast<unsigned int>(y) * 0x85EBCA6Bu
+        ^ seed * 0xC2B2AE35u;
+    value ^= value >> 16;
+    value *= 0x7FEB352Du;
+    value ^= value >> 15;
+    value *= 0x846CA68Bu;
+    value ^= value >> 16;
+    return value;
+}
+
+static void tileFirstPersonInitializeWallTextures()
+{
+    if (gFirstPersonWallTexturesInitialized) {
+        return;
+    }
+
+    const Color mortar = _colorTable[rgb555(0x302922)];
+    const Color stoneColors[] = {
+        _colorTable[rgb555(0x4E4237)],
+        _colorTable[rgb555(0x594A3D)],
+        _colorTable[rgb555(0x655442)],
+        _colorTable[rgb555(0x71604D)],
+        _colorTable[rgb555(0x7C6A55)],
+    };
+    const Color stoneEdge = _colorTable[rgb555(0x44382F)];
+    const Color stoneHighlight = _colorTable[rgb555(0x89765F)];
+
+    const Color woodColors[] = {
+        _colorTable[rgb555(0x38271D)],
+        _colorTable[rgb555(0x4C3424)],
+        _colorTable[rgb555(0x60432D)],
+        _colorTable[rgb555(0x735237)],
+    };
+    const Color woodEdge = _colorTable[rgb555(0x2A1E18)];
+    const Color woodHighlight = _colorTable[rgb555(0x806040)];
+
+    for (int y = 0; y < kFirstPersonWallTextureSize; y++) {
+        const int course = y / 16;
+        const int localY = y % 16;
+        const int horizontalOffset = (course & 1) != 0 ? 16 : 0;
+        for (int x = 0; x < kFirstPersonWallTextureSize; x++) {
+            const int phaseX = (x + horizontalOffset) & 31;
+            const int blockX = ((x + horizontalOffset) / 32) & 1;
+            const int blockSeed = course * 2 + blockX;
+            const unsigned int noise = tileFirstPersonTextureNoise(x, y, 17);
+            const int stoneBase = (blockSeed
+                + static_cast<int>(tileFirstPersonTextureNoise(blockX, course, 29) % 3)) % 5;
+            const size_t index = static_cast<size_t>(y) * kFirstPersonWallTextureSize + x;
+
+            if (localY == 0 || phaseX == 0) {
+                gFirstPersonStoneWallTexture[index] = mortar;
+            } else if (localY == 1 || phaseX == 1) {
+                gFirstPersonStoneWallTexture[index] = stoneEdge;
+            } else if (localY == 15 || phaseX == 31) {
+                gFirstPersonStoneWallTexture[index] = stoneColors[(stoneBase + 1) % 5];
+            } else {
+                if (localY == 2 && (noise & 31) == 0) {
+                    gFirstPersonStoneWallTexture[index] = stoneHighlight;
+                } else if ((noise & 63) == 0 && stoneBase > 0) {
+                    gFirstPersonStoneWallTexture[index] = stoneColors[stoneBase - 1];
+                } else {
+                    gFirstPersonStoneWallTexture[index] = stoneColors[stoneBase];
+                }
+            }
+
+            const int plankX = x & 15;
+            const int plank = x / 16;
+            const int woodBase = (plank + static_cast<int>(tileFirstPersonTextureNoise(plank, 0, 43) % 2)) % 4;
+            if (plankX == 0) {
+                gFirstPersonDoorWallTexture[index] = woodEdge;
+            } else if (plankX == 1) {
+                gFirstPersonDoorWallTexture[index] = woodColors[0];
+            } else if (plankX == 15) {
+                gFirstPersonDoorWallTexture[index] = woodColors[1];
+            } else if ((x % 16 == 4 || x % 16 == 11)
+                && ((noise >> 3) & 7) == 0) {
+                gFirstPersonDoorWallTexture[index] = woodHighlight;
+            } else if ((noise & 31) == 0 && woodBase > 0) {
+                gFirstPersonDoorWallTexture[index] = woodColors[woodBase - 1];
+            } else {
+                gFirstPersonDoorWallTexture[index] = woodColors[woodBase];
+            }
+        }
+    }
+
+    gFirstPersonWallTexturesInitialized = true;
+}
+
 static void tileRenderFirstPersonPreview()
 {
     constexpr double kPi = 3.14159265358979323846;
@@ -857,6 +956,8 @@ static void tileRenderFirstPersonPreview()
         || !elevationIsValid(gElevation) || gTileSquares[gElevation] == nullptr) {
         return;
     }
+
+    tileFirstPersonInitializeWallTextures();
 
     const int horizonY = gTileWindowHeight / 2;
     bufferFill(gTileWindowBuffer,
@@ -1168,26 +1269,29 @@ static void tileRenderFirstPersonPreview()
             : std::max(0, horizonY - wallHeight / 2);
         const int wallBottom = std::min(gTileWindowHeight - 1,
             halfHeightWall ? horizonY + wallHeight : horizonY + wallHeight / 2);
-        Color wallColor;
-        if (wallType == 1 || wallType == 2) {
-            switch (wallOrientation) {
-            case TILE_FIRST_PERSON_WALL_ORIENTATION_NORTH_SOUTH:
-                wallColor = side == 0 ? COLOR_LIGHT_RED : COLOR_DARK_RED;
-                break;
-            case TILE_FIRST_PERSON_WALL_ORIENTATION_EAST_WEST:
-                wallColor = side == 0 ? COLOR_CYAN : COLOR_BLUE;
-                break;
-            default:
-                wallColor = side == 0 ? COLOR_MAGENTA : COLOR_BLUE_2;
-                break;
-            }
-        } else if (wallType == 3) {
-            wallColor = side == 0 ? COLOR_LIGHT_GOLD : COLOR_MAGENTA;
-        } else {
-            wallColor = side == 0 ? COLOR_YELLOW_2 : COLOR_LIGHT_GREEN_2;
+        const double hitWorldX = cameraX + rayDirectionX * wallDistance;
+        const double hitWorldY = cameraY + rayDirectionY * wallDistance;
+        const double wallCoordinate = wallOrientation == TILE_FIRST_PERSON_WALL_ORIENTATION_NORTH_SOUTH
+                ? hitWorldY
+                : wallOrientation == TILE_FIRST_PERSON_WALL_ORIENTATION_EAST_WEST
+                ? hitWorldX
+                : side == 0 ? hitWorldY : hitWorldX;
+        int textureX = static_cast<int>(floor(wallCoordinate * kFirstPersonWallTextureSize))
+            % kFirstPersonWallTextureSize;
+        if (textureX < 0) {
+            textureX += kFirstPersonWallTextureSize;
         }
+        const int textureHeight = std::max(1, fullWallHeight);
+        const int faceShade = side == 0 ? 116 : 96;
+        const int distanceShade = std::min(48, static_cast<int>(wallDistance * 7.0));
+        const int light = std::max(48, faceShade - distanceShade);
+        const std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize>& texture =
+            wallType == 3 ? gFirstPersonDoorWallTexture : gFirstPersonStoneWallTexture;
         for (int y = wallTop; y <= wallBottom; y++) {
-            gTileWindowBuffer[y * gTileWindowPitch + x] = wallColor;
+            int textureY = (y - wallTop) * kFirstPersonWallTextureSize / textureHeight;
+            textureY %= kFirstPersonWallTextureSize;
+            const Color texel = texture[textureY * kFirstPersonWallTextureSize + textureX];
+            gTileWindowBuffer[y * gTileWindowPitch + x] = intensityColorTable[texel][light];
         }
     }
 
@@ -1691,50 +1795,78 @@ static void tileRenderFirstPersonTopology()
         return;
     }
 
-    const int mapWidth = cellSize * SQUARE_GRID_WIDTH;
-    const int mapHeight = cellSize * SQUARE_GRID_HEIGHT;
-    const int mapLeft = (gTileWindowWidth - mapWidth) / 2;
-    const int mapTop = (gTileWindowHeight - mapHeight) / 2;
+    const int zoomScale = 1 << gFirstPersonPreviewTopologyZoom;
+    const int zoomedCellSize = cellSize * zoomScale;
+    const int mapWidth = zoomedCellSize * SQUARE_GRID_WIDTH;
+    const int mapHeight = zoomedCellSize * SQUARE_GRID_HEIGHT;
+    int mapLeft = (gTileWindowWidth - mapWidth) / 2;
+    int mapTop = (gTileWindowHeight - mapHeight) / 2;
+    if (gFirstPersonPreviewTopologyZoom > 0) {
+        int focusSquareTile = -1;
+        if (gDude != nullptr && gDude->elevation == gElevation && tileIsValid(gDude->tile)) {
+            focusSquareTile = squareTileFromTile(gDude->tile);
+        }
+        if (!squareGridTileIsValid(focusSquareTile)) {
+            focusSquareTile = SQUARE_GRID_SIZE / 2;
+        }
 
-    for (int squareTile = 0; squareTile < SQUARE_GRID_SIZE; squareTile++) {
-        const FloorTileFrmId floorFid(gTileSquares[gElevation]->tileFid[squareTile]);
+        const int focusX = focusSquareTile % SQUARE_GRID_WIDTH;
+        const int focusY = focusSquareTile / SQUARE_GRID_WIDTH;
+        mapLeft = gTileWindowWidth / 2 - (focusX * zoomedCellSize + zoomedCellSize / 2);
+        mapTop = gTileWindowHeight / 2 - (focusY * zoomedCellSize + zoomedCellSize / 2);
+    }
+
+    for (int renderSquareTile = 0; renderSquareTile < SQUARE_GRID_SIZE; renderSquareTile++) {
+        const int mapSquareTile = renderSquareTile / SQUARE_GRID_WIDTH * SQUARE_GRID_WIDTH
+            + (SQUARE_GRID_WIDTH - 1 - renderSquareTile % SQUARE_GRID_WIDTH);
+        const FloorTileFrmId floorFid(gTileSquares[gElevation]->tileFid[mapSquareTile]);
         if (floorFid.frameId<TileFrameId>() == TileFrameId::Invalid) {
             continue;
         }
 
-        const int x = mapLeft + (squareTile % SQUARE_GRID_WIDTH) * cellSize;
-        const int y = mapTop + (squareTile / SQUARE_GRID_WIDTH) * cellSize;
-        bufferFill(gTileWindowBuffer + y * gTileWindowPitch + x,
-            cellSize - 1,
-            cellSize - 1,
-            gTileWindowPitch,
-            COLOR_DARK_GREY_2);
+        const int x = mapLeft + (renderSquareTile % SQUARE_GRID_WIDTH) * zoomedCellSize;
+        const int y = mapTop + (renderSquareTile / SQUARE_GRID_WIDTH) * zoomedCellSize;
+        const int left = std::max(0, x);
+        const int top = std::max(0, y);
+        const int right = std::min(gTileWindowWidth - 1, x + zoomedCellSize - 2);
+        const int bottom = std::min(gTileWindowHeight - 1, y + zoomedCellSize - 2);
+        if (left <= right && top <= bottom) {
+            bufferFill(gTileWindowBuffer + top * gTileWindowPitch + left,
+                right - left + 1,
+                bottom - top + 1,
+                gTileWindowPitch,
+                COLOR_DARK_GREY_2);
+        }
     }
 
     TileFirstPersonTopologyRenderContext context = {
         gElevation,
         mapLeft,
         mapTop,
-        cellSize,
+        zoomedCellSize,
     };
     objectVisitAll(tileFirstPersonTopologyMarkObject, &context);
 
     if (gDude != nullptr && gDude->elevation == gElevation && tileIsValid(gDude->tile)) {
         const int squareTile = squareTileFromTile(gDude->tile);
         if (squareGridTileIsValid(squareTile)) {
-            const int cellX = mapLeft + (squareTile % SQUARE_GRID_WIDTH) * cellSize;
-            const int cellY = mapTop + (squareTile / SQUARE_GRID_WIDTH) * cellSize;
+            const int renderSquareTile = squareTile / SQUARE_GRID_WIDTH * SQUARE_GRID_WIDTH
+                + (SQUARE_GRID_WIDTH - 1 - squareTile % SQUARE_GRID_WIDTH);
+            const int cellX = mapLeft + (renderSquareTile % SQUARE_GRID_WIDTH) * zoomedCellSize;
+            const int cellY = mapTop + (renderSquareTile / SQUARE_GRID_WIDTH) * zoomedCellSize;
             const int hexColumn = gHexGridWidth - 1 - gDude->tile % gHexGridWidth;
             const int hexRow = gDude->tile / gHexGridWidth;
-            const int localX = (hexColumn & 1) == 0 ? 3 * cellSize / 4 : cellSize / 4;
-            const int localY = (hexRow & 1) == 0 ? cellSize / 4 : 3 * cellSize / 4;
-            const int maxLocal = std::max(0, cellSize - 2);
-            bufferFill(gTileWindowBuffer + (cellY + std::min(maxLocal, localY)) * gTileWindowPitch
-                    + cellX + std::min(maxLocal, localX),
-                1,
-                1,
-                gTileWindowPitch,
-                COLOR_WHITE);
+            const int localX = (hexColumn & 1) == 0 ? 3 * zoomedCellSize / 4 : zoomedCellSize / 4;
+            const int localY = (hexRow & 1) == 0 ? zoomedCellSize / 4 : 3 * zoomedCellSize / 4;
+            const int playerX = cellX + std::min(zoomedCellSize - 1, localX);
+            const int playerY = cellY + std::min(zoomedCellSize - 1, localY);
+            if (playerX >= 0 && playerX < gTileWindowWidth && playerY >= 0 && playerY < gTileWindowHeight) {
+                bufferFill(gTileWindowBuffer + playerY * gTileWindowPitch + playerX,
+                    1,
+                    1,
+                    gTileWindowPitch,
+                    COLOR_WHITE);
+            }
         }
     }
 }
@@ -1754,13 +1886,15 @@ static void tileFirstPersonTopologyMarkObject(Object* object, void* context)
         return;
     }
 
-    const int squareTile = squareTileFromTile(object->tile);
-    if (!squareGridTileIsValid(squareTile)) {
+    const int mapSquareTile = squareTileFromTile(object->tile);
+    if (!squareGridTileIsValid(mapSquareTile)) {
         return;
     }
 
-    const int cellX = renderContext->mapLeft + (squareTile % SQUARE_GRID_WIDTH) * renderContext->cellSize;
-    const int cellY = renderContext->mapTop + (squareTile / SQUARE_GRID_WIDTH) * renderContext->cellSize;
+    const int renderSquareTile = mapSquareTile / SQUARE_GRID_WIDTH * SQUARE_GRID_WIDTH
+        + (SQUARE_GRID_WIDTH - 1 - mapSquareTile % SQUARE_GRID_WIDTH);
+    const int cellX = renderContext->mapLeft + (renderSquareTile % SQUARE_GRID_WIDTH) * renderContext->cellSize;
+    const int cellY = renderContext->mapTop + (renderSquareTile / SQUARE_GRID_WIDTH) * renderContext->cellSize;
     const int hexColumn = gHexGridWidth - 1 - object->tile % gHexGridWidth;
     const int hexRow = object->tile / gHexGridWidth;
     const int markerMaxLocal = std::max(0, renderContext->cellSize - 2);
@@ -1768,6 +1902,10 @@ static void tileFirstPersonTopologyMarkObject(Object* object, void* context)
         (hexColumn & 1) == 0 ? 3 * renderContext->cellSize / 4 : renderContext->cellSize / 4);
     const int markerY = cellY + std::min(markerMaxLocal,
         (hexRow & 1) == 0 ? renderContext->cellSize / 4 : 3 * renderContext->cellSize / 4);
+
+    if (markerX < 0 || markerX >= gTileWindowWidth || markerY < 0 || markerY >= gTileWindowHeight) {
+        return;
+    }
 
     Color markerColor = COLOR_LIGHT_GREY;
     Proto* proto = nullptr;
@@ -2167,6 +2305,19 @@ void tileFirstPersonPreviewToggleTopology()
 
     gFirstPersonPreviewTopologyEnabled = !gFirstPersonPreviewTopologyEnabled;
     tileFirstPersonPreviewRefresh();
+}
+
+bool tileFirstPersonPreviewZoomTopology(int direction)
+{
+    if (!gFirstPersonPreviewEnabled || !gFirstPersonPreviewTopologyEnabled || direction == 0) {
+        return false;
+    }
+
+    constexpr int kMaximumTopologyZoom = 3;
+    gFirstPersonPreviewTopologyZoom = std::max(0,
+        std::min(kMaximumTopologyZoom, gFirstPersonPreviewTopologyZoom + (direction > 0 ? 1 : -1)));
+    tileFirstPersonPreviewRefresh();
+    return true;
 }
 
 void tileFirstPersonPreviewLook(int deltaX)

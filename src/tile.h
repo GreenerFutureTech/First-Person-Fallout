@@ -51,6 +51,7 @@ void tileFirstPersonPreviewRefresh();
 void tileFirstPersonPreviewLook(int deltaX);
 void tileFirstPersonPreviewTurnToTile(int tile);
 void tileFirstPersonPreviewToggleTopology();
+bool tileFirstPersonPreviewZoomTopology(int direction);
 void tileFirstPersonPreviewToggle();
 int tileSetCenter(int tile, int flags);
 void tile_toggle_roof(bool refresh);

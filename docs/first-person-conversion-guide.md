@@ -175,10 +175,28 @@ retained. Do not change map or save formats.
 ### 1. Inventory a small representative map
 
 Use an owned Fallout 2 installation and existing data tools; do not check game
-data or copyrighted assets into this repository. Choose one compact interior
-with a door, blocking walls, at least one object, and a critter. Inspect its
-floor/roof FIDs, object types, rotations, elevations, flags, and transitions.
-Compare the loaded map/object representation to what the new renderer needs.
+data or copyrighted assets into this repository. Start with **Arroyo Temple:
+Inner Sanctum** as the first wall-material proof. It is a compact cave interior
+and a useful controlled scene for checking whether a small set of wall
+materials reads well against Fallout's floor art. Verify in-game that the
+loaded map has representative wall orientations, corners, openings, and any
+transparent or door surfaces before treating it as the only geometry test.
+The supplied F9 view shows a winding cave layout with several chambers joined
+by narrow passages, so keep the first material proof local to the player's
+marked chamber and validate passage connections separately.
+
+Inspect its floor/roof FIDs, wall and scenery prototypes, rotations,
+elevations, corner flags, transparency/light-through flags, and transitions.
+Record the exact prototype IDs and source art candidates in working notes;
+keep copyrighted game data and extracted art outside this repository. Compare
+the loaded map/object representation with the F9 topology view and the original
+isometric rendering before deciding how a wall material should be mapped.
+
+The Inner Sanctum is the first **material and visual calibration** map, not a
+claim that its cave geometry covers every Fallout map archetype. Once the
+material scale, palette, and lighting are acceptable there, validate the
+chosen treatment on a second scene with different wall construction (for
+example, an outdoor wall or a metal interior) before generalizing the mapping.
 
 Before rendering polished art, identify how the map indicates:
 
@@ -199,6 +217,13 @@ markers show blocking/non-blocking walls, doors, scenery, critters, and items.
 The player is a white point. Press F9 again to return to the graybox preview
 and F11 to exit to the original view.
 
+While F9 is active, press `+` or `=` to zoom the topology view in and `-` to
+zoom out. Zooming in keeps the player centered so the nearby chamber and connecting
+passages can be inspected at larger cell sizes; zooming all the way out returns
+to the full-map overview. The mouse wheel also zooms when its event is
+available; outside the F9 diagnostic, the keys and wheel retain their normal
+behavior.
+
 Wall and scenery markers include a colored tick showing the object's six-way
 rotation: magenta is NE, cyan is E, green is SE, blue is SW, pink is W, and
 white is NW. A 2x2 pixel block at the cell's upper-right corner identifies
@@ -213,6 +238,13 @@ already been correctly inferred. The current map format does not necessarily
 encode a complete first-person room mesh. Record ambiguities against a
 representative map before adding geometry-generation rules. Keep derived
 geometry temporary; do not serialize it into saves or map files.
+
+For the Inner Sanctum material proof, use the player marker to identify the
+local chamber, then compare the wall segments around that chamber against the
+F11 view at the same position and facing. Trace each broad face and side face
+to its nearby topology marker before assigning material classes. Check the
+connecting narrow passages for genuine openings and wall returns; do not
+interpret the whole-map outline as one continuous room boundary.
 
 ### 3. Render the gray-box scene
 
@@ -250,8 +282,9 @@ Right-click again to return to mouse-look. Attack range, line of sight, hit
 chance, action points, and turn order remain controlled by the original
 combat system.
 
-Graybox wall side faces use distinct saturated debug colors instead of gray
-and brown shades that can disappear against the sky and ground.
+F11 wall faces now use a palette-mapped stone-block proof material, with a
+separate plank treatment for closed doors. The saturated orientation colors
+remain in the F9 diagnostic only.
 
 Wall raycasting uses the hex object grid at twice the square-floor resolution,
 preserving each wall object's position instead of collapsing it into a square
@@ -285,13 +318,50 @@ art also retain that fallback. This is still a stylized projection of
 isometric art. Check texture orientation, seams, transparency, and baked
 lighting on Arroyo village and an interior map.
 
-Wall faces remain flat-color graybox slabs. Fallout wall FRMs are complete
-isometric scene sprites, not seamless wall-surface textures; projecting them
-onto raycast faces stretches rooflines, ground details, and transparent
-regions into distracting bands. The Arroyo test confirmed this mismatch, so
-do not map raw wall FRMs onto these faces. Before adding wall art, identify a
-valid wall-surface asset or a deliberate extraction/cropping and mapping
-strategy, then validate it against the original isometric view.
+The first F11 wall-material proof is generated in the renderer as a seamless
+64x64 stone-block tile, mapped continuously from world coordinates across wall
+faces. Side orientation and distance apply restrained palette shading.
+Closed doors use a separate repeating wood-plank tile. This keeps the F9
+diagnostic and existing raycast geometry intact while replacing the saturated
+debug colors in F11.
+
+Use Arroyo Temple: Inner Sanctum to tune this first proof: compare stable F11
+views with the same area in the original isometric renderer. Check whether the
+block scale reads like the cave masonry, seams stay continuous across adjacent
+slabs, the material fits the floor palette, and the two faces remain distinct
+as the camera turns. The current mapping uses the same stone material for all
+blocking walls and scenery; it does not yet classify temple prototypes into
+separate materials.
+
+Fallout wall FRMs are complete isometric scene sprites, not seamless
+wall-surface textures; projecting them whole onto raycast faces stretches
+rooflines, ground details, and transparent regions into distracting bands.
+Do not use a raw wall FRM as a repeating texture. First determine whether a
+specific source image contains a clean, repeatable surface region that can be
+cropped and authored into a seamless material. If no source region survives
+that proof, use a deliberately authored, palette-compatible seamless texture
+or a restrained procedural surface treatment. Keep prototype-to-material
+assignments explicit and small; avoid inferring a surface from the object's
+six-way art rotation when the wall geometry uses a separate orientation.
+
+Initial visual inspection of frame 0, direction 0 from the `temple01` through
+`temple99` wall FRMs shows mostly discrete isometric wall runs, narrow side
+pieces, corners, pillars, and arches. Their faces include perspective and
+baked shading; the arch and corner images also contain geometry that cannot
+tile cleanly. Treat these as object art, not ready-made raycast materials. For
+the Inner Sanctum proof, start with a purpose-built, seamless stone material
+and compare one carefully extracted FRM face crop only as an experiment. Keep
+the crop only if it tiles without visible seams and its lighting does not
+fight the floor art. This contact-sheet inspection is a candidate-art survey,
+not a complete review of all frames or directions.
+
+The inspected temple wall FRMs remain candidate sources for a crop comparison;
+the renderer does not project or include those full sprites as textures.
+Validate the generated stone and door treatments in-game, including
+transparent half-height barriers and closed/open doors, before adding further
+prototype-specific materials. Do not expand to a general material catalog
+until the Inner Sanctum comparison is clean and at least one contrasting map
+confirms that the treatment generalizes.
 
 ### 5. Expand movement, collision, and synchronization
 

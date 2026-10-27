@@ -755,6 +755,29 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
     const bool firstPersonPreviewMouseWasReleased = gFirstPersonPreviewMouseReleased;
     gameHandleFirstPersonPreviewInput(eventCode);
 
+    if (tileFirstPersonPreviewIsEnabled()
+        && eventCode == -1
+        && (mouseGetEvent() & MOUSE_EVENT_WHEEL) != 0) {
+        int wheelX;
+        int wheelY;
+        mouseGetWheel(&wheelX, &wheelY);
+        (void)wheelX;
+        if (tileFirstPersonPreviewZoomTopology(wheelY)) {
+            return 0;
+        }
+    }
+
+    int topologyZoomDirection = 0;
+    if (eventCode == KEY_PLUS || eventCode == KEY_EQUAL) {
+        topologyZoomDirection = 1;
+    } else if (eventCode == KEY_MINUS || eventCode == KEY_UNDERSCORE) {
+        topologyZoomDirection = -1;
+    }
+    if (topologyZoomDirection != 0
+        && tileFirstPersonPreviewZoomTopology(topologyZoomDirection)) {
+        return 0;
+    }
+
     // NOTE: Uninline.
     if (gameGetState() == GameState::DialogRequested) {
         const bool firstPersonPreviewWasEnabled = tileFirstPersonPreviewIsEnabled();
@@ -887,6 +910,8 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                             if (!gFirstPersonPreviewActionMenuShown
                                 && gFirstPersonPreviewLeftClickStartTime != 0) {
                                 Object* critter = tileFirstPersonPreviewPickCritterAt(mouseX, mouseY);
+                                //Object* object = tileFirstPersonPreviewPickObjectAt(mouseX, mouseY);
+
                                 if (critter != nullptr) {
                                     if (_obj_action_can_talk_to(critter)) actionTalk(gDude, critter);
                                     else actionLootCritter(gDude, critter);
