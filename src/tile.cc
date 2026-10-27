@@ -30,6 +30,7 @@
 #include "settings.h"
 #include "svga.h"
 #include "tile_hires_stencil.h"
+#include "text_object.h"
 #include "window_manager.h"
 
 namespace fallout {
@@ -96,6 +97,16 @@ struct TileFirstPersonActorHitTarget {
     int height;
     int frame;
     Rotation rotation;
+};
+
+struct TileFirstPersonDoorHitTarget {
+    Object* object;
+    double depth;
+};
+
+struct TileFirstPersonObjectHitTarget {
+    Object* object;
+    double depth;
 };
 
 struct TileFirstPersonActorRenderContext {
@@ -179,6 +190,7 @@ static double gFirstPersonPreviewCameraTargetX = 0.0;
 static double gFirstPersonPreviewCameraTargetY = 0.0;
 static std::vector<double> gFirstPersonPreviewWallDepths;
 static std::vector<TileFirstPersonActorHitTarget> gFirstPersonPreviewActorHitTargets;
+static std::vector<TileFirstPersonDoorHitTarget> gFirstPersonPreviewDoorHitTargets;
 
 // 0x51D96C off_tile
 const int _off_tile[ROTATION_COUNT] = {
@@ -958,6 +970,7 @@ static void tileRenderFirstPersonPreview()
     }
 
     tileFirstPersonInitializeWallTextures();
+    gFirstPersonPreviewDoorHitTargets.clear();
 
     const int horizonY = gTileWindowHeight / 2;
     bufferFill(gTileWindowBuffer,
@@ -1260,6 +1273,47 @@ static void tileRenderFirstPersonPreview()
         }
 
         wallDepths[x] = wallDistance;
+        if (wallType == 3 || wallType == 4) {
+            const int hexColumn = gHexGridWidth - 1 - mapX;
+            const int doorTile = mapY * gHexGridWidth + hexColumn;
+            Object* object = objectFindFirstAtLocation(gElevation, doorTile);
+            while (object != nullptr) {
+                Proto* proto = nullptr;
+                bool canInteract = false;
+                if (protoGetProto(object, &proto) == 0) {
+                    if (wallType == 3
+                        && FrmId(object).objectType() == OBJ_TYPE_SCENERY
+                        && proto->scenery.type == SCENERY_TYPE_DOOR
+                        && (object->data.scenery.door.openFlags & DOOR_FLAG_OPEN) == 0
+                        && (object->flags & OBJECT_OPEN_DOOR) == OBJECT_NONE) {
+                        canInteract = true;
+                    } else if (wallType == 4) {
+                        const ObjectType objectType = FrmId(object).objectType();
+                        canInteract = (objectType == OBJ_TYPE_ITEM && proto->item.type == ITEM_TYPE_CONTAINER)
+                            || (objectType == OBJ_TYPE_SCENERY && _obj_action_can_use(object));
+                    }
+                }
+                if (canInteract) {
+                    if (wallType == 3) {
+                        bool alreadyTracked = false;
+                        for (TileFirstPersonDoorHitTarget& target : gFirstPersonPreviewDoorHitTargets) {
+                            if (target.object == object) {
+                                target.depth = std::min(target.depth, wallDistance);
+                                alreadyTracked = true;
+                                break;
+                            }
+                        }
+                        if (!alreadyTracked) {
+                            gFirstPersonPreviewDoorHitTargets.push_back({ object, wallDistance });
+                        }
+                    } else {
+                        bool alreadyTracked = false;
+                    }
+                    break;
+                }
+                object = objectFindNextAtLocation();
+            }
+        }
         const int fullWallHeight = std::min(gTileWindowHeight,
             static_cast<int>(gTileWindowHeight / wallDistance));
         const bool halfHeightWall = wallType == 2;
@@ -1518,6 +1572,14 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                 }
             }
         }
+
+        textObjectsRenderForOwner(object,
+            gTileWindowBuffer,
+            gTileWindowPitch,
+            gTileWindowWidth,
+            gTileWindowHeight,
+            screenCenterX,
+            artTop - 3);
 
         const int markerY = std::max(0, artTop - 3);
         const int markerLeft = std::max(0, screenCenterX - 2);
@@ -2143,6 +2205,46 @@ Object* tileFirstPersonPreviewPickCritterAt(int screenX, int screenY)
     return tileFirstPersonPreviewPickCritterAtPosition(
         screenX - isoWindowRect.left,
         screenY - isoWindowRect.top);
+}
+
+Object* tileFirstPersonPreviewPickDoorAt(int screenX, int screenY)
+{
+    if (!gFirstPersonPreviewEnabled || gFirstPersonPreviewTopologyEnabled
+        || gFirstPersonPreviewWallDepths.size() != static_cast<size_t>(gTileWindowWidth)) {
+        return nullptr;
+    }
+
+    Rect isoWindowRect;
+    if (windowGetRect(gIsoWindow, &isoWindowRect) != 0
+        || screenX < isoWindowRect.left || screenX > isoWindowRect.right
+        || screenY < isoWindowRect.top || screenY > isoWindowRect.bottom) {
+        return nullptr;
+    }
+
+    const int x = screenX - isoWindowRect.left;
+    const int y = screenY - isoWindowRect.top;
+    const int horizonY = gTileWindowHeight / 2;
+    if (x < 0 || x >= gTileWindowWidth || y < horizonY || y >= gTileWindowHeight) {
+        return nullptr;
+    }
+
+    Object* pickedDoor = nullptr;
+    double pickedDepth = std::numeric_limits<double>::infinity();
+    for (const TileFirstPersonDoorHitTarget& target : gFirstPersonPreviewDoorHitTargets) {
+        if (target.depth >= pickedDepth || target.depth >= gFirstPersonPreviewWallDepths[x]) {
+            continue;
+        }
+        const int fullWallHeight = std::min(gTileWindowHeight,
+            static_cast<int>(gTileWindowHeight / target.depth));
+        const int top = std::max(0, horizonY - fullWallHeight / 2);
+        const int bottom = std::min(gTileWindowHeight - 1, horizonY + fullWallHeight / 2);
+        if (y < top || y > bottom) {
+            continue;
+        }
+        pickedDoor = target.object;
+        pickedDepth = target.depth;
+    }
+    return pickedDoor;
 }
 
 int tileFirstPersonPreviewPickGroundTileAt(int screenX, int screenY)

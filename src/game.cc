@@ -836,10 +836,14 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                             _combat_attack_this(critter);
                         }
                     } else {
-                        const int destinationTile = tileFirstPersonPreviewPickGroundTileAt(
-                            mouseX - isoWindowRect.left,
-                            mouseY - isoWindowRect.top);
-                        if (tileIsValid(destinationTile)) {
+                        Object* door = tileFirstPersonPreviewPickDoorAt(mouseX, mouseY);
+                        if (door != nullptr) {
+                            _action_use_an_object(gDude, door);
+                        } else {
+                            const int destinationTile = tileFirstPersonPreviewPickGroundTileAt(
+                                mouseX - isoWindowRect.left,
+                                mouseY - isoWindowRect.top);
+                            if (tileIsValid(destinationTile)) {
                             int actionPoints = gDude->data.critter.combat.ap + _combat_free_move;
                             if (gPressedPhysicalKeys[SDL_SCANCODE_RCTRL]
                                 || gPressedPhysicalKeys[SDL_SCANCODE_LCTRL]) {
@@ -861,6 +865,7 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                                     }
                                     reg_anim_end();
                                 }
+                            }
                             }
                         }
                     }
@@ -910,16 +915,18 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                             if (!gFirstPersonPreviewActionMenuShown
                                 && gFirstPersonPreviewLeftClickStartTime != 0) {
                                 Object* critter = tileFirstPersonPreviewPickCritterAt(mouseX, mouseY);
-                                //Object* object = tileFirstPersonPreviewPickObjectAt(mouseX, mouseY);
-
                                 if (critter != nullptr) {
                                     if (_obj_action_can_talk_to(critter)) actionTalk(gDude, critter);
                                     else actionLootCritter(gDude, critter);
                                 } else {
-                                    const int destinationTile = tileFirstPersonPreviewPickGroundTileAt(
-                                        mouseX - isoWindowRect.left,
-                                        mouseY - isoWindowRect.top);
-                                    if (tileIsValid(destinationTile)) {
+                                    Object* door = tileFirstPersonPreviewPickDoorAt(mouseX, mouseY);
+                                    if (door != nullptr) {
+                                        _action_use_an_object(gDude, door);
+                                    } else {
+                                        const int destinationTile = tileFirstPersonPreviewPickGroundTileAt(
+                                            mouseX - isoWindowRect.left,
+                                            mouseY - isoWindowRect.top);
+                                        if (tileIsValid(destinationTile)) {
                                         tileFirstPersonPreviewSetMoveMarkerTile(destinationTile);
                                         tileFirstPersonPreviewTurnToTile(destinationTile);
                                         if (settings.system.interrupt_walk) {
@@ -934,6 +941,7 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                                                     gDude->elevation, -1, 0);
                                             }
                                             reg_anim_end();
+                                        }
                                         }
                                     }
                                 }
@@ -956,6 +964,12 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                             if (critter != nullptr) {
                                 if (_obj_action_can_talk_to(critter)) actionTalk(gDude, critter);
                                 else actionLootCritter(gDude, critter);
+                            } else {
+                                Object* door = tileFirstPersonPreviewPickDoorAt(
+                                    screenGetWidth() / 2, screenGetHeight() / 2);
+                                if (door != nullptr) {
+                                    _action_use_an_object(gDude, door);
+                                }
                             }
                         }
                         gFirstPersonPreviewActionMenuShown = false;

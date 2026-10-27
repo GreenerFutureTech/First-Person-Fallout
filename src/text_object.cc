@@ -323,6 +323,39 @@ int textObjectsGetCount()
     return gTextObjectsCount;
 }
 
+// Render active text floaters for an owner in a caller-provided view.
+void textObjectsRenderForOwner(Object* object, unsigned char* buffer, int pitch, int width, int height, int centerX, int top)
+{
+    if (!gTextObjectsInitialized || object == nullptr || buffer == nullptr || pitch < width || width <= 0 || height <= 0) {
+        return;
+    }
+
+    for (int index = 0; index < gTextObjectsCount; index++) {
+        const TextObject* textObject = gTextObjects[index];
+        if (textObject->owner != object || (textObject->flags & TEXT_OBJECT_MARKED_FOR_REMOVAL) != 0) {
+            continue;
+        }
+
+        const int left = centerX - textObject->width / 2;
+        const int drawTop = top - textObject->height;
+        const int clippedLeft = std::max(0, left);
+        const int clippedTop = std::max(0, drawTop);
+        const int clippedRight = std::min(width, left + textObject->width);
+        const int clippedBottom = std::min(height, drawTop + textObject->height);
+        if (clippedLeft >= clippedRight || clippedTop >= clippedBottom) {
+            continue;
+        }
+
+        blitBufferToBufferTrans(
+            textObject->data + (clippedTop - drawTop) * textObject->width + clippedLeft - left,
+            clippedRight - clippedLeft,
+            clippedBottom - clippedTop,
+            textObject->width,
+            buffer + clippedTop * pitch + clippedLeft,
+            pitch);
+    }
+}
+
 // 0x4B07F8 text_object_bk
 static void textObjectsTicker()
 {

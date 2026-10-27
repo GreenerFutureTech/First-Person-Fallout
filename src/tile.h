@@ -44,6 +44,8 @@ void tileWindowRefresh();
 bool tileFirstPersonPreviewIsEnabled();
 Object* tileFirstPersonPreviewPickCritter();
 Object* tileFirstPersonPreviewPickCritterAt(int screenX, int screenY);
+Object* tileFirstPersonPreviewPickDoorAt(int screenX, int screenY);
+Object* tileFirstPersonPreviewPickObjectAt(int screenX, int screenY);
 int tileFirstPersonPreviewPickGroundTileAt(int screenX, int screenY);
 void tileFirstPersonPreviewSetMoveMarkerTile(int tile);
 bool tileFirstPersonPreviewMove(int relativeDirection);
