@@ -119,6 +119,7 @@ struct TileFirstPersonActorRenderContext {
     double cameraPlaneY;
     int horizonY;
     std::vector<double>* wallDepths;
+    std::vector<double>* actorDepths;
     std::vector<TileFirstPersonActorHitTarget>* hitTargets;
 };
 
@@ -1143,6 +1144,7 @@ static void tileRenderFirstPersonPreview()
 
     std::vector<double>& wallDepths = gFirstPersonPreviewWallDepths;
     wallDepths.assign(gTileWindowWidth, std::numeric_limits<double>::infinity());
+    std::vector<double> actorDepths(gTileWindowWidth, std::numeric_limits<double>::infinity());
 
     for (int x = 0; x < gTileWindowWidth; x++) {
         const double cameraOffset = 2.0 * x / gTileWindowWidth - 1.0;
@@ -1359,6 +1361,7 @@ static void tileRenderFirstPersonPreview()
         cameraPlaneY,
         horizonY,
         &wallDepths,
+        &actorDepths,
         &gFirstPersonPreviewActorHitTargets,
     };
     objectVisitAll(tileFirstPersonRenderActor, &actorContext);
@@ -1559,7 +1562,8 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         });
 
         for (int x = std::max(0, artLeft); x < std::min(gTileWindowWidth, artLeft + artWidth); x++) {
-            if (transformY >= (*renderContext->wallDepths)[x]) {
+            if (transformY >= (*renderContext->wallDepths)[x]
+                || transformY >= (*renderContext->actorDepths)[x]) {
                 continue;
             }
 
@@ -1569,6 +1573,7 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                 const unsigned char color = frame.data[sourceY * frame.width + sourceX];
                 if (color != 0) {
                     gTileWindowBuffer[y * gTileWindowPitch + x] = color;
+                    (*renderContext->actorDepths)[x] = transformY;
                 }
             }
         }
@@ -1607,7 +1612,8 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         facingRotation,
     });
     for (int x = std::max(0, spriteLeft); x < std::min(gTileWindowWidth, spriteRight); x++) {
-        if (transformY >= (*renderContext->wallDepths)[x]) {
+        if (transformY >= (*renderContext->wallDepths)[x]
+            || transformY >= (*renderContext->actorDepths)[x]) {
             continue;
         }
 
@@ -1631,6 +1637,7 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
             }
 
             gTileWindowBuffer[y * gTileWindowPitch + x] = actorColor;
+            (*renderContext->actorDepths)[x] = transformY;
         }
     }
 }
