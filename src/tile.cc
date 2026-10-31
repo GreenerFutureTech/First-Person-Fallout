@@ -148,8 +148,8 @@ static void tileFirstPersonTopologyMarkObject(Object* object, void* context);
 static void tileFirstPersonSnapshotTopologyObject(Object* object, void* context);
 static void tileFirstPersonGrayboxMarkObject(Object* object, void* context);
 static void tileFirstPersonRenderActor(Object* object, void* context);
-static void tileFirstPersonDrawCrosshair();
-static void tileFirstPersonDrawMoveMarker();
+static void tileFirstPersonDrawCrosshair(double directionX, double directionY);
+static void tileFirstPersonDrawMoveMarker(double directionX, double directionY);
 static void tileFirstPersonDrawDiagnosticLine(int x1, int y1, int x2, int y2, Color color);
 static bool tileFirstPersonGetWorldPosition(int tile, double* x, double* y);
 static double tileFirstPersonPreviewGetYaw();
@@ -1032,19 +1032,19 @@ static void tileRenderFirstPersonPreview()
         gTileWindowPitch,
         COLOR_DULL_BROWN);
 
-    std::vector<unsigned char> wallCells(gHexGridSize, 0);
-    std::vector<unsigned char> wallOrientations(gHexGridSize, 0);
+    gFirstPersonPreviewWallCells.assign(gHexGridSize, 0);
+    gFirstPersonPreviewWallOrientations.assign(gHexGridSize, 0);
     TileFirstPersonGrayboxRenderContext context = {
         gElevation,
         gHexGridWidth,
-        wallCells.data(),
-        wallOrientations.data(),
+        gFirstPersonPreviewWallCells.data(),
+        gFirstPersonPreviewWallOrientations.data(),
     };
     objectVisitAll(tileFirstPersonGrayboxMarkObject, &context);
-    gFirstPersonPreviewWallCells = wallCells;
-    gFirstPersonPreviewWallOrientations = wallOrientations;
-    gFirstPersonPreviewTopologyMarkers.clear();
-    objectVisitAll(tileFirstPersonSnapshotTopologyObject, &gFirstPersonPreviewTopologyMarkers);
+    if (gFirstPersonPreviewTopologyEnabled) {
+        gFirstPersonPreviewTopologyMarkers.clear();
+        objectVisitAll(tileFirstPersonSnapshotTopologyObject, &gFirstPersonPreviewTopologyMarkers);
+    }
 
     double cameraX = SQUARE_GRID_WIDTH / 2.0;
     double cameraY = SQUARE_GRID_HEIGHT / 2.0;
@@ -1239,10 +1239,11 @@ static void tileRenderFirstPersonPreview()
         while (mapX >= 0 && mapX < gHexGridWidth
             && mapY >= 0 && mapY < gHexGridHeight) {
             const int cellIndex = mapY * gHexGridWidth + mapX;
-            wallType = wallCells[cellIndex];
+            wallType = gFirstPersonPreviewWallCells[cellIndex];
             if (wallType != 0) {
                 wallOrientation =
-                    static_cast<TileFirstPersonWallOrientation>(wallOrientations[cellIndex]);
+                    static_cast<TileFirstPersonWallOrientation>(
+                        gFirstPersonPreviewWallOrientations[cellIndex]);
                 if (wallOrientation == TILE_FIRST_PERSON_WALL_ORIENTATION_CELL) {
                     const double hitDistance = std::max(0.1, cellEntryDistance / 2.0);
                     if (wallType == 2) {
@@ -1468,8 +1469,8 @@ static void tileRenderFirstPersonPreview()
         &gFirstPersonPreviewActorHitTargets,
     };
     objectVisitAll(tileFirstPersonRenderActor, &actorContext);
-    tileFirstPersonDrawMoveMarker();
-    tileFirstPersonDrawCrosshair();
+    tileFirstPersonDrawMoveMarker(directionX, directionY);
+    tileFirstPersonDrawCrosshair(directionX, directionY);
     tileRenderFirstPersonTopologyOverlay();
 }
 
@@ -1951,9 +1952,8 @@ static void tileFirstPersonGetCameraPosition(int tile, MapElevation elevation, d
         + (gFirstPersonPreviewCameraTargetY - gFirstPersonPreviewCameraStartY) * progress;
 }
 
-static void tileFirstPersonDrawCrosshair()
+static void tileFirstPersonDrawCrosshair(double directionX, double directionY)
 {
-    constexpr double kPi = 3.14159265358979323846;
     const int centerX = gTileWindowWidth / 2;
     const int centerY = gTileWindowHeight / 2;
     bufferDrawLine(gTileWindowBuffer,
@@ -1985,9 +1985,6 @@ static void tileFirstPersonDrawCrosshair()
         std::min(gTileWindowHeight - 1, centerY + 5),
         COLOR_WHITE);
 
-    const double yaw = tileFirstPersonPreviewGetYaw() * kPi / 180.0;
-    const double directionX = sin(yaw);
-    const double directionY = -cos(yaw);
     const int arrowLength = 14;
     const int tipX = centerX + static_cast<int>(directionX * arrowLength);
     const int tipY = centerY + static_cast<int>(directionY * arrowLength);
@@ -2006,14 +2003,13 @@ static void tileFirstPersonDrawCrosshair()
     bufferDrawLine(gTileWindowBuffer, gTileWindowPitch, tipX, tipY, rightX, rightY, COLOR_LIGHT_GREEN_3);
 }
 
-static void tileFirstPersonDrawMoveMarker()
+static void tileFirstPersonDrawMoveMarker(double directionX, double directionY)
 {
     if (!tileIsValid(gFirstPersonPreviewMoveMarkerTile)
         || gDude == nullptr || gDude->elevation != gElevation) {
         return;
     }
 
-    constexpr double kPi = 3.14159265358979323846;
     constexpr double kFieldOfViewScale = 0.66;
     double cameraX;
     double cameraY;
@@ -2024,9 +2020,6 @@ static void tileFirstPersonDrawMoveMarker()
         return;
     }
 
-    const double yaw = tileFirstPersonPreviewGetYaw() * kPi / 180.0;
-    const double directionX = sin(yaw);
-    const double directionY = -cos(yaw);
     const double cameraPlaneX = -directionY * kFieldOfViewScale;
     const double cameraPlaneY = directionX * kFieldOfViewScale;
     const double relativeX = targetX - cameraX;
@@ -2381,7 +2374,8 @@ static void tileRenderFirstPersonTopologyOverlay()
         return;
     }
 
-    std::vector<unsigned char> overlay(static_cast<size_t>(overlayWidth) * overlayHeight, COLOR_BLACK);
+    static std::vector<unsigned char> overlay;
+    overlay.assign(static_cast<size_t>(overlayWidth) * overlayHeight, COLOR_BLACK);
     {
         TileFirstPersonWindowState savedWindowState;
         gTileWindowBuffer = overlay.data();
