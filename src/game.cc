@@ -620,7 +620,7 @@ static bool gameFirstPersonPreviewUseObject(Object* object)
 
     if (objectType == OBJ_TYPE_ITEM) {
         if (itemGetType(object) == ITEM_TYPE_CONTAINER) {
-            inventoryOpenLooting(gDude, object);
+            actionPickUp(gDude, object);
             return true;
         }
         if (_obj_action_can_use(object)) {

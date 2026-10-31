@@ -2682,13 +2682,16 @@ Object* tileFirstPersonPreviewPickObjectAt(int screenX, int screenY)
             continue;
         }
         const int hitPadding = objectType == OBJ_TYPE_SCENERY
-            ? std::max(2, target.width / 4)
+            ? std::max(6, target.width / 2)
+            : 0;
+        const int verticalHitPadding = objectType == OBJ_TYPE_SCENERY
+            ? std::max(6, target.height / 4)
             : 0;
         if (target.depth >= pickedDepth
             || x < target.left - hitPadding
             || x >= target.left + target.width + hitPadding
-            || y < target.top - hitPadding
-            || y >= target.top + target.height + hitPadding
+            || y < target.top - verticalHitPadding
+            || y >= target.top + target.height + verticalHitPadding
             || target.depth >= gFirstPersonPreviewWallDepths[x]) {
             continue;
         }
@@ -2717,7 +2720,8 @@ Object* tileFirstPersonPreviewPickObjectAt(int screenX, int screenY)
         pickedDepth = target.depth;
     }
 
-    return pickedObject != nullptr ? pickedObject : fallbackObject;
+    Object* result = pickedObject != nullptr ? pickedObject : fallbackObject;
+    return result;
 }
 
 Object* tileFirstPersonPreviewPickDoorAt(int screenX, int screenY)
