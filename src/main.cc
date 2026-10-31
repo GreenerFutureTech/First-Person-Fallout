@@ -436,6 +436,7 @@ static void mainLoop()
         // interpolation. Refresh every frame so combat animations sample it
         // continuously even when no other map refresh is requested.
         if (tileFirstPersonPreviewIsEnabled()) {
+            tileFirstPersonPreviewProcessPendingMove();
             tileFirstPersonPreviewRefresh();
         }
 

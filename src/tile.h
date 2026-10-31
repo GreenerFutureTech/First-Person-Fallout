@@ -49,6 +49,7 @@ Object* tileFirstPersonPreviewPickObjectAt(int screenX, int screenY);
 int tileFirstPersonPreviewPickGroundTileAt(int screenX, int screenY);
 void tileFirstPersonPreviewSetMoveMarkerTile(int tile);
 bool tileFirstPersonPreviewMove(int relativeDirection);
+void tileFirstPersonPreviewProcessPendingMove();
 void tileFirstPersonPreviewRefresh();
 void tileFirstPersonPreviewLook(int deltaX);
 void tileFirstPersonPreviewTurnToTile(int tile);
