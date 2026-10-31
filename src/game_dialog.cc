@@ -2597,6 +2597,9 @@ void _gdProcessUpdate()
     gameDialogRenderCaps();
     windowRefresh(gameDialogReplyWindow);
     windowRefresh(gameDialogOptionsWindow);
+    if (tileFirstPersonPreviewIsEnabled()) {
+        mouseShowCursor();
+    }
 }
 
 // 0x44715C
