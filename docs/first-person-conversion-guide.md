@@ -303,9 +303,11 @@ against representative maps before extending corner handling. Map/object
 refreshes redraw the preview; the interface bar and modal UI remain existing
 windows.
 
-Blocking wall objects carrying Fallout's transparent-glass, transparent-wall,
-or light-through flag render as half-height barriers, so windows do not become
-full-height gaps. Explicitly non-blocking wall objects remain openings.
+Wall objects carrying Fallout's transparent-glass, transparent-wall, or
+light-through flag render as windows in F11: the upper section is transparent,
+while the lower half remains a solid sill. Walls behind the window remain
+visible through its transparent section. Explicitly non-blocking wall objects
+remain openings.
 
 ### 4. Add a small texture proof
 

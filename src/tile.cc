@@ -119,6 +119,7 @@ struct TileFirstPersonActorRenderContext {
     double cameraPlaneY;
     int horizonY;
     std::vector<double>* wallDepths;
+    std::vector<double>* wallSillDepths;
     std::vector<double>* actorDepths;
     std::vector<TileFirstPersonActorHitTarget>* hitTargets;
 };
@@ -1144,6 +1145,7 @@ static void tileRenderFirstPersonPreview()
 
     std::vector<double>& wallDepths = gFirstPersonPreviewWallDepths;
     wallDepths.assign(gTileWindowWidth, std::numeric_limits<double>::infinity());
+    std::vector<double> wallSillDepths(gTileWindowWidth, std::numeric_limits<double>::infinity());
     std::vector<double> actorDepths(gTileWindowWidth, std::numeric_limits<double>::infinity());
 
     for (int x = 0; x < gTileWindowWidth; x++) {
@@ -1177,6 +1179,10 @@ static void tileRenderFirstPersonPreview()
         unsigned char wallType = 0;
         TileFirstPersonWallOrientation wallOrientation = TILE_FIRST_PERSON_WALL_ORIENTATION_CELL;
         double wallDistance = std::numeric_limits<double>::infinity();
+        unsigned char windowType = 0;
+        TileFirstPersonWallOrientation windowOrientation = TILE_FIRST_PERSON_WALL_ORIENTATION_CELL;
+        double windowDistance = std::numeric_limits<double>::infinity();
+        int windowSide = 0;
         double cellEntryDistance = 0.0;
         while (mapX >= 0 && mapX < gHexGridWidth
             && mapY >= 0 && mapY < gHexGridHeight) {
@@ -1186,8 +1192,18 @@ static void tileRenderFirstPersonPreview()
                 wallOrientation =
                     static_cast<TileFirstPersonWallOrientation>(wallOrientations[cellIndex]);
                 if (wallOrientation == TILE_FIRST_PERSON_WALL_ORIENTATION_CELL) {
-                    wallDistance = std::max(0.1, cellEntryDistance / 2.0);
-                    break;
+                    const double hitDistance = std::max(0.1, cellEntryDistance / 2.0);
+                    if (wallType == 2) {
+                        if (windowDistance == std::numeric_limits<double>::infinity()) {
+                            windowType = wallType;
+                            windowOrientation = wallOrientation;
+                            windowDistance = hitDistance;
+                            windowSide = side;
+                        }
+                    } else {
+                        wallDistance = hitDistance;
+                        break;
+                    }
                 }
 
                 const double cellExitDistance = std::min(sideDistanceX, sideDistanceY);
@@ -1243,11 +1259,23 @@ static void tileRenderFirstPersonPreview()
                 if (rayIntersectsWallBounds
                     && wallExitDistance >= clippedWallEntryDistance - kIntersectionEpsilon
                     && clippedWallEntryDistance <= cellExitDistance + kIntersectionEpsilon) {
-                    wallDistance = std::max(0.1, clippedWallEntryDistance / 2.0);
-                    if (wallEntryDistance >= cellEntryDistance - kIntersectionEpsilon) {
-                        side = nearX > nearY ? 0 : 1;
+                    const double hitDistance = std::max(0.1, clippedWallEntryDistance / 2.0);
+                    if (wallType == 2) {
+                        if (windowDistance == std::numeric_limits<double>::infinity()) {
+                            windowType = wallType;
+                            windowOrientation = wallOrientation;
+                            windowDistance = hitDistance;
+                            windowSide = wallEntryDistance >= cellEntryDistance - kIntersectionEpsilon
+                                ? nearX > nearY ? 0 : 1
+                                : side;
+                        }
+                    } else {
+                        wallDistance = hitDistance;
+                        if (wallEntryDistance >= cellEntryDistance - kIntersectionEpsilon) {
+                            side = nearX > nearY ? 0 : 1;
+                        }
+                        break;
                     }
-                    break;
                 }
             }
 
@@ -1269,12 +1297,19 @@ static void tileRenderFirstPersonPreview()
 
         }
 
-        if (wallType == 0
-            || wallDistance == std::numeric_limits<double>::infinity()) {
+        if (wallDistance == std::numeric_limits<double>::infinity()
+            && windowDistance == std::numeric_limits<double>::infinity()) {
             continue;
         }
 
         wallDepths[x] = wallDistance;
+        wallSillDepths[x] = windowDistance;
+        if (wallDistance == std::numeric_limits<double>::infinity()) {
+            wallType = windowType;
+            wallOrientation = windowOrientation;
+            wallDistance = windowDistance;
+            side = windowSide;
+        }
         if (wallType == 3 || wallType == 4) {
             const int hexColumn = gHexGridWidth - 1 - mapX;
             const int doorTile = mapY * gHexGridWidth + hexColumn;
@@ -1316,38 +1351,46 @@ static void tileRenderFirstPersonPreview()
                 object = objectFindNextAtLocation();
             }
         }
-        const int fullWallHeight = std::min(gTileWindowHeight,
-            static_cast<int>(gTileWindowHeight / wallDistance));
-        const bool halfHeightWall = wallType == 2;
-        const int wallHeight = halfHeightWall ? std::max(1, fullWallHeight / 2) : fullWallHeight;
-        const int wallTop = halfHeightWall
-            ? horizonY
-            : std::max(0, horizonY - wallHeight / 2);
-        const int wallBottom = std::min(gTileWindowHeight - 1,
-            halfHeightWall ? horizonY + wallHeight : horizonY + wallHeight / 2);
-        const double hitWorldX = cameraX + rayDirectionX * wallDistance;
-        const double hitWorldY = cameraY + rayDirectionY * wallDistance;
-        const double wallCoordinate = wallOrientation == TILE_FIRST_PERSON_WALL_ORIENTATION_NORTH_SOUTH
-                ? hitWorldY
-                : wallOrientation == TILE_FIRST_PERSON_WALL_ORIENTATION_EAST_WEST
-                ? hitWorldX
-                : side == 0 ? hitWorldY : hitWorldX;
-        int textureX = static_cast<int>(floor(wallCoordinate * kFirstPersonWallTextureSize))
-            % kFirstPersonWallTextureSize;
-        if (textureX < 0) {
-            textureX += kFirstPersonWallTextureSize;
-        }
-        const int textureHeight = std::max(1, fullWallHeight);
-        const int faceShade = side == 0 ? 116 : 96;
-        const int distanceShade = std::min(48, static_cast<int>(wallDistance * 7.0));
-        const int light = std::max(48, faceShade - distanceShade);
-        const std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize>& texture =
-            wallType == 3 ? gFirstPersonDoorWallTexture : gFirstPersonStoneWallTexture;
-        for (int y = wallTop; y <= wallBottom; y++) {
-            int textureY = (y - wallTop) * kFirstPersonWallTextureSize / textureHeight;
-            textureY %= kFirstPersonWallTextureSize;
-            const Color texel = texture[textureY * kFirstPersonWallTextureSize + textureX];
-            gTileWindowBuffer[y * gTileWindowPitch + x] = intensityColorTable[texel][light];
+        const auto renderWall = [&](unsigned char type, double distance,
+                                    TileFirstPersonWallOrientation orientation, int wallSide) {
+            const int fullWallHeight = std::min(gTileWindowHeight,
+                static_cast<int>(gTileWindowHeight / distance));
+            const bool halfHeightWall = type == 2;
+            const int wallHeight = halfHeightWall ? std::max(1, fullWallHeight / 2) : fullWallHeight;
+            const int wallTop = halfHeightWall ? horizonY : std::max(0, horizonY - wallHeight / 2);
+            const int wallBottom = std::min(gTileWindowHeight - 1,
+                halfHeightWall ? horizonY + wallHeight : horizonY + wallHeight / 2);
+            const double hitWorldX = cameraX + rayDirectionX * distance;
+            const double hitWorldY = cameraY + rayDirectionY * distance;
+            const double wallCoordinate = orientation == TILE_FIRST_PERSON_WALL_ORIENTATION_NORTH_SOUTH
+                    ? hitWorldY
+                    : orientation == TILE_FIRST_PERSON_WALL_ORIENTATION_EAST_WEST
+                    ? hitWorldX
+                    : wallSide == 0 ? hitWorldY : hitWorldX;
+            int textureX = static_cast<int>(floor(wallCoordinate * kFirstPersonWallTextureSize))
+                % kFirstPersonWallTextureSize;
+            if (textureX < 0) {
+                textureX += kFirstPersonWallTextureSize;
+            }
+            const int textureHeight = std::max(1, fullWallHeight);
+            const int faceShade = wallSide == 0 ? 116 : 96;
+            const int distanceShade = std::min(48, static_cast<int>(distance * 7.0));
+            const int light = std::max(48, faceShade - distanceShade);
+            const std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize>& texture =
+                type == 3 ? gFirstPersonDoorWallTexture : gFirstPersonStoneWallTexture;
+            for (int y = wallTop; y <= wallBottom; y++) {
+                int textureY = (y - wallTop) * kFirstPersonWallTextureSize / textureHeight;
+                textureY %= kFirstPersonWallTextureSize;
+                const Color texel = texture[textureY * kFirstPersonWallTextureSize + textureX];
+                gTileWindowBuffer[y * gTileWindowPitch + x] = intensityColorTable[texel][light];
+            }
+        };
+        if (windowDistance != std::numeric_limits<double>::infinity()
+            && wallDepths[x] != std::numeric_limits<double>::infinity()) {
+            renderWall(wallType, wallDepths[x], wallOrientation, side);
+            renderWall(windowType, windowDistance, windowOrientation, windowSide);
+        } else {
+            renderWall(wallType, wallDistance, wallOrientation, side);
         }
     }
 
@@ -1361,6 +1404,7 @@ static void tileRenderFirstPersonPreview()
         cameraPlaneY,
         horizonY,
         &wallDepths,
+        &wallSillDepths,
         &actorDepths,
         &gFirstPersonPreviewActorHitTargets,
     };
@@ -1562,13 +1606,19 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         });
 
         for (int x = std::max(0, artLeft); x < std::min(gTileWindowWidth, artLeft + artWidth); x++) {
-            if (transformY >= (*renderContext->wallDepths)[x]
-                || transformY >= (*renderContext->actorDepths)[x]) {
+            if (transformY >= (*renderContext->actorDepths)[x]) {
                 continue;
             }
 
             const int sourceX = (x - artLeft) * frame.width / artWidth;
             for (int y = std::max(0, artTop); y < std::min(gTileWindowHeight, artBottom); y++) {
+                const bool blockedByWall = y < renderContext->horizonY
+                    ? transformY >= (*renderContext->wallDepths)[x]
+                    : transformY >= std::min((*renderContext->wallDepths)[x],
+                        (*renderContext->wallSillDepths)[x]);
+                if (blockedByWall) {
+                    continue;
+                }
                 const int sourceY = (y - artTop) * frame.height / artHeight;
                 const unsigned char color = frame.data[sourceY * frame.width + sourceX];
                 if (color != 0) {
@@ -1612,13 +1662,19 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         facingRotation,
     });
     for (int x = std::max(0, spriteLeft); x < std::min(gTileWindowWidth, spriteRight); x++) {
-        if (transformY >= (*renderContext->wallDepths)[x]
-            || transformY >= (*renderContext->actorDepths)[x]) {
+        if (transformY >= (*renderContext->actorDepths)[x]) {
             continue;
         }
 
         const double normalizedX = (x - spriteLeft) / static_cast<double>(spriteWidth);
         for (int y = std::max(0, spriteTop); y < std::min(gTileWindowHeight, spriteBottom); y++) {
+            const bool blockedByWall = y < renderContext->horizonY
+                ? transformY >= (*renderContext->wallDepths)[x]
+                : transformY >= std::min((*renderContext->wallDepths)[x],
+                    (*renderContext->wallSillDepths)[x]);
+            if (blockedByWall) {
+                continue;
+            }
             const double normalizedY = (y - spriteTop) / static_cast<double>(actorHeight);
             double silhouetteWidth;
             if (normalizedY < 0.2) {
