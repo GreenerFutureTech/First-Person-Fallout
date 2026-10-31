@@ -90,6 +90,10 @@ static int _mouse_disabled;
 // 0x6AC7B0 mouse_buttons
 static int gMouseEvent;
 
+static unsigned int previousRightButtonTimestamp;
+static unsigned int previousLeftButtonTimestamp;
+static int previousMouseEvent;
+
 // 0x6AC7B4 mouse_speed
 static unsigned int _mouse_speed;
 
@@ -614,16 +618,7 @@ void _mouse_info()
 // 0x4CA698
 void _mouse_simulate_input(int delta_x, int delta_y, int buttons)
 {
-    // 0x6AC7E4
-    static unsigned int previousRightButtonTimestamp;
-
-    // 0x6AC7E8
-    static unsigned int previousLeftButtonTimestamp;
-
-    // 0x6AC7EC
-    static int previousEvent;
-
-    if (!gMouseInitialized || gCursorIsHidden) {
+    if (!gMouseInitialized || (gCursorIsHidden && !mouseDeviceUsesRelativeMode())) {
         return;
     }
 
@@ -644,10 +639,10 @@ void _mouse_simulate_input(int delta_x, int delta_y, int buttons)
 
     _mouse_idling = 0;
     last_buttons = buttons;
-    previousEvent = gMouseEvent;
+    previousMouseEvent = gMouseEvent;
     gMouseEvent = 0;
 
-    if ((previousEvent & MOUSE_EVENT_LEFT_BUTTON_DOWN_REPEAT) != 0) {
+    if ((previousMouseEvent & MOUSE_EVENT_LEFT_BUTTON_DOWN_REPEAT) != 0) {
         if ((buttons & 0x01) != 0) {
             gMouseEvent |= MOUSE_EVENT_LEFT_BUTTON_REPEAT;
 
@@ -665,7 +660,7 @@ void _mouse_simulate_input(int delta_x, int delta_y, int buttons)
         }
     }
 
-    if ((previousEvent & MOUSE_EVENT_RIGHT_BUTTON_DOWN_REPEAT) != 0) {
+    if ((previousMouseEvent & MOUSE_EVENT_RIGHT_BUTTON_DOWN_REPEAT) != 0) {
         if ((buttons & 0x02) != 0) {
             gMouseEvent |= MOUSE_EVENT_RIGHT_BUTTON_REPEAT;
             if (getTicksSince(previousRightButtonTimestamp) > BUTTON_REPEAT_TIME) {
@@ -878,6 +873,16 @@ void convertMouseWheelToArrowKey(int* keyCodePtr)
             }
         }
     }
+}
+
+void mouseResetButtonState()
+{
+    last_buttons = 0;
+    _raw_buttons = 0;
+    gMouseEvent = 0;
+    previousMouseEvent = 0;
+    previousRightButtonTimestamp = 0;
+    previousLeftButtonTimestamp = 0;
 }
 
 int mouse_get_last_buttons()

@@ -566,11 +566,14 @@ void gameHandleFirstPersonPreviewInput(int eventCode)
     if (gFirstPersonPreviewLootPending) {
         if (GameMode::isInGameMode(GameMode::kLoot)) {
             gFirstPersonPreviewLootWindowShown = true;
+            return;
         } else if (gFirstPersonPreviewLootWindowShown) {
             gFirstPersonPreviewLootPending = false;
             gFirstPersonPreviewLootWindowShown = false;
-            gFirstPersonPreviewMouseReleased = gFirstPersonPreviewLootMouseReleased;
-            mouseDeviceSetRelativeModeForced(!gFirstPersonPreviewMouseReleased);
+            gameFirstPersonPreviewSetMouseReleased(gFirstPersonPreviewLootMouseReleased);
+            gFirstPersonPreviewActionMenuShown = false;
+            gFirstPersonPreviewLeftClickStartTime = 0;
+            mouseResetButtonState();
         }
     }
     if (gFirstPersonPreviewMouseReleased != !mouseDeviceUsesRelativeMode()) {
@@ -610,9 +613,6 @@ static void gameFirstPersonPreviewStartLoot(Object* critter)
     gFirstPersonPreviewLootPending = true;
     gFirstPersonPreviewLootWindowShown = false;
     gFirstPersonPreviewLootMouseReleased = gFirstPersonPreviewMouseReleased;
-    gFirstPersonPreviewMouseReleased = true;
-    mouseDeviceSetRelativeModeForced(false);
-    mouseShowCursor();
     actionLootCritter(gDude, critter);
 }
 
@@ -630,17 +630,19 @@ static bool gameFirstPersonPreviewUseObject(Object* object)
             _action_use_an_object(gDude, object);
             return true;
         }
+        if (!_obj_action_can_use(object)) {
+            return false;
+        }
         gFirstPersonPreviewLootPending = true;
         gFirstPersonPreviewLootWindowShown = true;
         gFirstPersonPreviewLootMouseReleased = gFirstPersonPreviewMouseReleased;
-        gFirstPersonPreviewMouseReleased = true;
-        mouseDeviceSetRelativeModeForced(false);
-        mouseShowCursor();
         inventoryOpenLooting(gDude, object);
         gFirstPersonPreviewLootPending = false;
         gFirstPersonPreviewLootWindowShown = false;
-        gFirstPersonPreviewMouseReleased = gFirstPersonPreviewLootMouseReleased;
-        mouseDeviceSetRelativeModeForced(!gFirstPersonPreviewMouseReleased);
+        gameFirstPersonPreviewSetMouseReleased(gFirstPersonPreviewLootMouseReleased);
+        gFirstPersonPreviewActionMenuShown = false;
+        gFirstPersonPreviewLeftClickStartTime = 0;
+        mouseResetButtonState();
         return true;
     }
 
@@ -649,9 +651,6 @@ static bool gameFirstPersonPreviewUseObject(Object* object)
             gFirstPersonPreviewLootPending = true;
             gFirstPersonPreviewLootWindowShown = false;
             gFirstPersonPreviewLootMouseReleased = gFirstPersonPreviewMouseReleased;
-            gFirstPersonPreviewMouseReleased = true;
-            mouseDeviceSetRelativeModeForced(false);
-            mouseShowCursor();
             actionPickUp(gDude, object);
             return true;
         }
@@ -965,6 +964,31 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
         } else {
             if (eventCode == INPUT_EVENT_FIRST_PERSON_LEFT_CLICK) {
                 gFirstPersonPreviewLeftClickStartTime = getTicks();
+                const int centerX = screenGetWidth() / 2;
+                const int centerY = screenGetHeight() / 2;
+                Object* critter = tileFirstPersonPreviewPickCritterAt(centerX, centerY);
+                bool handled = false;
+                if (critter != nullptr) {
+                    if (critterIsDead(critter)) {
+                        gameFirstPersonPreviewStartLoot(critter);
+                        handled = true;
+                    } else if (_obj_action_can_talk_to(critter)) {
+                        actionTalk(gDude, critter);
+                        handled = true;
+                    }
+                }
+                Object* object = handled ? nullptr : tileFirstPersonPreviewPickObjectAt(centerX, centerY);
+                handled = handled || gameFirstPersonPreviewUseObject(object);
+                if (!handled) {
+                    Object* door = tileFirstPersonPreviewPickDoorAt(centerX, centerY);
+                    if (door != nullptr) {
+                        _action_use_an_object(gDude, door);
+                        handled = true;
+                    }
+                }
+                if (handled) {
+                    gFirstPersonPreviewLeftClickStartTime = 0;
+                }
                 return 0;
             }
 
@@ -998,8 +1022,9 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                                     gameFirstPersonPreviewShowCritterMenu(critter, mouseX, mouseY);
                                 }
                             }
-                        } else if (eventCode == -2
-                            && (mouseState & MOUSE_EVENT_LEFT_BUTTON_UP) != 0) {
+                        } else if ((eventCode == -2
+                                       && (mouseState & MOUSE_EVENT_LEFT_BUTTON_UP) != 0)
+                            || (eventCode == -1 && !leftButtonDown)) {
                             if (!gFirstPersonPreviewActionMenuShown
                                 && gFirstPersonPreviewLeftClickStartTime != 0) {
                                 Object* critter = tileFirstPersonPreviewPickCritterAt(mouseX, mouseY);
@@ -1286,7 +1311,20 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
         // open inventory
         if (interfaceBarEnabled()) {
             soundPlayFile("ib1p1xx1");
+            const bool firstPersonPreviewWasEnabled = tileFirstPersonPreviewIsEnabled();
+            const bool firstPersonPreviewMouseWasReleased = gFirstPersonPreviewMouseReleased;
+            if (firstPersonPreviewWasEnabled) {
+                if (!gameFirstPersonPreviewSetMouseReleased(true)) {
+                    debugPrint("Failed to enable mouse cursor for inventory: %s\n", SDL_GetError());
+                }
+                mouseResetButtonState();
+            }
             inventoryOpen();
+            if (firstPersonPreviewWasEnabled && tileFirstPersonPreviewIsEnabled()) {
+                if (!gameFirstPersonPreviewSetMouseReleased(firstPersonPreviewMouseWasReleased)) {
+                    debugPrint("Failed to restore first-person mouse mode after inventory: %s\n", SDL_GetError());
+                }
+            }
         }
         break;
     case KEY_ESCAPE:
@@ -1546,6 +1584,8 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                 debugPrint("Failed to restore mouse mode: %s\n", SDL_GetError());
             }
         } else if (mouseDeviceSetRelativeModeForced(true)) {
+            inputEventQueueReset();
+            mouseResetButtonState();
             mouseHideCursor();
             tileFirstPersonPreviewToggle();
         } else {
@@ -1596,8 +1636,7 @@ void gameUiDisable(int allowScrolling)
 
 static bool gameFirstPersonPreviewSetMouseReleased(bool enabled)
 {
-    if (mouseDeviceUsesRelativeMode() == !enabled
-        || mouseDeviceSetRelativeModeForced(!enabled)) {
+    if (mouseDeviceSetRelativeModeForced(!enabled)) {
         gFirstPersonPreviewMouseReleased = enabled;
         if (enabled) {
             mouseShowCursor();

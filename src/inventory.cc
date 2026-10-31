@@ -4927,6 +4927,10 @@ int inventoryOpenLooting(Object* looter, Object* target)
 
     // Trigger game mode change _after_ window and loot_obj are set up
     ScopedGameMode gm(GameMode::kLoot);
+    if (tileFirstPersonPreviewIsEnabled()) {
+        mouseDeviceSetRelativeModeForced(false);
+        mouseShowCursor();
+    }
 
     bool isCaughtStealing = false;
     int stealingXp = 0;
