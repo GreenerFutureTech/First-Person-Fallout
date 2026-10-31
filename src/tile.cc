@@ -2117,8 +2117,8 @@ static void tileRenderFirstPersonTopology()
         return;
     }
 
-    constexpr int kMaximumTopologyZoom = 2;
-    const int zoomScale = 1 << std::max(0,
+    constexpr int kMaximumTopologyZoom = 3;
+    const int zoomScale = 1 << std::max(1,
         std::min(kMaximumTopologyZoom, gFirstPersonPreviewTopologyZoom));
     const int zoomedCellSize = cellSize * zoomScale;
     const int mapWidth = zoomedCellSize * SQUARE_GRID_WIDTH;
@@ -2959,7 +2959,7 @@ void tileFirstPersonPreviewToggleTopology()
     gFirstPersonPreviewTopologyPosition = (gFirstPersonPreviewTopologyPosition + 1) % 5;
     gFirstPersonPreviewTopologyEnabled = gFirstPersonPreviewTopologyPosition != 4;
     if (!gFirstPersonPreviewTopologyEnabled) {
-        gFirstPersonPreviewTopologyZoom = 0;
+        gFirstPersonPreviewTopologyZoom = 1;
     }
     tileFirstPersonPreviewRefresh();
 }
@@ -2970,8 +2970,8 @@ bool tileFirstPersonPreviewZoomTopology(int direction)
         return false;
     }
 
-    constexpr int kMaximumTopologyZoom = 2;
-    gFirstPersonPreviewTopologyZoom = std::max(0,
+    constexpr int kMaximumTopologyZoom = 3;
+    gFirstPersonPreviewTopologyZoom = std::max(1,
         std::min(kMaximumTopologyZoom, gFirstPersonPreviewTopologyZoom + (direction > 0 ? 1 : -1)));
     tileFirstPersonPreviewRefresh();
     return true;
