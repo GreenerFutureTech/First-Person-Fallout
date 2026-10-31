@@ -97,6 +97,7 @@ static int gameDbInit();
 static void showSplash();
 static bool gameFirstPersonPreviewSetMouseReleased(bool enabled);
 static void gameFirstPersonPreviewShowCritterMenu(Object* critter, int mouseX, int mouseY);
+static void gameFirstPersonPreviewStartLoot(Object* critter);
 
 inline constexpr char kBaseModPath[] = "ce.dat";
 
@@ -587,6 +588,44 @@ void gameHandleFirstPersonPreviewInput(int eventCode)
     }
 }
 
+static void gameFirstPersonPreviewStartLoot(Object* critter)
+{
+    if (critter == nullptr || FrmId(critter).objectType() != OBJ_TYPE_CRITTER) {
+        return;
+    }
+
+    gFirstPersonPreviewMouseReleased = true;
+    mouseDeviceSetRelativeModeForced(false);
+    mouseShowCursor();
+    actionLootCritter(gDude, critter);
+}
+
+static bool gameFirstPersonPreviewUseObject(Object* object)
+{
+    if (object == nullptr) {
+        return false;
+    }
+
+    const ObjectType objectType = FrmId(object).objectType();
+    if (objectType == OBJ_TYPE_SCENERY) {
+        _action_use_an_object(gDude, object);
+        return true;
+    }
+
+    if (objectType == OBJ_TYPE_ITEM) {
+        if (itemGetType(object) == ITEM_TYPE_CONTAINER) {
+            inventoryOpenLooting(gDude, object);
+            return true;
+        }
+        if (_obj_action_can_use(object)) {
+            _action_use_an_object(gDude, object);
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static void gameFirstPersonPreviewShowCritterMenu(Object* targetObj, int mouseX, int mouseY)
 {
     if (targetObj == nullptr || targetObj == gDude) {
@@ -694,6 +733,7 @@ static void gameFirstPersonPreviewShowCritterMenu(Object* targetObj, int mouseX,
     _mouse_set_position(mouseX, mouseY);
 
     const GameMouseActionMenuItem selectedAction = gameMouseGetHighlightedActionMenuItem();
+    bool lootStarted = false;
 
     switch (selectedAction) {
     case GAME_MOUSE_ACTION_MENU_ITEM_TALK:
@@ -703,7 +743,8 @@ static void gameFirstPersonPreviewShowCritterMenu(Object* targetObj, int mouseX,
         if (objectIsPartyMember(targetObj)) {
             actionUseSkill(gDude, targetObj, SKILL_STEAL);
         } else {
-            actionLootCritter(gDude, targetObj);
+            gameFirstPersonPreviewStartLoot(targetObj);
+            lootStarted = true;
         }
         break;
     case GAME_MOUSE_ACTION_MENU_ITEM_PUSH:
@@ -738,11 +779,13 @@ static void gameFirstPersonPreviewShowCritterMenu(Object* targetObj, int mouseX,
     default:
         break;
     }
-    gFirstPersonPreviewMouseReleased = mouseWasReleased;
-    if (relativeModeWasEnabled) {
-        mouseDeviceSetRelativeModeForced(true);
+    if (!lootStarted) {
+        gFirstPersonPreviewMouseReleased = mouseWasReleased;
     }
-    if (mouseWasReleased) {
+    if (relativeModeWasEnabled) {
+        mouseDeviceSetRelativeModeForced(!lootStarted);
+    }
+    if (lootStarted || mouseWasReleased) {
         mouseShowCursor();
     } else {
         mouseHideCursor();
@@ -831,15 +874,21 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                         : nullptr;
                     if (critter != nullptr) {
                         if (critterIsDead(critter)) {
-                            actionLootCritter(gDude, critter);
+                            gameFirstPersonPreviewStartLoot(critter);
                         } else {
                             _combat_attack_this(critter);
                         }
                     } else {
-                        Object* door = tileFirstPersonPreviewPickDoorAt(mouseX, mouseY);
-                        if (door != nullptr) {
-                            _action_use_an_object(gDude, door);
-                        } else {
+                        Object* object = tileFirstPersonPreviewPickObjectAt(mouseX, mouseY);
+                        bool handled = gameFirstPersonPreviewUseObject(object);
+                        if (!handled) {
+                            Object* door = tileFirstPersonPreviewPickDoorAt(mouseX, mouseY);
+                            if (door != nullptr) {
+                                _action_use_an_object(gDude, door);
+                                handled = true;
+                            }
+                        }
+                        if (!handled) {
                             const int destinationTile = tileFirstPersonPreviewPickGroundTileAt(
                                 mouseX - isoWindowRect.left,
                                 mouseY - isoWindowRect.top);
@@ -905,24 +954,31 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                         }
                         if (leftButtonHeld) {
                             if (!gFirstPersonPreviewActionMenuShown) {
-                                gFirstPersonPreviewActionMenuShown = true;
                                 Object* critter = tileFirstPersonPreviewPickCritterAt(mouseX, mouseY);
                                 if (critter != nullptr) {
+                                    gFirstPersonPreviewActionMenuShown = true;
                                     gameFirstPersonPreviewShowCritterMenu(critter, mouseX, mouseY);
                                 }
                             }
-                        } else if ((mouseState & MOUSE_EVENT_LEFT_BUTTON_UP) != 0) {
+                        } else if (eventCode == -2
+                            && (mouseState & MOUSE_EVENT_LEFT_BUTTON_UP) != 0) {
                             if (!gFirstPersonPreviewActionMenuShown
                                 && gFirstPersonPreviewLeftClickStartTime != 0) {
                                 Object* critter = tileFirstPersonPreviewPickCritterAt(mouseX, mouseY);
                                 if (critter != nullptr) {
                                     if (_obj_action_can_talk_to(critter)) actionTalk(gDude, critter);
-                                    else actionLootCritter(gDude, critter);
+                                    else gameFirstPersonPreviewStartLoot(critter);
                                 } else {
-                                    Object* door = tileFirstPersonPreviewPickDoorAt(mouseX, mouseY);
-                                    if (door != nullptr) {
-                                        _action_use_an_object(gDude, door);
-                                    } else {
+                                    Object* object = tileFirstPersonPreviewPickObjectAt(mouseX, mouseY);
+                                    bool handled = gameFirstPersonPreviewUseObject(object);
+                                    if (!handled) {
+                                        Object* door = tileFirstPersonPreviewPickDoorAt(mouseX, mouseY);
+                                        if (door != nullptr) {
+                                            _action_use_an_object(gDude, door);
+                                            handled = true;
+                                        }
+                                    }
+                                    if (!handled) {
                                         const int destinationTile = tileFirstPersonPreviewPickGroundTileAt(
                                             mouseX - isoWindowRect.left,
                                             mouseY - isoWindowRect.top);
@@ -955,20 +1011,31 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                     if (leftButtonHeld
                         && getTicksSince(gFirstPersonPreviewLeftClickStartTime) >= BUTTON_REPEAT_TIME
                         && !gFirstPersonPreviewActionMenuShown) {
-                        gFirstPersonPreviewActionMenuShown = true;
-                        gameFirstPersonPreviewShowCritterMenu(tileFirstPersonPreviewPickCritter(),
-                            screenGetWidth() / 2, screenGetHeight() / 2);
-                    } else if (!leftButtonHeld && gFirstPersonPreviewLeftClickStartTime != 0) {
+                        Object* critter = tileFirstPersonPreviewPickCritter();
+                        if (critter != nullptr) {
+                            gFirstPersonPreviewActionMenuShown = true;
+                            gameFirstPersonPreviewShowCritterMenu(critter,
+                                screenGetWidth() / 2, screenGetHeight() / 2);
+                        }
+                    } else if (eventCode == -2
+                        && !leftButtonHeld
+                        && (mouseState & MOUSE_EVENT_LEFT_BUTTON_UP) != 0
+                        && gFirstPersonPreviewLeftClickStartTime != 0) {
                         if (!gFirstPersonPreviewActionMenuShown) {
                             Object* critter = tileFirstPersonPreviewPickCritter();
                             if (critter != nullptr) {
                                 if (_obj_action_can_talk_to(critter)) actionTalk(gDude, critter);
-                                else actionLootCritter(gDude, critter);
+                                else gameFirstPersonPreviewStartLoot(critter);
                             } else {
-                                Object* door = tileFirstPersonPreviewPickDoorAt(
-                                    screenGetWidth() / 2, screenGetHeight() / 2);
-                                if (door != nullptr) {
-                                    _action_use_an_object(gDude, door);
+                                const int centerX = screenGetWidth() / 2;
+                                const int centerY = screenGetHeight() / 2;
+                                Object* object = tileFirstPersonPreviewPickObjectAt(centerX, centerY);
+                                bool handled = gameFirstPersonPreviewUseObject(object);
+                                if (!handled) {
+                                    Object* door = tileFirstPersonPreviewPickDoorAt(centerX, centerY);
+                                    if (door != nullptr) {
+                                        _action_use_an_object(gDude, door);
+                                    }
                                 }
                             }
                         }

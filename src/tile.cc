@@ -97,6 +97,8 @@ struct TileFirstPersonTopologyMarker {
     Rotation rotation;
     TileFirstPersonWallOrientation wallOrientation;
     bool structural;
+    bool door;
+    bool openDoor;
 };
 
 struct TileFirstPersonActorHitTarget {
@@ -1558,6 +1560,8 @@ static void tileFirstPersonSnapshotTopologyObject(Object* object, void* context)
         object->rotation,
         wallOrientation,
         structural,
+        isDoor,
+        openDoor,
     });
 }
 
@@ -2137,7 +2141,13 @@ static void tileRenderFirstPersonTopology()
                 right - left + 1,
                 bottom - top + 1,
                 gTileWindowPitch,
-                COLOR_DARK_GREY_2);
+                ((renderSquareTile / SQUARE_GRID_WIDTH + renderSquareTile % SQUARE_GRID_WIDTH) & 1) != 0
+                    ? COLOR_DARK_GREY_2
+                    : COLOR_DARK_GREY);
+            if (zoomedCellSize >= 3) {
+                bufferDrawRect(gTileWindowBuffer, gTileWindowPitch,
+                    left, top, right, bottom, COLOR_DARK_GREY_3);
+            }
         }
     }
 
@@ -2177,15 +2187,15 @@ static void tileRenderFirstPersonTopology()
                 gFirstPersonPreviewWallOrientations[renderHexTile]);
             if (orientation == TILE_FIRST_PERSON_WALL_ORIENTATION_NORTH_SOUTH) {
                 tileFirstPersonDrawDiagnosticLine(centerX, cellY, centerX,
-                    cellY + zoomedCellSize - 1, COLOR_WHITE);
+                    cellY + zoomedCellSize - 1, COLOR_LIGHT_GREY);
             } else if (orientation == TILE_FIRST_PERSON_WALL_ORIENTATION_EAST_WEST) {
                 tileFirstPersonDrawDiagnosticLine(cellX, centerY,
-                    cellX + zoomedCellSize - 1, centerY, COLOR_WHITE);
+                    cellX + zoomedCellSize - 1, centerY, COLOR_LIGHT_GREY);
             } else {
                 bufferDrawRect(gTileWindowBuffer, gTileWindowPitch,
                     cellX + 1, cellY + 1,
                     cellX + zoomedCellSize - 2, cellY + zoomedCellSize - 2,
-                    COLOR_WHITE);
+                        COLOR_LIGHT_GREY);
             }
         }
     }
@@ -2223,16 +2233,16 @@ static void tileRenderFirstPersonTopology()
             const int centerY = cellY + zoomedCellSize / 2;
             if (marker.wallOrientation == TILE_FIRST_PERSON_WALL_ORIENTATION_NORTH_SOUTH) {
                 tileFirstPersonDrawDiagnosticLine(centerX, cellY, centerX,
-                    cellY + zoomedCellSize - 1, COLOR_WHITE);
+                    cellY + zoomedCellSize - 1, COLOR_LIGHT_GREY);
             } else if (marker.wallOrientation == TILE_FIRST_PERSON_WALL_ORIENTATION_EAST_WEST) {
                 tileFirstPersonDrawDiagnosticLine(cellX, centerY,
-                    cellX + zoomedCellSize - 1, centerY, COLOR_WHITE);
+                    cellX + zoomedCellSize - 1, centerY, COLOR_LIGHT_GREY);
             } else if (cellX + 1 <= cellX + zoomedCellSize - 2
                 && cellY + 1 <= cellY + zoomedCellSize - 2) {
                 bufferDrawRect(gTileWindowBuffer, gTileWindowPitch,
                     cellX + 1, cellY + 1,
                     cellX + zoomedCellSize - 2, cellY + zoomedCellSize - 2,
-                    COLOR_WHITE);
+                COLOR_LIGHT_GREY);
             }
         }
 
@@ -2243,7 +2253,26 @@ static void tileRenderFirstPersonTopology()
             const int arrowLength = std::max(1, (zoomedCellSize - 1) / 2);
             const int arrowX = markerX + kRotationX[marker.rotation] * arrowLength;
             const int arrowY = markerY + kRotationY[marker.rotation] * arrowLength;
-            tileFirstPersonDrawDiagnosticLine(markerX, markerY, arrowX, arrowY, COLOR_WHITE);
+            tileFirstPersonDrawDiagnosticLine(markerX, markerY, arrowX, arrowY, COLOR_LIGHT_GREY);
+        }
+
+        if (marker.door && zoomedCellSize >= 3) {
+            const int iconWidth = std::min(5, std::max(3, zoomedCellSize / 2));
+            const int iconHeight = std::min(7, std::max(3, zoomedCellSize));
+            const int iconLeft = markerX - iconWidth / 2;
+            const int iconTop = markerY - iconHeight / 2;
+            const int iconRight = iconLeft + iconWidth - 1;
+            const int iconBottom = iconTop + iconHeight - 1;
+            if (iconLeft >= 0 && iconTop >= 0
+                && iconRight < gTileWindowWidth && iconBottom < gTileWindowHeight) {
+                bufferDrawRect(gTileWindowBuffer, gTileWindowPitch,
+                    iconLeft, iconTop, iconRight, iconBottom, COLOR_BLACK);
+                bufferFill(gTileWindowBuffer + (iconTop + 1) * gTileWindowPitch + iconLeft + 1,
+                    iconWidth - 2,
+                    iconHeight - 2,
+                    gTileWindowPitch,
+                    marker.openDoor ? COLOR_LIGHT_GREEN_3 : COLOR_LIGHT_RED);
+            }
         }
     }
 
@@ -2261,7 +2290,16 @@ static void tileRenderFirstPersonTopology()
             const int playerX = cellX + std::min(zoomedCellSize - 1, localX);
             const int playerY = cellY + std::min(zoomedCellSize - 1, localY);
             if (playerX >= 0 && playerX < gTileWindowWidth && playerY >= 0 && playerY < gTileWindowHeight) {
-                const int radius = std::max(2, std::min(5, zoomedCellSize / 3));
+                const int radius = std::max(2, std::min(6, zoomedCellSize / 3));
+                const int outlineRadius = radius + 1;
+                tileFirstPersonDrawDiagnosticLine(playerX, playerY - outlineRadius,
+                    playerX + outlineRadius, playerY, COLOR_BLACK);
+                tileFirstPersonDrawDiagnosticLine(playerX + outlineRadius, playerY,
+                    playerX, playerY + outlineRadius, COLOR_BLACK);
+                tileFirstPersonDrawDiagnosticLine(playerX, playerY + outlineRadius,
+                    playerX - outlineRadius, playerY, COLOR_BLACK);
+                tileFirstPersonDrawDiagnosticLine(playerX - outlineRadius, playerY,
+                    playerX, playerY - outlineRadius, COLOR_BLACK);
                 tileFirstPersonDrawDiagnosticLine(playerX, playerY - radius,
                     playerX + radius, playerY, COLOR_RED);
                 tileFirstPersonDrawDiagnosticLine(playerX + radius, playerY,
@@ -2562,6 +2600,9 @@ static Object* tileFirstPersonPreviewPickCritterAtPosition(int x, int y)
     Object* pickedObject = nullptr;
     double pickedDepth = std::numeric_limits<double>::infinity();
     for (const TileFirstPersonActorHitTarget& target : gFirstPersonPreviewActorHitTargets) {
+        if (FrmId(target.object).objectType() != OBJ_TYPE_CRITTER) {
+            continue;
+        }
         if (target.depth >= pickedDepth
             || x < target.left
             || x >= target.left + target.width
@@ -2578,8 +2619,10 @@ static Object* tileFirstPersonPreviewPickCritterAtPosition(int x, int y)
                 continue;
             }
 
-            const int sourceX = (x - target.left) * frame.width / target.width;
-            const int sourceY = (y - target.top) * frame.height / target.height;
+            const int sourceX = std::clamp(
+                (x - target.left) * frame.width / target.width, 0, frame.width - 1);
+            const int sourceY = std::clamp(
+                (y - target.top) * frame.height / target.height, 0, frame.height - 1);
             if (frame.data[sourceY * frame.width + sourceX] == 0) {
                 continue;
             }
@@ -2611,6 +2654,70 @@ Object* tileFirstPersonPreviewPickCritterAt(int screenX, int screenY)
     return tileFirstPersonPreviewPickCritterAtPosition(
         screenX - isoWindowRect.left,
         screenY - isoWindowRect.top);
+}
+
+Object* tileFirstPersonPreviewPickObjectAt(int screenX, int screenY)
+{
+    if (!gFirstPersonPreviewEnabled
+        || gFirstPersonPreviewWallDepths.size() != static_cast<size_t>(gTileWindowWidth)) {
+        return nullptr;
+    }
+
+    Rect isoWindowRect;
+    if (windowGetRect(gIsoWindow, &isoWindowRect) != 0
+        || screenX < isoWindowRect.left || screenX > isoWindowRect.right
+        || screenY < isoWindowRect.top || screenY > isoWindowRect.bottom) {
+        return nullptr;
+    }
+
+    const int x = screenX - isoWindowRect.left;
+    const int y = screenY - isoWindowRect.top;
+    Object* pickedObject = nullptr;
+    double pickedDepth = std::numeric_limits<double>::infinity();
+    Object* fallbackObject = nullptr;
+    double fallbackDepth = std::numeric_limits<double>::infinity();
+    for (const TileFirstPersonActorHitTarget& target : gFirstPersonPreviewActorHitTargets) {
+        const ObjectType objectType = FrmId(target.object).objectType();
+        if (objectType != OBJ_TYPE_SCENERY && objectType != OBJ_TYPE_ITEM) {
+            continue;
+        }
+        const int hitPadding = objectType == OBJ_TYPE_SCENERY
+            ? std::max(2, target.width / 4)
+            : 0;
+        if (target.depth >= pickedDepth
+            || x < target.left - hitPadding
+            || x >= target.left + target.width + hitPadding
+            || y < target.top - hitPadding
+            || y >= target.top + target.height + hitPadding
+            || target.depth >= gFirstPersonPreviewWallDepths[x]) {
+            continue;
+        }
+        if (target.depth < fallbackDepth) {
+            fallbackObject = target.object;
+            fallbackDepth = target.depth;
+        }
+
+        FrmImage image;
+        if (image.lock(FrmId(target.object), target.frame, target.rotation)) {
+            const ConstBuffer2D frame = image.getBuffer();
+            if (!frame || frame.width <= 0 || frame.height <= 0) {
+                continue;
+            }
+
+            const int sourceX = std::clamp(
+                (x - target.left) * frame.width / target.width, 0, frame.width - 1);
+            const int sourceY = std::clamp(
+                (y - target.top) * frame.height / target.height, 0, frame.height - 1);
+            if (frame.data[sourceY * frame.width + sourceX] == 0) {
+                continue;
+            }
+        }
+
+        pickedObject = target.object;
+        pickedDepth = target.depth;
+    }
+
+    return pickedObject != nullptr ? pickedObject : fallbackObject;
 }
 
 Object* tileFirstPersonPreviewPickDoorAt(int screenX, int screenY)
