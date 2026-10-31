@@ -2931,7 +2931,7 @@ bool tileFirstPersonPreviewMove(int relativeDirection)
     if (reg_anim_begin(ANIMATION_REQUEST_RESERVED) != 0) {
         return false;
     }
-    const int result = animationRegisterMoveToTile(gDude, destinationTile, gDude->elevation, actionPoints, 0);
+    const int result = animationRegisterRunToTile(gDude, destinationTile, gDude->elevation, actionPoints, 0);
     const int endResult = reg_anim_end();
     return result == 0 && endResult == 0;
 }
