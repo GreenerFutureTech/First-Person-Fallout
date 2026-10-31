@@ -1405,13 +1405,19 @@ static void tileRenderFirstPersonPreview()
         }
         const auto renderWall = [&](unsigned char type, double distance,
                                     TileFirstPersonWallOrientation orientation, int wallSide) {
-            const int fullWallHeight = std::min(gTileWindowHeight,
-                static_cast<int>(gTileWindowHeight / distance));
+            const double projectedWallHeight = gTileWindowHeight / distance;
             const bool halfHeightWall = type == 2;
-            const int wallHeight = halfHeightWall ? std::max(1, fullWallHeight / 2) : fullWallHeight;
-            const int wallTop = halfHeightWall ? horizonY : std::max(0, horizonY - wallHeight / 2);
+            const double wallHeight = halfHeightWall
+                ? std::max(1.0, projectedWallHeight / 2.0)
+                : projectedWallHeight * 2.0;
+            const double floorY = horizonY + projectedWallHeight / 2.0;
+            const double unclippedWallTop = halfHeightWall
+                ? horizonY
+                : floorY - wallHeight;
+            const int wallTop = std::max(0,
+                static_cast<int>(ceil(unclippedWallTop)));
             const int wallBottom = std::min(gTileWindowHeight - 1,
-                halfHeightWall ? horizonY + wallHeight : horizonY + wallHeight / 2);
+                static_cast<int>(floor(floorY)));
             const double hitWorldX = cameraX + rayDirectionX * distance;
             const double hitWorldY = cameraY + rayDirectionY * distance;
             const double wallCoordinate = orientation == TILE_FIRST_PERSON_WALL_ORIENTATION_NORTH_SOUTH
@@ -1424,14 +1430,15 @@ static void tileRenderFirstPersonPreview()
             if (textureX < 0) {
                 textureX += kFirstPersonWallTextureSize;
             }
-            const int textureHeight = std::max(1, fullWallHeight);
+            const double textureHeight = std::max(1.0, projectedWallHeight);
             const int faceShade = wallSide == 0 ? 116 : 96;
             const int distanceShade = std::min(48, static_cast<int>(distance * 7.0));
             const int light = std::max(48, faceShade - distanceShade);
             const std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize>& texture =
                 type == 3 ? gFirstPersonDoorWallTexture : gFirstPersonStoneWallTexture;
             for (int y = wallTop; y <= wallBottom; y++) {
-                int textureY = (y - wallTop) * kFirstPersonWallTextureSize / textureHeight;
+                int textureY = static_cast<int>(
+                    (y - unclippedWallTop) * kFirstPersonWallTextureSize / textureHeight);
                 textureY %= kFirstPersonWallTextureSize;
                 const Color texel = texture[textureY * kFirstPersonWallTextureSize + textureX];
                 gTileWindowBuffer[y * gTileWindowPitch + x] = intensityColorTable[texel][light];
@@ -2683,10 +2690,10 @@ Object* tileFirstPersonPreviewPickObjectAt(int screenX, int screenY)
         }
         const int hitPadding = objectType == OBJ_TYPE_SCENERY
             ? std::max(6, target.width / 2)
-            : 0;
+            : std::max(4, target.width / 2);
         const int verticalHitPadding = objectType == OBJ_TYPE_SCENERY
             ? std::max(6, target.height / 4)
-            : 0;
+            : std::max(4, target.height / 2);
         if (target.depth >= pickedDepth
             || x < target.left - hitPadding
             || x >= target.left + target.width + hitPadding

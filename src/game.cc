@@ -647,17 +647,11 @@ static bool gameFirstPersonPreviewUseObject(Object* object)
     }
 
     if (objectType == OBJ_TYPE_ITEM) {
-        if (itemGetType(object) == ITEM_TYPE_CONTAINER) {
-            gFirstPersonPreviewLootPending = true;
-            gFirstPersonPreviewLootWindowShown = false;
-            gFirstPersonPreviewLootMouseReleased = gFirstPersonPreviewMouseReleased;
-            actionPickUp(gDude, object);
-            return true;
-        }
-        if (_obj_action_can_use(object)) {
-            _action_use_an_object(gDude, object);
-            return true;
-        }
+        gFirstPersonPreviewLootPending = true;
+        gFirstPersonPreviewLootWindowShown = false;
+        gFirstPersonPreviewLootMouseReleased = gFirstPersonPreviewMouseReleased;
+        actionPickUp(gDude, object);
+        return true;
     }
 
     return false;
