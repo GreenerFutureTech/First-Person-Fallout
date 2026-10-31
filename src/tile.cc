@@ -1492,12 +1492,23 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
 {
     const TileFirstPersonActorRenderContext* renderContext =
         static_cast<const TileFirstPersonActorRenderContext*>(context);
+    const ObjectType objectType = FrmId(object).objectType();
     if (object == gDude
         || object->elevation != renderContext->elevation
         || (object->flags & OBJECT_HIDDEN) != OBJECT_NONE
         || !tileIsValid(object->tile)
-        || FrmId(object).objectType() != OBJ_TYPE_CRITTER) {
+        || (objectType != OBJ_TYPE_CRITTER
+            && objectType != OBJ_TYPE_ITEM
+            && objectType != OBJ_TYPE_SCENERY)) {
         return;
+    }
+
+    if (objectType == OBJ_TYPE_SCENERY) {
+        Proto* proto = nullptr;
+        if (protoGetProto(object, &proto) == 0
+            && proto->scenery.type == SCENERY_TYPE_DOOR) {
+            return;
+        }
     }
 
     double objectX;
@@ -1526,28 +1537,35 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
     const int screenCenterX = static_cast<int>(
         (gTileWindowWidth / 2.0) * (1.0 + transformX / transformY));
     const double projectionScale = gTileWindowHeight / transformY;
-    const int maximumActorHeight = std::max(1, static_cast<int>(gTileWindowHeight * 0.8));
-    const int projectedActorHeight = std::max(1, static_cast<int>(projectionScale * 0.9));
+    const double objectHeightScale = objectType == OBJ_TYPE_CRITTER ? 0.9 : 0.55;
+    const int maximumActorHeight = std::max(1, static_cast<int>(gTileWindowHeight
+        * (objectType == OBJ_TYPE_CRITTER ? 0.8 : 0.6)));
+    const int projectedActorHeight = std::max(1, static_cast<int>(projectionScale * objectHeightScale));
     const int actorHeight = std::min(maximumActorHeight, projectedActorHeight);
     const int actorBottom = std::min(gTileWindowHeight,
-        renderContext->horizonY + static_cast<int>(projectionScale * 0.42));
-    const int spriteWidth = std::max(1, static_cast<int>(actorHeight * 0.42 / 0.9));
+        renderContext->horizonY + static_cast<int>(projectionScale * 0.5));
+    const int spriteWidth = std::max(1, static_cast<int>(actorHeight * 0.42 / objectHeightScale));
     const int spriteTop = actorBottom - actorHeight;
     const int spriteBottom = actorBottom;
     const int spriteLeft = screenCenterX - spriteWidth / 2;
     const int spriteRight = spriteLeft + spriteWidth;
     Color actorColor = COLOR_AMBER;
-    if (objectIsPartyMember(object)
-        || (gDude != nullptr
-            && object->data.critter.combat.team == gDude->data.critter.combat.team)) {
-        actorColor = COLOR_LIGHT_GREEN_3;
-    } else if (isInCombat()) {
-        actorColor = COLOR_LIGHT_RED;
+    if (objectType == OBJ_TYPE_CRITTER) {
+        if (objectIsPartyMember(object)
+            || (gDude != nullptr
+                && object->data.critter.combat.team == gDude->data.critter.combat.team)) {
+            actorColor = COLOR_LIGHT_GREEN_3;
+        } else if (isInCombat()) {
+            actorColor = COLOR_LIGHT_RED;
+        }
     }
 
-    Rotation facingRotation = rotationIsValid(object->rotation)
-        ? object->rotation
-        : ROTATION_NE;
+    Rotation facingRotation = ROTATION_NE;
+    if (objectType == OBJ_TYPE_CRITTER) {
+        facingRotation = rotationIsValid(object->rotation)
+            ? object->rotation
+            : ROTATION_NE;
+    }
     {
         double viewX = renderContext->cameraX - objectX;
         double viewY = renderContext->cameraY - objectY;
@@ -1591,8 +1609,22 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         const int artHeight = actorHeight;
         const int artWidth = std::max(1,
             static_cast<int>(artHeight * frame.width / static_cast<double>(frame.height)));
-        const int artBottom = actorBottom;
-        const int artTop = artBottom - artHeight;
+        int visibleBottom = -1;
+        for (int sourceY = frame.height - 1; sourceY >= 0 && visibleBottom < 0; sourceY--) {
+            for (int sourceX = 0; sourceX < frame.width; sourceX++) {
+                if (frame.data[sourceY * frame.width + sourceX] != 0) {
+                    visibleBottom = sourceY;
+                    break;
+                }
+            }
+        }
+        if (visibleBottom < 0) {
+            return;
+        }
+        const int visibleHeight = std::max(1,
+            (visibleBottom + 1) * artHeight / frame.height);
+        const int artTop = actorBottom - visibleHeight;
+        const int artBottom = artTop + artHeight;
         const int artLeft = screenCenterX - artWidth / 2;
         renderContext->hitTargets->push_back({
             object,

@@ -1106,7 +1106,29 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
             && gPressedPhysicalKeys[SDL_SCANCODE_LALT] == 0
             && gPressedPhysicalKeys[SDL_SCANCODE_RALT] == 0) {
             soundPlayFile("ib1p1xx1");
+            const bool firstPersonPreviewWasEnabled = tileFirstPersonPreviewIsEnabled();
+            const bool firstPersonPreviewMouseWasReleased = gFirstPersonPreviewMouseReleased;
+            if (firstPersonPreviewWasEnabled) {
+                tileFirstPersonPreviewToggle();
+                mouseShowCursor();
+                gFirstPersonPreviewMouseReleased = false;
+                gFirstPersonPreviewActionMenuShown = false;
+                gFirstPersonPreviewLeftClickStartTime = 0;
+                if (!mouseDeviceSetRelativeModeForced(false)) {
+                    debugPrint("Failed to restore mouse mode before automap: %s\n", SDL_GetError());
+                }
+            }
             automapShow(true, false);
+            if (firstPersonPreviewWasEnabled) {
+                if (tileFirstPersonPreviewIsEnabled()) {
+                    debugPrint("First-person mode was unexpectedly enabled after automap\n");
+                } else {
+                    tileFirstPersonPreviewToggle();
+                    if (!gameFirstPersonPreviewSetMouseReleased(firstPersonPreviewMouseWasReleased)) {
+                        debugPrint("Failed to restore first-person mouse mode after automap: %s\n", SDL_GetError());
+                    }
+                }
+            }
         }
         break;
     case KEY_CTRL_P:
