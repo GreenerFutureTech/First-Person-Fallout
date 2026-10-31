@@ -1953,6 +1953,7 @@ static void tileFirstPersonGetCameraPosition(int tile, MapElevation elevation, d
 
 static void tileFirstPersonDrawCrosshair()
 {
+    constexpr double kPi = 3.14159265358979323846;
     const int centerX = gTileWindowWidth / 2;
     const int centerY = gTileWindowHeight / 2;
     bufferDrawLine(gTileWindowBuffer,
@@ -1983,6 +1984,26 @@ static void tileFirstPersonDrawCrosshair()
         centerX,
         std::min(gTileWindowHeight - 1, centerY + 5),
         COLOR_WHITE);
+
+    const double yaw = tileFirstPersonPreviewGetYaw() * kPi / 180.0;
+    const double directionX = sin(yaw);
+    const double directionY = -cos(yaw);
+    const int arrowLength = 14;
+    const int tipX = centerX + static_cast<int>(directionX * arrowLength);
+    const int tipY = centerY + static_cast<int>(directionY * arrowLength);
+    const int wingLength = 5;
+    const int wingX = centerX + static_cast<int>(directionX * (arrowLength - wingLength));
+    const int wingY = centerY + static_cast<int>(directionY * (arrowLength - wingLength));
+    const int leftX = wingX + static_cast<int>(-directionY * wingLength);
+    const int leftY = wingY + static_cast<int>(directionX * wingLength);
+    const int rightX = wingX - static_cast<int>(-directionY * wingLength);
+    const int rightY = wingY - static_cast<int>(directionX * wingLength);
+    bufferDrawLine(gTileWindowBuffer, gTileWindowPitch, centerX, centerY, tipX, tipY, COLOR_BLACK);
+    bufferDrawLine(gTileWindowBuffer, gTileWindowPitch, tipX, tipY, leftX, leftY, COLOR_BLACK);
+    bufferDrawLine(gTileWindowBuffer, gTileWindowPitch, tipX, tipY, rightX, rightY, COLOR_BLACK);
+    bufferDrawLine(gTileWindowBuffer, gTileWindowPitch, centerX, centerY, tipX, tipY, COLOR_LIGHT_GREEN_3);
+    bufferDrawLine(gTileWindowBuffer, gTileWindowPitch, tipX, tipY, leftX, leftY, COLOR_LIGHT_GREEN_3);
+    bufferDrawLine(gTileWindowBuffer, gTileWindowPitch, tipX, tipY, rightX, rightY, COLOR_LIGHT_GREEN_3);
 }
 
 static void tileFirstPersonDrawMoveMarker()
@@ -2297,8 +2318,8 @@ static void tileRenderFirstPersonTopology()
             const int playerX = cellX + std::min(zoomedCellSize - 1, localX);
             const int playerY = cellY + std::min(zoomedCellSize - 1, localY);
             if (playerX >= 0 && playerX < gTileWindowWidth && playerY >= 0 && playerY < gTileWindowHeight) {
-                const int radius = std::max(2, std::min(6, zoomedCellSize / 3));
-                const int outlineRadius = radius + 1;
+                const int radius = std::max(3, std::min(8, zoomedCellSize / 2));
+                const int outlineRadius = radius + 2;
                 tileFirstPersonDrawDiagnosticLine(playerX, playerY - outlineRadius,
                     playerX + outlineRadius, playerY, COLOR_BLACK);
                 tileFirstPersonDrawDiagnosticLine(playerX + outlineRadius, playerY,
@@ -2315,6 +2336,16 @@ static void tileRenderFirstPersonTopology()
                     playerX - radius, playerY, COLOR_RED);
                 tileFirstPersonDrawDiagnosticLine(playerX - radius, playerY,
                     playerX, playerY - radius, COLOR_RED);
+                if (radius > 2) {
+                    tileFirstPersonDrawDiagnosticLine(playerX, playerY - radius + 1,
+                        playerX + radius - 1, playerY, COLOR_RED);
+                    tileFirstPersonDrawDiagnosticLine(playerX + radius - 1, playerY,
+                        playerX, playerY + radius - 1, COLOR_RED);
+                    tileFirstPersonDrawDiagnosticLine(playerX, playerY + radius - 1,
+                        playerX - radius + 1, playerY, COLOR_RED);
+                    tileFirstPersonDrawDiagnosticLine(playerX - radius + 1, playerY,
+                        playerX, playerY - radius + 1, COLOR_RED);
+                }
             }
         }
     }
