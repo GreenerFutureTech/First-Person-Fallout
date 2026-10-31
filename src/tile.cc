@@ -1025,12 +1025,41 @@ static void tileRenderFirstPersonPreview()
         gTileWindowWidth,
         horizonY,
         gTileWindowPitch,
-        COLOR_DARK_GREY_3);
+        COLOR_LIGHT_BLUE);
     bufferFill(gTileWindowBuffer + horizonY * gTileWindowPitch,
         gTileWindowWidth,
         gTileWindowHeight - horizonY,
         gTileWindowPitch,
         COLOR_DULL_BROWN);
+
+    // A low-resolution sky and distant desert ridge give outdoor maps a simple
+    // horizon without adding another texture or asset dependency.
+    constexpr int kSkylineStep = 8;
+    const double skyYaw = tileFirstPersonPreviewGetYaw();
+    const int panoramaWidth = std::max(kSkylineStep, gTileWindowWidth * 2);
+    const int panoramaSegments = std::max(1, panoramaWidth / kSkylineStep);
+    const int parallaxOffset = static_cast<int>(skyYaw * panoramaWidth / 360.0);
+    for (int x = 0; x < gTileWindowWidth; x += kSkylineStep) {
+        const int panoramaX = (x + parallaxOffset) % panoramaWidth;
+        const int segment = (panoramaX / kSkylineStep) % panoramaSegments;
+        unsigned int noise = static_cast<unsigned int>(segment) * 1103515245u + 12345u;
+        noise ^= noise >> 11;
+        const int ridgeHeight = std::max(2, horizonY / 12
+            + static_cast<int>(noise % static_cast<unsigned int>(std::max(1, horizonY / 10))));
+        const int ridgeTop = std::max(0, horizonY - ridgeHeight);
+        const int ridgeWidth = std::min(kSkylineStep, gTileWindowWidth - x);
+        bufferFill(gTileWindowBuffer + ridgeTop * gTileWindowPitch + x,
+            ridgeWidth,
+            horizonY - ridgeTop,
+            gTileWindowPitch,
+            COLOR_SAGE_GREEN);
+        const int foregroundHeight = std::max(1, ridgeHeight / 3);
+        bufferFill(gTileWindowBuffer + (horizonY - foregroundHeight) * gTileWindowPitch + x,
+            ridgeWidth,
+            foregroundHeight,
+            gTileWindowPitch,
+            COLOR_DULL_BROWN);
+    }
 
     gFirstPersonPreviewWallCells.assign(gHexGridSize, 0);
     gFirstPersonPreviewWallOrientations.assign(gHexGridSize, 0);
