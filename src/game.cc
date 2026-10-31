@@ -608,7 +608,13 @@ static bool gameFirstPersonPreviewUseObject(Object* object)
 
     const ObjectType objectType = FrmId(object).objectType();
     if (objectType == OBJ_TYPE_SCENERY) {
-        _action_use_an_object(gDude, object);
+        Proto* proto = nullptr;
+        if (protoGetProto(object, &proto) == 0
+            && proto->scenery.type == SCENERY_TYPE_DOOR) {
+            _action_use_an_object(gDude, object);
+            return true;
+        }
+        inventoryOpenLooting(gDude, object);
         return true;
     }
 
@@ -1019,7 +1025,7 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                         }
                     } else if (eventCode == -2
                         && !leftButtonHeld
-                        && (mouseState & MOUSE_EVENT_LEFT_BUTTON_UP) != 0
+                        && !leftButtonDown
                         && gFirstPersonPreviewLeftClickStartTime != 0) {
                         if (!gFirstPersonPreviewActionMenuShown) {
                             Object* critter = tileFirstPersonPreviewPickCritter();
@@ -1027,14 +1033,17 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                                 if (_obj_action_can_talk_to(critter)) actionTalk(gDude, critter);
                                 else gameFirstPersonPreviewStartLoot(critter);
                             } else {
-                                const int centerX = screenGetWidth() / 2;
-                                const int centerY = screenGetHeight() / 2;
-                                Object* object = tileFirstPersonPreviewPickObjectAt(centerX, centerY);
-                                bool handled = gameFirstPersonPreviewUseObject(object);
-                                if (!handled) {
-                                    Object* door = tileFirstPersonPreviewPickDoorAt(centerX, centerY);
-                                    if (door != nullptr) {
-                                        _action_use_an_object(gDude, door);
+                                Rect isoWindowRect;
+                                if (windowGetRect(gIsoWindow, &isoWindowRect) == 0) {
+                                    const int centerX = isoWindowRect.left + windowGetWidth(gIsoWindow) / 2;
+                                    const int centerY = isoWindowRect.top + windowGetHeight(gIsoWindow) / 2;
+                                    Object* object = tileFirstPersonPreviewPickObjectAt(centerX, centerY);
+                                    bool handled = gameFirstPersonPreviewUseObject(object);
+                                    if (!handled) {
+                                        Object* door = tileFirstPersonPreviewPickDoorAt(centerX, centerY);
+                                        if (door != nullptr) {
+                                            _action_use_an_object(gDude, door);
+                                        }
                                     }
                                 }
                             }
