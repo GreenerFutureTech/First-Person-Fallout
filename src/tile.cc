@@ -1058,34 +1058,6 @@ static void tileRenderFirstPersonPreview()
     const double cameraPlaneX = -directionY * kFieldOfViewScale;
     const double cameraPlaneY = directionX * kFieldOfViewScale;
 
-    std::vector<FrmImage> floorTextures;
-    std::vector<int> floorTextureIndices(FrmId::kMaxFrameId + 1, -1);
-    for (int squareTile = 0; squareTile < SQUARE_GRID_SIZE; squareTile++) {
-        const FloorTileFrmId floorTileFrmId(gTileSquares[gElevation]->tileFid[squareTile]);
-        if ((floorTileFrmId.flags() & TileFlags::TemporarilyHidden) != TileFlags::None) {
-            continue;
-        }
-
-        const TileFrameId frameId = floorTileFrmId.frameId<TileFrameId>();
-        if (frameId == TileFrameId::Invalid
-            || frameId == TileFrameId::Reserved
-            || frameId == TileFrameId::Grid) {
-            continue;
-        }
-
-        const int frameIndex = static_cast<int>(frameId);
-        if (frameIndex < 0 || frameIndex >= static_cast<int>(floorTextureIndices.size())
-            || floorTextureIndices[frameIndex] != -1) {
-            continue;
-        }
-
-        floorTextureIndices[frameIndex] = -2;
-        floorTextures.emplace_back();
-        if (floorTextures.back().lock(FrmId(frameId))) {
-            floorTextureIndices[frameIndex] = static_cast<int>(floorTextures.size()) - 1;
-        }
-    }
-
     // Compose the isometric tile overlap once per floor layout. The old
     // per-pixel neighbor search repeated map/FID/texture lookups hundreds of
     // thousands of times every frame.
@@ -1093,10 +1065,43 @@ static void tileRenderFirstPersonPreview()
     constexpr int kFloorCacheCellArea = kFloorCacheCellResolution * kFloorCacheCellResolution;
     static std::vector<int> cachedFloorFids;
     static std::vector<unsigned char> cachedFloorColors;
+    static std::vector<FrmImage> floorTextures;
+    static std::vector<int> floorTextureIndices;
     static int cachedFloorElevation = -1;
-    std::vector<int> currentFloorFids(SQUARE_GRID_SIZE);
-    std::copy_n(gTileSquares[gElevation]->tileFid, SQUARE_GRID_SIZE, currentFloorFids.begin());
-    if (cachedFloorElevation != static_cast<int>(gElevation) || currentFloorFids != cachedFloorFids) {
+    const int* currentFloorFids = gTileSquares[gElevation]->tileFid;
+    const bool floorLayoutChanged = cachedFloorElevation != static_cast<int>(gElevation)
+        || cachedFloorFids.size() != SQUARE_GRID_SIZE
+        || !std::equal(currentFloorFids, currentFloorFids + SQUARE_GRID_SIZE, cachedFloorFids.begin());
+    if (floorLayoutChanged) {
+        cachedFloorFids.assign(currentFloorFids, currentFloorFids + SQUARE_GRID_SIZE);
+        floorTextures.clear();
+        floorTextureIndices.assign(FrmId::kMaxFrameId + 1, -1);
+        for (int squareTile = 0; squareTile < SQUARE_GRID_SIZE; squareTile++) {
+            const FloorTileFrmId floorTileFrmId(currentFloorFids[squareTile]);
+            if ((floorTileFrmId.flags() & TileFlags::TemporarilyHidden) != TileFlags::None) {
+                continue;
+            }
+
+            const TileFrameId frameId = floorTileFrmId.frameId<TileFrameId>();
+            if (frameId == TileFrameId::Invalid
+                || frameId == TileFrameId::Reserved
+                || frameId == TileFrameId::Grid) {
+                continue;
+            }
+
+            const int frameIndex = static_cast<int>(frameId);
+            if (frameIndex < 0 || frameIndex >= static_cast<int>(floorTextureIndices.size())
+                || floorTextureIndices[frameIndex] != -1) {
+                continue;
+            }
+
+            floorTextureIndices[frameIndex] = -2;
+            floorTextures.emplace_back();
+            if (floorTextures.back().lock(FrmId(frameId))) {
+                floorTextureIndices[frameIndex] = static_cast<int>(floorTextures.size()) - 1;
+            }
+        }
+
         cachedFloorColors.assign(SQUARE_GRID_SIZE * kFloorCacheCellArea, COLOR_DULL_BROWN);
         for (int mapY = 0; mapY < SQUARE_GRID_HEIGHT; mapY++) {
             for (int mapX = 0; mapX < SQUARE_GRID_WIDTH; mapX++) {
@@ -1121,7 +1126,7 @@ static void tileRenderFirstPersonPreview()
 
                                 const int neighborTile = neighborY * SQUARE_GRID_WIDTH
                                     + (SQUARE_GRID_WIDTH - 1 - neighborX);
-                                const FloorTileFrmId neighborFid(currentFloorFids[neighborTile]);
+                                const FloorTileFrmId neighborFid(cachedFloorFids[neighborTile]);
                                 if ((neighborFid.flags() & TileFlags::TemporarilyHidden) != TileFlags::None) {
                                     continue;
                                 }
@@ -1164,7 +1169,6 @@ static void tileRenderFirstPersonPreview()
                 }
             }
         }
-        cachedFloorFids = std::move(currentFloorFids);
         cachedFloorElevation = static_cast<int>(gElevation);
     }
 
