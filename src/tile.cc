@@ -2020,7 +2020,12 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                             ? 0.8
                             : isTree || isTallScenery ? 1.2 : isMediumScenery ? 0.8 : 0.6)));
     const int projectedActorHeight = std::max(1, static_cast<int>(projectionScale * objectHeightScale));
-    const int actorHeight = std::min(maximumActorHeight, projectedActorHeight);
+    const int sceneryHeightLimit = std::max(1, static_cast<int>(gTileWindowHeight * 0.85));
+    const int actorHeight = std::min(
+        objectType == OBJ_TYPE_SCENERY
+            ? std::min(maximumActorHeight, sceneryHeightLimit)
+            : maximumActorHeight,
+        projectedActorHeight);
     const int projectedActorBottom = renderContext->horizonY
         + static_cast<int>(projectionScale * 0.5);
     const int actorBottom = isRock
@@ -2141,15 +2146,18 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
 
         const int firstOpaqueColumn = std::max(0, opaqueLeft);
         const int lastColumn = std::min(gTileWindowWidth, opaqueRight);
+        const int spriteSampleStep = objectType == OBJ_TYPE_SCENERY ? 2 : 1;
         int sourceXNumerator = (firstOpaqueColumn - artLeft) * frame.width;
         int sourceX = sourceXNumerator / artWidth;
         int sourceXRemainder = sourceXNumerator % artWidth;
-        for (int x = firstOpaqueColumn; x < lastColumn; x++) {
+        for (int x = firstOpaqueColumn; x < lastColumn; x += spriteSampleStep) {
             if (sourceX < spriteBounds.left || sourceX > spriteBounds.right) {
-                sourceXRemainder += frame.width;
-                while (sourceXRemainder >= artWidth) {
-                    sourceXRemainder -= artWidth;
-                    sourceX++;
+                for (int step = 0; step < spriteSampleStep && x + step < lastColumn; step++) {
+                    sourceXRemainder += frame.width;
+                    while (sourceXRemainder >= artWidth) {
+                        sourceXRemainder -= artWidth;
+                        sourceX++;
+                    }
                 }
                 continue;
             }
@@ -2160,31 +2168,46 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                 int sourceNumerator = (startY - artTop) * frame.height;
                 int sourceY = sourceNumerator / artHeight;
                 int sourceRemainder = sourceNumerator % artHeight;
-                size_t depthIndex = static_cast<size_t>(startY) * gTileWindowWidth + x;
-                unsigned char* destination = gTileWindowBuffer
-                    + startY * gTileWindowPitch + x;
-                for (int y = startY; y < endY; y++) {
+                for (int y = startY; y < endY; y += spriteSampleStep) {
                     const unsigned char color = frame.data[sourceY * frame.width + sourceX];
                     if (color != 0) {
-                        if ((*renderContext->actorDepthStamps)[depthIndex]
-                            != renderContext->actorDepthStamp) {
-                            (*renderContext->actorDepthStamps)[depthIndex] =
-                                renderContext->actorDepthStamp;
-                            (*renderContext->actorDepths)[depthIndex] =
-                                std::numeric_limits<double>::infinity();
-                        }
-                        if (transformY < (*renderContext->actorDepths)[depthIndex]) {
-                            *destination = color;
-                            (*renderContext->actorDepths)[depthIndex] = transformY;
+                        for (int blockY = y;
+                             blockY < std::min(endY, y + spriteSampleStep);
+                             blockY++) {
+                            for (int blockX = x;
+                                 blockX < std::min(lastColumn, x + spriteSampleStep);
+                                 blockX++) {
+                                if ((blockY < renderContext->horizonY
+                                        && transformY >= (*renderContext->wallDepths)[blockX])
+                                    || (blockY >= renderContext->horizonY
+                                        && transformY >= std::min(
+                                            (*renderContext->wallDepths)[blockX],
+                                            (*renderContext->wallSillDepths)[blockX]))) {
+                                    continue;
+                                }
+                                const size_t depthIndex =
+                                    static_cast<size_t>(blockY) * gTileWindowWidth + blockX;
+                                if ((*renderContext->actorDepthStamps)[depthIndex]
+                                    != renderContext->actorDepthStamp) {
+                                    (*renderContext->actorDepthStamps)[depthIndex] =
+                                        renderContext->actorDepthStamp;
+                                    (*renderContext->actorDepths)[depthIndex] =
+                                        std::numeric_limits<double>::infinity();
+                                }
+                                if (transformY < (*renderContext->actorDepths)[depthIndex]) {
+                                    gTileWindowBuffer[blockY * gTileWindowPitch + blockX] = color;
+                                    (*renderContext->actorDepths)[depthIndex] = transformY;
+                                }
+                            }
                         }
                     }
-                    sourceRemainder += frame.height;
-                    while (sourceRemainder >= artHeight) {
-                        sourceRemainder -= artHeight;
-                        sourceY++;
+                    for (int step = 0; step < spriteSampleStep && y + step < endY; step++) {
+                        sourceRemainder += frame.height;
+                        while (sourceRemainder >= artHeight) {
+                            sourceRemainder -= artHeight;
+                            sourceY++;
+                        }
                     }
-                    depthIndex += gTileWindowWidth;
-                    destination += gTileWindowPitch;
                 }
             };
             const int clippedTop = std::max(0, opaqueTop);
@@ -2197,10 +2220,12 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                     (*renderContext->wallSillDepths)[x])) {
                 renderColumnRange(std::max(clippedTop, horizon), clippedBottom);
             }
-            sourceXRemainder += frame.width;
-            while (sourceXRemainder >= artWidth) {
-                sourceXRemainder -= artWidth;
-                sourceX++;
+            for (int step = 0; step < spriteSampleStep && x + step < lastColumn; step++) {
+                sourceXRemainder += frame.width;
+                while (sourceXRemainder >= artWidth) {
+                    sourceXRemainder -= artWidth;
+                    sourceX++;
+                }
             }
         }
 
