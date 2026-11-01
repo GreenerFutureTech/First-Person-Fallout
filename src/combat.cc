@@ -3297,6 +3297,10 @@ static int _combat_input()
             gameHandleKey(keyCode, true);
         }
 
+        if (tileFirstPersonPreviewIsEnabled()) {
+            tileFirstPersonPreviewProcessPendingMove();
+        }
+
         renderPresent();
         sharedFpsLimiter.throttle();
     }

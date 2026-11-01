@@ -153,6 +153,7 @@ static void tileFirstPersonDrawMoveMarker(double directionX, double directionY);
 static void tileFirstPersonDrawDiagnosticLine(int x1, int y1, int x2, int y2, Color color);
 static bool tileFirstPersonGetWorldPosition(int tile, double* x, double* y);
 static double tileFirstPersonPreviewGetYaw();
+static void tileFirstPersonPreviewSyncYawToDude();
 static void tileFirstPersonGetCameraPosition(int tile, MapElevation elevation, double* x, double* y);
 static void roof_fill_push_task_if_in_bounds(std::stack<roof_fill_task>& tasks_stack, int x, int y);
 static void roof_fill_off_process_task(std::stack<roof_fill_task>& tasks_stack, MapElevation elevation, bool on);
@@ -210,6 +211,8 @@ static double gFirstPersonPreviewCameraStartX = 0.0;
 static double gFirstPersonPreviewCameraStartY = 0.0;
 static double gFirstPersonPreviewCameraTargetX = 0.0;
 static double gFirstPersonPreviewCameraTargetY = 0.0;
+static bool gFirstPersonPreviewCameraFollowingMove = false;
+static bool gFirstPersonPreviewCameraMoveObservedBusy = false;
 static std::vector<double> gFirstPersonPreviewWallDepths;
 static std::vector<TileFirstPersonActorHitTarget> gFirstPersonPreviewActorHitTargets;
 static std::vector<TileFirstPersonDoorHitTarget> gFirstPersonPreviewDoorHitTargets;
@@ -1942,6 +1945,36 @@ static double tileFirstPersonPreviewGetYaw()
     return yaw;
 }
 
+static void tileFirstPersonPreviewSyncYawToDude()
+{
+    gFirstPersonPreviewYawTurning = false;
+    gFirstPersonPreviewYaw = 0;
+    if (gDude == nullptr || !tileIsValid(gDude->tile) || !rotationIsValid(gDude->rotation)) {
+        return;
+    }
+
+    const int playerSquareTile = squareTileFromTile(gDude->tile);
+    for (int distance = 1; distance <= 4; distance++) {
+        const int facingTile = tileGetTileInDirection(gDude->tile, gDude->rotation, distance);
+        const int facingSquareTile = squareTileFromTile(facingTile);
+        if (!squareGridTileIsValid(playerSquareTile)
+            || !squareGridTileIsValid(facingSquareTile)) {
+            continue;
+        }
+
+        const int deltaX = facingSquareTile % SQUARE_GRID_WIDTH - playerSquareTile % SQUARE_GRID_WIDTH;
+        const int deltaY = facingSquareTile / SQUARE_GRID_WIDTH - playerSquareTile / SQUARE_GRID_WIDTH;
+        if (deltaX != 0 || deltaY != 0) {
+            constexpr double kPi = 3.14159265358979323846;
+            gFirstPersonPreviewYaw = static_cast<int>(atan2(deltaX, -deltaY) * 180.0 / kPi);
+            if (gFirstPersonPreviewYaw < 0) {
+                gFirstPersonPreviewYaw += 360;
+            }
+            return;
+        }
+    }
+}
+
 static void tileFirstPersonGetCameraPosition(int tile, MapElevation elevation, double* x, double* y)
 {
     double targetX;
@@ -1957,6 +1990,70 @@ static void tileFirstPersonGetCameraPosition(int tile, MapElevation elevation, d
     const bool inCombat = isInCombat();
     const bool combatStateChanged = gFirstPersonPreviewCameraInCombat != inCombat;
     const unsigned int cameraLerpDuration = inCombat ? 80 : 180;
+    const bool dudeIsAnimating = gFirstPersonPreviewCameraFollowingMove
+        && animationIsBusy(gDude) == -1;
+    if (gFirstPersonPreviewCameraFollowingMove && dudeIsAnimating) {
+        gFirstPersonPreviewCameraMoveObservedBusy = true;
+    } else if (gFirstPersonPreviewCameraFollowingMove
+        && gFirstPersonPreviewCameraMoveObservedBusy) {
+        gFirstPersonPreviewCameraFollowingMove = false;
+        gFirstPersonPreviewCameraMoveObservedBusy = false;
+    }
+
+    if (inCombat && gFirstPersonPreviewCameraFollowingMove && dudeIsAnimating) {
+        // The movement animation stores the player's sub-tile offset in
+        // isometric screen pixels. Convert that offset into the first-person
+        // map plane so the camera follows the actual animation position.
+        targetX += (3.0 * gDude->x - 4.0 * gDude->y) / 192.0;
+        targetY += (gDude->x + 4.0 * gDude->y) / 128.0;
+
+        constexpr unsigned int kMovementFollowLerpDuration = 45;
+        if (!gFirstPersonPreviewCameraInitialized
+            || gFirstPersonPreviewCameraElevation != elevation
+            || !gFirstPersonPreviewCameraInCombat) {
+            if (combatStateChanged) {
+                gFirstPersonPreviewPendingMoveDirection = -1;
+            }
+            gFirstPersonPreviewCameraInitialized = true;
+            gFirstPersonPreviewCameraTile = tile;
+            gFirstPersonPreviewCameraElevation = elevation;
+            gFirstPersonPreviewCameraInCombat = true;
+            gFirstPersonPreviewCameraStartTime = now;
+            gFirstPersonPreviewCameraStartX = targetX;
+            gFirstPersonPreviewCameraStartY = targetY;
+            gFirstPersonPreviewCameraTargetX = targetX;
+            gFirstPersonPreviewCameraTargetY = targetY;
+        } else if (gFirstPersonPreviewCameraTile != tile
+            || gFirstPersonPreviewCameraTargetX != targetX
+            || gFirstPersonPreviewCameraTargetY != targetY) {
+            const double previousProgress = std::min(1.0,
+                static_cast<double>(getTicksBetween(now, gFirstPersonPreviewCameraStartTime))
+                    / kMovementFollowLerpDuration);
+            const double previousEasedProgress = previousProgress * previousProgress
+                * (3.0 - 2.0 * previousProgress);
+            gFirstPersonPreviewCameraStartX = gFirstPersonPreviewCameraStartX
+                + (gFirstPersonPreviewCameraTargetX - gFirstPersonPreviewCameraStartX)
+                    * previousEasedProgress;
+            gFirstPersonPreviewCameraStartY = gFirstPersonPreviewCameraStartY
+                + (gFirstPersonPreviewCameraTargetY - gFirstPersonPreviewCameraStartY)
+                    * previousEasedProgress;
+            gFirstPersonPreviewCameraTargetX = targetX;
+            gFirstPersonPreviewCameraTargetY = targetY;
+            gFirstPersonPreviewCameraStartTime = now;
+            gFirstPersonPreviewCameraTile = tile;
+        }
+
+        const double progress = std::min(1.0,
+            static_cast<double>(getTicksBetween(now, gFirstPersonPreviewCameraStartTime))
+                / kMovementFollowLerpDuration);
+        const double easedProgress = progress * progress * (3.0 - 2.0 * progress);
+        *x = gFirstPersonPreviewCameraStartX
+            + (gFirstPersonPreviewCameraTargetX - gFirstPersonPreviewCameraStartX) * easedProgress;
+        *y = gFirstPersonPreviewCameraStartY
+            + (gFirstPersonPreviewCameraTargetY - gFirstPersonPreviewCameraStartY) * easedProgress;
+        return;
+    }
+
     if (!gFirstPersonPreviewCameraInitialized
         || gFirstPersonPreviewCameraElevation != elevation
         || combatStateChanged) {
@@ -2977,7 +3074,12 @@ bool tileFirstPersonPreviewMove(int relativeDirection)
     }
     const int result = animationRegisterRunToTile(gDude, destinationTile, gDude->elevation, actionPoints, 0);
     const int endResult = reg_anim_end();
-    return result == 0 && endResult == 0;
+    const bool started = result == 0 && endResult == 0;
+    if (started) {
+        gFirstPersonPreviewCameraFollowingMove = true;
+        gFirstPersonPreviewCameraMoveObservedBusy = false;
+    }
+    return started;
 }
 
 void tileFirstPersonPreviewProcessPendingMove()
@@ -3107,33 +3209,13 @@ void tileFirstPersonPreviewToggle()
     gFirstPersonPreviewCameraInitialized = false;
     gFirstPersonPreviewMoveMarkerTile = -1;
     gFirstPersonPreviewPendingMoveDirection = -1;
+    gFirstPersonPreviewCameraFollowingMove = false;
+    gFirstPersonPreviewCameraMoveObservedBusy = false;
     if (gFirstPersonPreviewEnabled) {
         gFirstPersonPreviewTopologyEnabled = false;
         gFirstPersonPreviewTopologyPosition = -1;
         gFirstPersonPreviewTopologyZoom = 0;
-        gFirstPersonPreviewYaw = 0;
-        if (gDude != nullptr && tileIsValid(gDude->tile) && rotationIsValid(gDude->rotation)) {
-            const int playerSquareTile = squareTileFromTile(gDude->tile);
-            for (int distance = 1; distance <= 4; distance++) {
-                const int facingTile = tileGetTileInDirection(gDude->tile, gDude->rotation, distance);
-                const int facingSquareTile = squareTileFromTile(facingTile);
-                if (!squareGridTileIsValid(playerSquareTile)
-                    || !squareGridTileIsValid(facingSquareTile)) {
-                    continue;
-                }
-
-                const int deltaX = facingSquareTile % SQUARE_GRID_WIDTH - playerSquareTile % SQUARE_GRID_WIDTH;
-                const int deltaY = facingSquareTile / SQUARE_GRID_WIDTH - playerSquareTile / SQUARE_GRID_WIDTH;
-                if (deltaX != 0 || deltaY != 0) {
-                    constexpr double kPi = 3.14159265358979323846;
-                    gFirstPersonPreviewYaw = static_cast<int>(atan2(deltaX, -deltaY) * 180.0 / kPi);
-                    if (gFirstPersonPreviewYaw < 0) {
-                        gFirstPersonPreviewYaw += 360;
-                    }
-                    break;
-                }
-            }
-        }
+        tileFirstPersonPreviewSyncYawToDude();
         tileFirstPersonPreviewRefresh();
     } else {
         tileRefreshGame(&gTileWindowRect, gElevation);
