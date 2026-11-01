@@ -1577,7 +1577,8 @@ static void tileFirstPersonSnapshotTopologyObject(Object* object, void* context)
     const bool halfHeightWall = objectType == OBJ_TYPE_WALL
         && (object->flags & OBJECT_NO_BLOCK) == OBJECT_NONE
         && (object->flags & (OBJECT_TRANS_GLASS | OBJECT_TRANS_WALL | OBJECT_LIGHT_THRU)) != OBJECT_NONE;
-    const bool structural = (objectType == OBJ_TYPE_WALL || objectType == OBJ_TYPE_SCENERY)
+    const bool structural = (objectType == OBJ_TYPE_WALL
+            || (objectType == OBJ_TYPE_SCENERY && isDoor))
         && !openDoor
         && (halfHeightWall
             || (object->flags & (OBJECT_NO_BLOCK | OBJECT_LIGHT_THRU)) == OBJECT_NONE);
@@ -1661,18 +1662,19 @@ static void tileFirstPersonGrayboxMarkObject(Object* object, void* context)
                     : TILE_FIRST_PERSON_WALL_ORIENTATION_NORTH_SOUTH;
             }
         }
-    } else {
-        if (hasProto && proto->scenery.type == SCENERY_TYPE_DOOR) {
-            // Some door objects do not keep the generic pass-through object
-            // flags in sync with their authoritative door state.
-            if ((object->data.scenery.door.openFlags & DOOR_FLAG_OPEN) != 0
-                || (object->flags & OBJECT_OPEN_DOOR) != OBJECT_NONE) {
-                return;
-            }
-            wallType = 3;
-        } else {
-            wallType = 4;
+    } else if (hasProto && proto->scenery.type == SCENERY_TYPE_DOOR) {
+        // Some door objects do not keep the generic pass-through object
+        // flags in sync with their authoritative door state.
+        if ((object->data.scenery.door.openFlags & DOOR_FLAG_OPEN) != 0
+            || (object->flags & OBJECT_OPEN_DOOR) != OBJECT_NONE) {
+            return;
         }
+        wallType = 3;
+    } else {
+        // Scenery is rendered as a billboard from its FRM below. Do not turn
+        // it into a solid graybox wall, otherwise trees and other scenery
+        // obscure their own textures.
+        return;
     }
 
     // Fallout's object grid stores X in reverse order. Convert it to the
@@ -1732,30 +1734,6 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
 
     const int screenCenterX = static_cast<int>(
         (gTileWindowWidth / 2.0) * (1.0 + transformX / transformY));
-    const double projectionScale = gTileWindowHeight / transformY;
-    const double objectHeightScale = objectType == OBJ_TYPE_CRITTER ? 0.9 : 0.55;
-    const int maximumActorHeight = std::max(1, static_cast<int>(gTileWindowHeight
-        * (objectType == OBJ_TYPE_CRITTER ? 0.8 : 0.6)));
-    const int projectedActorHeight = std::max(1, static_cast<int>(projectionScale * objectHeightScale));
-    const int actorHeight = std::min(maximumActorHeight, projectedActorHeight);
-    const int actorBottom = std::min(gTileWindowHeight,
-        renderContext->horizonY + static_cast<int>(projectionScale * 0.5));
-    const int spriteWidth = std::max(1, static_cast<int>(actorHeight * 0.42 / objectHeightScale));
-    const int spriteTop = actorBottom - actorHeight;
-    const int spriteBottom = actorBottom;
-    const int spriteLeft = screenCenterX - spriteWidth / 2;
-    const int spriteRight = spriteLeft + spriteWidth;
-    Color actorColor = COLOR_AMBER;
-    if (objectType == OBJ_TYPE_CRITTER) {
-        if (objectIsPartyMember(object)
-            || (gDude != nullptr
-                && object->data.critter.combat.team == gDude->data.critter.combat.team)) {
-            actorColor = COLOR_LIGHT_GREEN_3;
-        } else if (isInCombat()) {
-            actorColor = COLOR_LIGHT_RED;
-        }
-    }
-
     Rotation facingRotation = ROTATION_NE;
     if (objectType == OBJ_TYPE_CRITTER) {
         facingRotation = rotationIsValid(object->rotation)
@@ -1793,6 +1771,48 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                     facingRotation = rotation;
                 }
             }
+        }
+    }
+
+    const double projectionScale = gTileWindowHeight / transformY;
+    bool isTree = false;
+    if (objectType == OBJ_TYPE_SCENERY) {
+        CacheEntry* cacheHandle = nullptr;
+        Art* art = artLock(FrmId(object), &cacheHandle);
+        if (art != nullptr) {
+            int artWidth;
+            int artHeight;
+            if (artGetSize(art, object->frame, facingRotation, &artWidth, &artHeight) == 0) {
+                // Small vertical props such as hydrants are not trees.
+                isTree = artHeight >= 120 && artHeight > artWidth * 1.25;
+            }
+            artUnlock(cacheHandle);
+        }
+    }
+    const double objectHeightScale = objectType == OBJ_TYPE_CRITTER
+        ? 0.9
+        : isTree ? 2.0 : 0.55;
+    const int maximumActorHeight = std::max(1, static_cast<int>(gTileWindowHeight
+        * (objectType == OBJ_TYPE_CRITTER
+                        ? 0.8
+                        : isTree ? 1.2 : 0.6)));
+    const int projectedActorHeight = std::max(1, static_cast<int>(projectionScale * objectHeightScale));
+    const int actorHeight = std::min(maximumActorHeight, projectedActorHeight);
+    const int actorBottom = std::min(gTileWindowHeight,
+        renderContext->horizonY + static_cast<int>(projectionScale * 0.5));
+    const int spriteWidth = std::max(1, static_cast<int>(actorHeight * 0.42 / objectHeightScale));
+    const int spriteTop = actorBottom - actorHeight;
+    const int spriteBottom = actorBottom;
+    const int spriteLeft = screenCenterX - spriteWidth / 2;
+    const int spriteRight = spriteLeft + spriteWidth;
+    Color actorColor = COLOR_AMBER;
+    if (objectType == OBJ_TYPE_CRITTER) {
+        if (objectIsPartyMember(object)
+            || (gDude != nullptr
+                && object->data.critter.combat.team == gDude->data.critter.combat.team)) {
+            actorColor = COLOR_LIGHT_GREEN_3;
+        } else if (isInCombat()) {
+            actorColor = COLOR_LIGHT_RED;
         }
     }
 
