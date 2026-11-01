@@ -1776,31 +1776,141 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
 
     const double projectionScale = gTileWindowHeight / transformY;
     bool isTree = false;
+    bool isWideScenery = false;
+    bool isTallScenery = false;
     if (objectType == OBJ_TYPE_SCENERY) {
+        const SceneryProtoTypeId sceneryProtoId = ProtoId(object).protoId<SceneryProtoTypeId>();
+        isWideScenery = sceneryProtoId == SceneryProtoTypeId::Bed
+
+        || sceneryProtoId == SceneryProtoTypeId::BucknerHouseSign
+
+
+        || sceneryProtoId == SceneryProtoTypeId::Stove
+        || sceneryProtoId == SceneryProtoTypeId::StoveAlt
+
+        || sceneryProtoId == SceneryProtoTypeId::TableAlt11
+        || sceneryProtoId == SceneryProtoTypeId::TableAlt12
+        || sceneryProtoId == SceneryProtoTypeId::TableAlt13
+
+        || sceneryProtoId == SceneryProtoTypeId::OldMattressAlt
+
+        || sceneryProtoId == SceneryProtoTypeId::Desk
+        || sceneryProtoId == SceneryProtoTypeId::DeskAlt
+
+        || sceneryProtoId == SceneryProtoTypeId::Brace
+        || sceneryProtoId == SceneryProtoTypeId::BraceAlt
+
+        || sceneryProtoId == SceneryProtoTypeId::BedAlt
+        || sceneryProtoId == SceneryProtoTypeId::BedAlt2
+        || sceneryProtoId == SceneryProtoTypeId::BedAlt3
+        || sceneryProtoId == SceneryProtoTypeId::BedAlt4
+        || sceneryProtoId == SceneryProtoTypeId::BedAlt5
+        || sceneryProtoId == SceneryProtoTypeId::BedAlt6
+        || sceneryProtoId == SceneryProtoTypeId::BedAlt7
+        || sceneryProtoId == SceneryProtoTypeId::BedAlt8
+        || sceneryProtoId == SceneryProtoTypeId::Boxes
+        || sceneryProtoId == SceneryProtoTypeId::BoxesAlt
+        || sceneryProtoId == SceneryProtoTypeId::Crate
+        || sceneryProtoId == SceneryProtoTypeId::CrateAlt
+        || sceneryProtoId == SceneryProtoTypeId::StackOfTires
+        || sceneryProtoId == SceneryProtoTypeId::Table
+        || sceneryProtoId == SceneryProtoTypeId::TableAlt
+        || sceneryProtoId == SceneryProtoTypeId::TableAlt2
+        || sceneryProtoId == SceneryProtoTypeId::BathTub
+        || sceneryProtoId == SceneryProtoTypeId::BoxesAlt2
+        || sceneryProtoId == SceneryProtoTypeId::BoxesAlt3
+
+        || sceneryProtoId == SceneryProtoTypeId::TableAlt9
+        || sceneryProtoId == SceneryProtoTypeId::TableAlt10
+        || sceneryProtoId == SceneryProtoTypeId::Bar
+        || sceneryProtoId == SceneryProtoTypeId::Rocks;
+
+        isTallScenery = sceneryProtoId == SceneryProtoTypeId::LampPost
+        || sceneryProtoId == SceneryProtoTypeId::TreeAlt
+        || sceneryProtoId == SceneryProtoTypeId::TreeAlt2
+        || sceneryProtoId == SceneryProtoTypeId::TreeAlt3
+        || sceneryProtoId == SceneryProtoTypeId::TreeAlt4
+
+        || sceneryProtoId == SceneryProtoTypeId::Plant
+        || sceneryProtoId == SceneryProtoTypeId::PlantAlt
+        || sceneryProtoId == SceneryProtoTypeId::PlantAlt2
+        || sceneryProtoId == SceneryProtoTypeId::PlantAlt3
+        || sceneryProtoId == SceneryProtoTypeId::PlantAlt4
+        || sceneryProtoId == SceneryProtoTypeId::PlantAlt5
+
+        || sceneryProtoId == SceneryProtoTypeId::Rope
+        || sceneryProtoId == SceneryProtoTypeId::RopeAlt
+        || sceneryProtoId == SceneryProtoTypeId::RopeAlt2
+        || sceneryProtoId == SceneryProtoTypeId::RopeAlt3
+        || sceneryProtoId == SceneryProtoTypeId::RopeAlt4
+
+        || sceneryProtoId == SceneryProtoTypeId::LampPost
+        || sceneryProtoId == SceneryProtoTypeId::LampPostAlt
+
+        || sceneryProtoId == SceneryProtoTypeId::StreetLight
+        || sceneryProtoId == SceneryProtoTypeId::StreetLightAlt
+        || sceneryProtoId == SceneryProtoTypeId::StreetLightAlt2
+        || sceneryProtoId == SceneryProtoTypeId::StreetLightAlt3
+
+        || sceneryProtoId == SceneryProtoTypeId::Poster
+        || sceneryProtoId == SceneryProtoTypeId::MirrorTall
+        || sceneryProtoId == SceneryProtoTypeId::VicsSign
+
+        || sceneryProtoId == SceneryProtoTypeId::BathHouseSign
+        || sceneryProtoId == SceneryProtoTypeId::GoldenGeckoSign
+        || sceneryProtoId == SceneryProtoTypeId::Signpost
+        || sceneryProtoId == SceneryProtoTypeId::StopSign
+        || sceneryProtoId == SceneryProtoTypeId::Graffiti
+        || sceneryProtoId == SceneryProtoTypeId::GraffitiAlt
+
+        || sceneryProtoId == SceneryProtoTypeId::SignpostAlt
+        || sceneryProtoId == SceneryProtoTypeId::RopeAlt5
+        || sceneryProtoId == SceneryProtoTypeId::GraffitiAlt2
+        || sceneryProtoId == SceneryProtoTypeId::BrokenPost
+        || sceneryProtoId == SceneryProtoTypeId::unknown1
+        || sceneryProtoId == SceneryProtoTypeId::unknown2
+        || sceneryProtoId == SceneryProtoTypeId::unknown3
+
+
+        || sceneryProtoId == SceneryProtoTypeId::Tree;
+
+        
+
         CacheEntry* cacheHandle = nullptr;
         Art* art = artLock(FrmId(object), &cacheHandle);
         if (art != nullptr) {
             int artWidth;
             int artHeight;
             if (artGetSize(art, object->frame, facingRotation, &artWidth, &artHeight) == 0) {
-                // Small vertical props such as hydrants are not trees.
                 isTree = artHeight >= 120 && artHeight > artWidth * 1.25;
             }
             artUnlock(cacheHandle);
+
+            if (!isTallScenery
+                && artHeight >= 70
+                && artHeight > artWidth * 1.5) {
+                debugPrint(
+                    "Tall candidate: proto=%d size=%dx%d\n",
+                    static_cast<int>(sceneryProtoId),
+                    artWidth,
+                    artHeight);
+            }
         }
     }
     const double objectHeightScale = objectType == OBJ_TYPE_CRITTER
         ? 0.9
-        : isTree ? 2.0 : 0.55;
+        : isTree ? 2.0 : isTallScenery ? 1.8 : 0.55;
     const int maximumActorHeight = std::max(1, static_cast<int>(gTileWindowHeight
         * (objectType == OBJ_TYPE_CRITTER
                         ? 0.8
-                        : isTree ? 1.2 : 0.6)));
+                        : isTree || isTallScenery ? 1.2 : 0.6)));
     const int projectedActorHeight = std::max(1, static_cast<int>(projectionScale * objectHeightScale));
     const int actorHeight = std::min(maximumActorHeight, projectedActorHeight);
     const int actorBottom = std::min(gTileWindowHeight,
         renderContext->horizonY + static_cast<int>(projectionScale * 0.5));
-    const int spriteWidth = std::max(1, static_cast<int>(actorHeight * 0.42 / objectHeightScale));
+    const double objectWidthScale = isWideScenery ? 1.8 : 1.0;
+    const int spriteWidth = std::max(1, static_cast<int>(
+        actorHeight * 0.42 / objectHeightScale * objectWidthScale));
     const int spriteTop = actorBottom - actorHeight;
     const int spriteBottom = actorBottom;
     const int spriteLeft = screenCenterX - spriteWidth / 2;
@@ -1824,7 +1934,8 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         }
         const int artHeight = actorHeight;
         const int artWidth = std::max(1,
-            static_cast<int>(artHeight * frame.width / static_cast<double>(frame.height)));
+            static_cast<int>(artHeight * frame.width / static_cast<double>(frame.height)
+                * objectWidthScale));
         int visibleBottom = -1;
         for (int sourceY = frame.height - 1; sourceY >= 0 && visibleBottom < 0; sourceY--) {
             for (int sourceX = 0; sourceX < frame.width; sourceX++) {

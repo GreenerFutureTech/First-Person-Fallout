@@ -301,18 +301,240 @@ enum class CritterProtoTypeId : int {
 
 enum class SceneryProtoTypeId : int {
     Reserved = 0,
+
+    Bed = 208,
+    BedAlt = 209,
+    BedAlt2 = 210,
+    BedAlt3 = 211,
+    BedAlt4 = 212,
+    BedAlt5 = 213,
+    BedAlt6 = 678,
+    BedAlt7 = 680,
+    BedAlt8 = 681,
+
+    LampPost = 246,
+    LampPostAlt = 248,
+    StreetLight = 292,
+    StreetLightAlt = 293,
+    StreetLightAlt2 = 294,
+    StreetLightAlt3 = 295,
+
     ExitGridAutomapMarker = 49,
     BrotherhoodDoor = 153,
     BlockingHexAutomap = 344,
     ElevatorDoor = 421,
     ElevatorDoorAlternate = 470,
     ForceFieldNorthSouth = 491,
+
     FirstRadioactiveGoo = 985,
     SecondRadioactiveGoo = 986,
     ThirdRadioactiveGoo = 987,
     LastRadioactiveGoo = 988,
+
     Car = 1009,
-    ElevatorStub = 1293
+    ElevatorStub = 1293,
+
+    // New
+    MetalBarrel = 6,
+    StackOfTires = 7,
+
+    Scrub = 102,
+    ScrubAlt = 103,
+    ScrubAlt2 = 105,
+
+    Weeds = 108,
+
+    Junk = 118,
+
+    Weed = 125,
+    WeedAlt = 126,
+    WeedAlt2 = 127,
+
+    Boxes = 221,
+    BoxesAlt = 222,
+
+    Rocks = 278,
+
+    Trash = 311,
+    TrashAlt = 312,
+    TrashAlt2 = 314,
+
+    TrashCan = 315,
+
+    Crate = 401,
+    CrateAlt = 403,
+
+    Plant = 963,
+    PlantAlt = 966,
+    PlantAlt2 = 968,
+
+    PlantAlt3 = 964,
+    PlantAlt4 = 965,
+    PlantAlt5 = 967,
+
+    Tree = 317,
+
+    Rope = 916,
+    RopeAlt = 918,
+    RopeAlt2 = 919,
+
+    Tire = 101,
+
+    RocksAlt = 90,
+    RocksAlt2 = 92,
+    RocksAlt3 = 93,
+    RocksAlt4 = 431,
+    RocksAlt5 = 434,
+    RocksAlt6 = 279,
+    RocksAlt7 = 280,
+
+    Chair = 229,
+    ChairAlt = 230,
+
+    Table = 303,
+
+    BathTub = 325,
+
+    Cart = 368,
+
+    MetalBarrelAlt = 396,
+
+    JunkAlt = 106,
+    JunkAlt2 = 253,
+    JunkAlt3 = 256,
+    JunkAlt4 = 271,
+
+    WeedAlt3 = 115,
+
+    ScrubAlt3 = 104,
+
+    PlantSmall = 943,
+    PlantSmallAlt = 944,
+
+    TreeAlt = 945,
+    TreeAlt2 = 946,
+    TreeAlt3 = 947,
+
+    RopeAlt3 = 921,
+    RopeAlt4 = 922,
+
+    BoxesAlt2 = 220,
+    BoxesAlt3 = 223,
+
+    BedAlt9 = 680, // already exists as BedAlt7
+    TableAlt = 301,
+    TableAlt2 = 306,
+
+    ChairAlt3 = 666,
+    ChairAlt4 = 667,
+
+    MetalBarrelAlt2 = 397,
+    MetalBarrelAlt3 = 398,
+
+    Rubble = 281,
+
+    WallLamp = 336,
+
+    Bones = 86,
+
+    BurningMetalBarrel = 1,
+
+    TreeAlt4 = 319,
+    VicsSign = 1158,
+    MirrorTall = 613,
+    Poster = 899,
+
+    TableAlt3 = 495,
+    TableAlt4 = 496,
+    TableAlt5 = 497,
+    TableAlt6 = 498,
+    TableAlt7 = 611,
+    TableAlt8 = 659,
+
+    BoxesAlt4 = 275,
+    JunkAlt5 = 273,
+
+    OldMattress = 207,
+    Couch = 99,
+    CouchAlt = 100,
+
+    TableAlt9 = 61,
+
+    ChairAlt5 = 95,
+    ChairAlt6 = 97,
+    ChairAlt7 = 98,
+
+    Bar = 94,
+
+    JunkAlt6 = 254,
+    JunkAlt7 = 272,
+    JunkAlt8 = 274,
+
+    BathHouseSign = 1195,
+    GoldenGeckoSign = 1194,
+
+    Signpost = 205,
+
+    StopSign = 286,
+
+    Graffiti = 861,
+    GraffitiAlt = 862,
+
+    ToiletAlt2 = 307,
+    ToiletAlt3 = 308,
+
+    TableAlt10 = 605,
+
+    NewspaperMachine = 270,
+
+    SignpostAlt = 298,
+
+    RopeAlt5 = 915,
+
+    Stove = 682,
+    StoveAlt = 683,
+
+    Pot = 365,
+    PotAlt = 372,
+
+    Bowl = 363,
+    BowlAlt = 364,
+
+    TableAlt11 = 797,
+    TableAlt12 = 799,
+    TableAlt13 = 304,
+
+    OldMattressAlt = 206,
+
+    JunkAlt9 = 252,
+
+    GraffitiAlt2 = 859,
+
+    NewspaperMachineAlt = 265,
+
+    Brace = 392,
+    BraceAlt = 393,
+
+    Desk = 404,
+    DeskAlt = 405,
+
+    BucknerHouseSign = 1157,
+
+    ChairAlt8 = 662,
+    ChairAlt9 = 672,
+    ChairAlt10 = 774,
+
+    FirePit = 612,
+
+    BulletinBoard = 596,
+
+    Mailbox = 257,
+
+    BrokenPost = 686,
+
+    unknown1 = 297,
+    unknown2 = 287,
+    unknown3 = 296,
 };
 
 enum class MiscProtoTypeId : int {

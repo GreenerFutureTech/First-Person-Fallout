@@ -188,6 +188,12 @@ int debugPrint(const char* format, ...)
     SDL_Log("%s", string);
 #endif
 
+    FILE* file = fopen("debug.log", "a");
+    if (file != nullptr) {
+        fprintf(file, "%s\n", string);
+        fclose(file);
+    }
+
     return rc;
 }
 
