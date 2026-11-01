@@ -539,6 +539,7 @@ enum class SceneryProtoTypeId : int {
     FireHydrant = 243,
 
     SmallBowl = 363,
+    Rubble1 = 110,
 
 };
 

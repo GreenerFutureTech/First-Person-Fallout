@@ -1876,9 +1876,25 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
     bool fallbackTinyScenery = false;
     if (objectType == OBJ_TYPE_SCENERY) {
         const SceneryProtoTypeId sceneryProtoId = ProtoId(object).protoId<SceneryProtoTypeId>();
-
-
-        isTinyScenery = sceneryProtoId == SceneryProtoTypeId::SmallBowl;
+        struct SceneryProfile {
+            bool wide;
+            bool medium;
+            bool tall;
+            bool rock;
+            bool tiny;
+        };
+        static std::unordered_map<int, SceneryProfile> sceneryProfiles;
+        const int sceneryProfileKey = static_cast<int>(sceneryProtoId);
+        const auto cachedProfile = sceneryProfiles.find(sceneryProfileKey);
+        if (cachedProfile != sceneryProfiles.end()) {
+            isWideScenery = cachedProfile->second.wide;
+            isMediumScenery = cachedProfile->second.medium;
+            isTallScenery = cachedProfile->second.tall;
+            isRock = cachedProfile->second.rock;
+            isTinyScenery = cachedProfile->second.tiny;
+        } else {
+        isTinyScenery = sceneryProtoId == SceneryProtoTypeId::SmallBowl
+        || sceneryProtoId == SceneryProtoTypeId::Rubble1;
 
         isMediumScenery = sceneryProtoId == SceneryProtoTypeId::Mailbox
         || sceneryProtoId == SceneryProtoTypeId::FireHydrant;
@@ -1994,7 +2010,15 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         || sceneryProtoId == static_cast<SceneryProtoTypeId>(433)
         || sceneryProtoId == static_cast<SceneryProtoTypeId>(435);
 
-
+            sceneryProfiles.emplace(sceneryProfileKey,
+                SceneryProfile {
+                    isWideScenery,
+                    isMediumScenery,
+                    isTallScenery,
+                    isRock,
+                    isTinyScenery,
+                });
+        }
 
         CacheEntry* cacheHandle = nullptr;
         Art* art = artLock(FrmId(object), &cacheHandle);
