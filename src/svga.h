@@ -55,6 +55,8 @@ void renderPresent();
 bool screenIsExclusiveFullscreen();
 bool screenIsHardwareAccelerated();
 void gpuBillboardBeginFrame();
+void gpuBillboardMarkSceneComplete();
+void gpuBillboardClear();
 void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
     const SDL_Rect& destination, const SDL_Rect& clip, double depth);
 

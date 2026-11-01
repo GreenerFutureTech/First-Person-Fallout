@@ -1768,6 +1768,28 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
 
     const int screenCenterX = static_cast<int>(
         (gTileWindowWidth / 2.0) * (1.0 + transformX / transformY));
+    const int projectedRadius = static_cast<int>(
+        std::ceil(gTileWindowHeight / transformY));
+    if (screenCenterX + projectedRadius < 0
+        || screenCenterX - projectedRadius >= gTileWindowWidth) {
+        return;
+    }
+    const int occlusionRadius = std::max(2, projectedRadius * 2 + 2);
+    const int occlusionLeft = std::max(0, screenCenterX - occlusionRadius);
+    const int occlusionRight = std::min(gTileWindowWidth, screenCenterX + occlusionRadius + 1);
+    bool potentiallyVisible = false;
+    for (int x = occlusionLeft; x < occlusionRight; x++) {
+        const double lowerDepth = std::min((*renderContext->wallDepths)[x],
+            (*renderContext->wallSillDepths)[x]);
+        if (transformY < (*renderContext->wallDepths)[x]
+            || transformY < lowerDepth) {
+            potentiallyVisible = true;
+            break;
+        }
+    }
+    if (!potentiallyVisible) {
+        return;
+    }
     Rotation facingRotation = ROTATION_NE;
     if (objectType == OBJ_TYPE_CRITTER) {
         facingRotation = rotationIsValid(object->rotation)
@@ -2150,7 +2172,33 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
 
         const int firstOpaqueColumn = std::max(0, opaqueLeft);
         const int lastColumn = std::min(gTileWindowWidth, opaqueRight);
-        if (objectType == OBJ_TYPE_SCENERY && screenIsHardwareAccelerated()) {
+        if ((objectType == OBJ_TYPE_CRITTER
+                || objectType == OBJ_TYPE_SCENERY
+                || objectType == OBJ_TYPE_ITEM)
+            && screenIsHardwareAccelerated()) {
+            bool hasVisibleColumn = false;
+            for (int x = firstOpaqueColumn; x < lastColumn; x++) {
+                const double visibleDepth = x < renderContext->horizonY
+                    ? (*renderContext->wallDepths)[x]
+                    : std::min((*renderContext->wallDepths)[x],
+                        (*renderContext->wallSillDepths)[x]);
+                if (transformY < visibleDepth) {
+                    hasVisibleColumn = true;
+                    break;
+                }
+            }
+            if (!hasVisibleColumn) {
+                if (objectType != OBJ_TYPE_SCENERY) {
+                    textObjectsRenderForOwner(object,
+                        gTileWindowBuffer,
+                        gTileWindowPitch,
+                        gTileWindowWidth,
+                        gTileWindowHeight,
+                        screenCenterX,
+                        artTop - 3);
+                }
+                return;
+            }
             const SDL_Rect destination = { artLeft, artTop, artWidth, artHeight };
             const auto submitVisibleRange = [&](int top, int bottom, bool upper) {
                 if (top >= bottom) {
@@ -2158,6 +2206,7 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                 }
                 int rangeStart = firstOpaqueColumn;
                 bool visible = false;
+                bool fullyVisible = true;
                 for (int x = firstOpaqueColumn; x <= lastColumn; x++) {
                     const bool nextVisible = x < lastColumn
                         && (upper
@@ -2168,6 +2217,7 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                     if (x == firstOpaqueColumn) {
                         visible = nextVisible;
                     } else if (nextVisible != visible) {
+                        fullyVisible = false;
                         if (visible) {
                             const SDL_Rect clip = {
                                 rangeStart,
@@ -2182,11 +2232,30 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                         visible = nextVisible;
                     }
                 }
+                if (fullyVisible && visible) {
+                    const SDL_Rect clip = {
+                        firstOpaqueColumn,
+                        top,
+                        lastColumn - firstOpaqueColumn,
+                        bottom - top,
+                    };
+                    gpuBillboardSubmit(frame.data, frame.width, frame.height,
+                        destination, clip, transformY);
+                }
             };
             submitVisibleRange(std::max(0, opaqueTop),
                 std::min(gTileWindowHeight, std::min(opaqueBottom, renderContext->horizonY)), true);
             submitVisibleRange(std::max(0, std::max(opaqueTop, renderContext->horizonY)),
                 std::min(gTileWindowHeight, opaqueBottom), false);
+            if (objectType != OBJ_TYPE_SCENERY) {
+                textObjectsRenderForOwner(object,
+                    gTileWindowBuffer,
+                    gTileWindowPitch,
+                    gTileWindowWidth,
+                    gTileWindowHeight,
+                    screenCenterX,
+                    artTop - 3);
+            }
             return;
         }
 
@@ -3489,6 +3558,7 @@ void tileFirstPersonPreviewRefresh()
 
     tileRenderFirstPersonPreview();
     gTileWindowRefreshProc(&gTileWindowRect);
+    gpuBillboardMarkSceneComplete();
     if (!cursorIsHidden()) {
         mouseShowCursor();
     }
@@ -3601,6 +3671,7 @@ void tileFirstPersonPreviewToggle()
         tileFirstPersonPreviewResetForModeRefresh();
         tileFirstPersonPreviewRefresh();
     } else {
+        gpuBillboardClear();
         tileRefreshGame(&gTileWindowRect, gElevation);
     }
 }
