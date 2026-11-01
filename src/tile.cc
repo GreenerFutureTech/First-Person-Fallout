@@ -135,6 +135,8 @@ struct TileFirstPersonActorRenderContext {
     std::vector<double>* wallDepths;
     std::vector<double>* wallSillDepths;
     std::vector<double>* actorDepths;
+    std::vector<unsigned int>* actorDepthStamps;
+    unsigned int actorDepthStamp;
     std::vector<TileFirstPersonActorHitTarget>* hitTargets;
 };
 
@@ -1090,6 +1092,15 @@ static void tileRenderFirstPersonPreview()
     const double directionY = -cos(yaw);
     const double cameraPlaneX = -directionY * kFieldOfViewScale;
     const double cameraPlaneY = directionX * kFieldOfViewScale;
+    static std::vector<double> rayDirectionXs;
+    static std::vector<double> rayDirectionYs;
+    rayDirectionXs.resize(gTileWindowWidth);
+    rayDirectionYs.resize(gTileWindowWidth);
+    for (int x = 0; x < gTileWindowWidth; x++) {
+        const double cameraOffset = 2.0 * x / gTileWindowWidth - 1.0;
+        rayDirectionXs[x] = directionX + cameraPlaneX * cameraOffset;
+        rayDirectionYs[x] = directionY + cameraPlaneY * cameraOffset;
+    }
 
     // Compose the isometric tile overlap once per floor layout. The old
     // per-pixel neighbor search repeated map/FID/texture lookups hundreds of
@@ -1208,11 +1219,8 @@ static void tileRenderFirstPersonPreview()
     for (int y = horizonY + 1; y < gTileWindowHeight; y++) {
         const double rowDistance = (gTileWindowHeight * 0.5) / (y - horizonY);
         for (int x = 0; x < gTileWindowWidth; x++) {
-            const double cameraOffset = 2.0 * x / gTileWindowWidth - 1.0;
-            const double rayDirectionX = directionX + cameraPlaneX * cameraOffset;
-            const double rayDirectionY = directionY + cameraPlaneY * cameraOffset;
-            const double worldX = cameraX + rayDirectionX * rowDistance;
-            const double worldY = cameraY + rayDirectionY * rowDistance;
+            const double worldX = cameraX + rayDirectionXs[x] * rowDistance;
+            const double worldY = cameraY + rayDirectionYs[x] * rowDistance;
             const int mapX = static_cast<int>(floor(worldX));
             const int mapY = static_cast<int>(floor(worldY));
             if (mapX < 0 || mapX >= SQUARE_GRID_WIDTH
@@ -1232,15 +1240,26 @@ static void tileRenderFirstPersonPreview()
 
     std::vector<double>& wallDepths = gFirstPersonPreviewWallDepths;
     wallDepths.assign(gTileWindowWidth, std::numeric_limits<double>::infinity());
-    std::vector<double> wallSillDepths(gTileWindowWidth, std::numeric_limits<double>::infinity());
-    std::vector<double> actorDepths(
-        static_cast<size_t>(gTileWindowWidth) * gTileWindowHeight,
-        std::numeric_limits<double>::infinity());
+    static std::vector<double> wallSillDepths;
+    wallSillDepths.assign(gTileWindowWidth, std::numeric_limits<double>::infinity());
+    static std::vector<double> actorDepths;
+    static std::vector<unsigned int> actorDepthStamps;
+    static unsigned int actorDepthStamp = 0;
+    const size_t actorDepthSize =
+        static_cast<size_t>(gTileWindowWidth) * gTileWindowHeight;
+    if (actorDepths.size() != actorDepthSize) {
+        actorDepths.resize(actorDepthSize);
+        actorDepthStamps.assign(actorDepthSize, 0);
+        actorDepthStamp = 0;
+    }
+    if (++actorDepthStamp == 0) {
+        std::fill(actorDepthStamps.begin(), actorDepthStamps.end(), 0);
+        actorDepthStamp = 1;
+    }
 
     for (int x = 0; x < gTileWindowWidth; x++) {
-        const double cameraOffset = 2.0 * x / gTileWindowWidth - 1.0;
-        const double rayDirectionX = directionX + cameraPlaneX * cameraOffset;
-        const double rayDirectionY = directionY + cameraPlaneY * cameraOffset;
+        const double rayDirectionX = rayDirectionXs[x];
+        const double rayDirectionY = rayDirectionYs[x];
 
         // Wall objects are stored on the hex grid, which is twice as dense as
         // the square floor grid used by the ground projection.
@@ -1503,6 +1522,8 @@ static void tileRenderFirstPersonPreview()
         &wallDepths,
         &wallSillDepths,
         &actorDepths,
+        &actorDepthStamps,
+        actorDepthStamp,
         &gFirstPersonPreviewActorHitTargets,
     };
     objectVisitAll(tileFirstPersonRenderActor, &actorContext);
@@ -2052,6 +2073,13 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                 const int sourceY = (y - artTop) * frame.height / artHeight;
                 const unsigned char color = frame.data[sourceY * frame.width + sourceX];
                 const size_t depthIndex = static_cast<size_t>(y) * gTileWindowWidth + x;
+                if ((*renderContext->actorDepthStamps)[depthIndex]
+                    != renderContext->actorDepthStamp) {
+                    (*renderContext->actorDepthStamps)[depthIndex] =
+                        renderContext->actorDepthStamp;
+                    (*renderContext->actorDepths)[depthIndex] =
+                        std::numeric_limits<double>::infinity();
+                }
                 if (color != 0 && transformY < (*renderContext->actorDepths)[depthIndex]) {
                     gTileWindowBuffer[y * gTileWindowPitch + x] = color;
                     (*renderContext->actorDepths)[depthIndex] = transformY;
@@ -2108,6 +2136,13 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
             }
 
             const size_t depthIndex = static_cast<size_t>(y) * gTileWindowWidth + x;
+            if ((*renderContext->actorDepthStamps)[depthIndex]
+                != renderContext->actorDepthStamp) {
+                (*renderContext->actorDepthStamps)[depthIndex] =
+                    renderContext->actorDepthStamp;
+                (*renderContext->actorDepths)[depthIndex] =
+                    std::numeric_limits<double>::infinity();
+            }
             if (transformY < (*renderContext->actorDepths)[depthIndex]) {
                 gTileWindowBuffer[y * gTileWindowPitch + x] = actorColor;
                 (*renderContext->actorDepths)[depthIndex] = transformY;
