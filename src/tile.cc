@@ -1221,17 +1221,20 @@ static void tileRenderFirstPersonPreview()
         cachedFloorElevation = static_cast<int>(gElevation);
     }
 
-    for (int y = horizonY + 1; y < gTileWindowHeight; y++) {
+    constexpr int kFloorRenderStep = 2;
+    for (int y = horizonY + 1; y < gTileWindowHeight; y += kFloorRenderStep) {
         const double rowDistance = (gTileWindowHeight * 0.5) / (y - horizonY);
         double worldX = cameraX + rayDirectionXs[0] * rowDistance;
         double worldY = cameraY + rayDirectionYs[0] * rowDistance;
         const double worldXStep = gTileWindowWidth > 1
-            ? (rayDirectionXs[1] - rayDirectionXs[0]) * rowDistance
+            ? (rayDirectionXs[std::min(kFloorRenderStep, gTileWindowWidth - 1)]
+                    - rayDirectionXs[0]) * rowDistance
             : 0.0;
         const double worldYStep = gTileWindowWidth > 1
-            ? (rayDirectionYs[1] - rayDirectionYs[0]) * rowDistance
+            ? (rayDirectionYs[std::min(kFloorRenderStep, gTileWindowWidth - 1)]
+                    - rayDirectionYs[0]) * rowDistance
             : 0.0;
-        for (int x = 0; x < gTileWindowWidth; x++) {
+        for (int x = 0; x < gTileWindowWidth; x += kFloorRenderStep) {
             const int mapX = static_cast<int>(floor(worldX));
             const int mapY = static_cast<int>(floor(worldY));
             if (mapX < 0 || mapX >= SQUARE_GRID_WIDTH
@@ -1247,7 +1250,16 @@ static void tileRenderFirstPersonPreview()
                 static_cast<int>((worldY - mapY) * kFloorCacheCellResolution));
             const int cacheIndex = (mapY * SQUARE_GRID_WIDTH + mapX) * kFloorCacheCellArea
                 + sampleY * kFloorCacheCellResolution + sampleX;
-            gTileWindowBuffer[y * gTileWindowPitch + x] = cachedFloorColors[cacheIndex];
+            const unsigned char color = cachedFloorColors[cacheIndex];
+            for (int blockY = y;
+                 blockY < std::min(gTileWindowHeight, y + kFloorRenderStep);
+                 blockY++) {
+                for (int blockX = x;
+                     blockX < std::min(gTileWindowWidth, x + kFloorRenderStep);
+                     blockX++) {
+                    gTileWindowBuffer[blockY * gTileWindowPitch + blockX] = color;
+                }
+            }
             worldX += worldXStep;
             worldY += worldYStep;
         }
@@ -1508,12 +1520,17 @@ static void tileRenderFirstPersonPreview()
             const int light = std::max(48, faceShade - distanceShade);
             const std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize>& texture =
                 type == 3 ? gFirstPersonDoorWallTexture : gFirstPersonStoneWallTexture;
-            for (int y = wallTop; y <= wallBottom; y++) {
+            constexpr int kWallRenderStep = 2;
+            for (int y = wallTop; y <= wallBottom; y += kWallRenderStep) {
                 int textureY = static_cast<int>(
                     (y - unclippedWallTop) * kFirstPersonWallTextureSize / textureHeight);
                 textureY %= kFirstPersonWallTextureSize;
                 const Color texel = texture[textureY * kFirstPersonWallTextureSize + textureX];
-                gTileWindowBuffer[y * gTileWindowPitch + x] = intensityColorTable[texel][light];
+                const unsigned char color = intensityColorTable[texel][light];
+                gTileWindowBuffer[y * gTileWindowPitch + x] = color;
+                if (y + 1 <= wallBottom) {
+                    gTileWindowBuffer[(y + 1) * gTileWindowPitch + x] = color;
+                }
             }
         };
         if (windowDistance != std::numeric_limits<double>::infinity()
@@ -1850,13 +1867,19 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
     bool isMediumScenery = false;
     bool isTallScenery = false;
     bool isRock = false;
+    bool isTinyScenery = false;
 
             
     double fallbackHeightScale = 0.55;
     double fallbackWidthScale = 1.0;
     bool fallbackTallScenery = false;
+    bool fallbackTinyScenery = false;
     if (objectType == OBJ_TYPE_SCENERY) {
         const SceneryProtoTypeId sceneryProtoId = ProtoId(object).protoId<SceneryProtoTypeId>();
+
+
+        isTinyScenery = sceneryProtoId == SceneryProtoTypeId::SmallBowl;
+
         isMediumScenery = sceneryProtoId == SceneryProtoTypeId::Mailbox
         || sceneryProtoId == SceneryProtoTypeId::FireHydrant;
 
@@ -2009,6 +2032,8 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
 
             isTallScenery = isTallScenery || fallbackTallScenery;
 
+            isTinyScenery = isTinyScenery || fallbackTinyScenery;
+
             if (!isWideScenery && fallbackWidthScale > 1.0) {
                 isWideScenery = true;
             }
@@ -2034,6 +2059,7 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
             ? (isDeadCritter ? 0.5 : 0.9)
             : isTree ? 2.0
             : isTallScenery ? 1.8
+            : isTinyScenery ? 0.15
             : isMediumScenery ? 0.8
             : fallbackHeightScale;
 

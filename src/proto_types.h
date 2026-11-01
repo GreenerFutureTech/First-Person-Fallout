@@ -538,6 +538,8 @@ enum class SceneryProtoTypeId : int {
 
     FireHydrant = 243,
 
+    SmallBowl = 363,
+
 };
 
 enum class MiscProtoTypeId : int {
