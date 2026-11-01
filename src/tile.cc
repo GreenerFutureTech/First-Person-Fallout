@@ -15,6 +15,7 @@
 #include "animation.h"
 #include "combat.h"
 #include "color.h"
+#include "critter.h"
 #include "debug.h"
 #include "draw.h"
 #include "game_mouse.h"
@@ -1777,9 +1778,19 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
     const double projectionScale = gTileWindowHeight / transformY;
     bool isTree = false;
     bool isWideScenery = false;
+    bool isMediumScenery = false;
     bool isTallScenery = false;
+    bool isRock = false;
+
+            
+    double fallbackHeightScale = 0.55;
+    double fallbackWidthScale = 1.0;
+    bool fallbackTallScenery = false;
     if (objectType == OBJ_TYPE_SCENERY) {
         const SceneryProtoTypeId sceneryProtoId = ProtoId(object).protoId<SceneryProtoTypeId>();
+        isMediumScenery = sceneryProtoId == SceneryProtoTypeId::Mailbox
+        || sceneryProtoId == SceneryProtoTypeId::FireHydrant;
+
         isWideScenery = sceneryProtoId == SceneryProtoTypeId::Bed
 
         || sceneryProtoId == SceneryProtoTypeId::BucknerHouseSign
@@ -1875,6 +1886,23 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         || sceneryProtoId == SceneryProtoTypeId::Tree;
 
         
+        isRock =
+        sceneryProtoId == SceneryProtoTypeId::Rocks
+        || sceneryProtoId == static_cast<SceneryProtoTypeId>(91)
+        || sceneryProtoId == SceneryProtoTypeId::RocksAlt
+        || sceneryProtoId == SceneryProtoTypeId::RocksAlt2
+        || sceneryProtoId == SceneryProtoTypeId::RocksAlt3
+        || sceneryProtoId == SceneryProtoTypeId::RocksAlt4
+        || sceneryProtoId == SceneryProtoTypeId::RocksAlt5
+        || sceneryProtoId == SceneryProtoTypeId::RocksAlt6
+        || sceneryProtoId == SceneryProtoTypeId::RocksAlt7
+        || sceneryProtoId == static_cast<SceneryProtoTypeId>(429)
+        || sceneryProtoId == static_cast<SceneryProtoTypeId>(430)
+        || sceneryProtoId == static_cast<SceneryProtoTypeId>(432)
+        || sceneryProtoId == static_cast<SceneryProtoTypeId>(433)
+        || sceneryProtoId == static_cast<SceneryProtoTypeId>(435);
+
+
 
         CacheEntry* cacheHandle = nullptr;
         Art* art = artLock(FrmId(object), &cacheHandle);
@@ -1883,32 +1911,79 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
             int artHeight;
             if (artGetSize(art, object->frame, facingRotation, &artWidth, &artHeight) == 0) {
                 isTree = artHeight >= 120 && artHeight > artWidth * 1.25;
+
+                isTree = artHeight >= 120 && artHeight > artWidth * 1.25;
+
+                const double aspect =
+                    artWidth > 0
+                        ? static_cast<double>(artHeight) / artWidth
+                        : 1.0;
+
+                if (artHeight >= 120 || aspect > 2.5) {
+                    fallbackTallScenery = true;
+                    fallbackHeightScale = 1.8;
+                } else if (artHeight >= 70) {
+                    fallbackHeightScale = 0.8;
+                } else if (artWidth >= 80) {
+                    fallbackHeightScale = 0.7;
+                    fallbackWidthScale = 1.4;
+                }
+
+                // debugPrint(
+                //     "Scenery proto=%d size=%dx%d\n",
+                //     static_cast<int>(sceneryProtoId),
+                //     artWidth,
+                //     artHeight);
+
             }
             artUnlock(cacheHandle);
 
-            if (!isTallScenery
-                && artHeight >= 70
-                && artHeight > artWidth * 1.5) {
-                debugPrint(
-                    "Tall candidate: proto=%d size=%dx%d\n",
-                    static_cast<int>(sceneryProtoId),
-                    artWidth,
-                    artHeight);
+            isTallScenery = isTallScenery || fallbackTallScenery;
+
+            if (!isWideScenery && fallbackWidthScale > 1.0) {
+                isWideScenery = true;
             }
+
+
+            
+            // if (!isTallScenery
+            //     && artHeight >= 70
+            //     && artHeight > artWidth * 1.5) {
+            //     debugPrint(
+            //         "Tall candidate: proto=%d size=%dx%d\n",
+            //         static_cast<int>(sceneryProtoId),
+            //         artWidth,
+            //         artHeight);
+            // }
         }
     }
-    const double objectHeightScale = objectType == OBJ_TYPE_CRITTER
-        ? 0.9
-        : isTree ? 2.0 : isTallScenery ? 1.8 : 0.55;
-    const int maximumActorHeight = std::max(1, static_cast<int>(gTileWindowHeight
-        * (objectType == OBJ_TYPE_CRITTER
-                        ? 0.8
-                        : isTree || isTallScenery ? 1.2 : 0.6)));
+
+
+    const bool isDeadCritter = objectType == OBJ_TYPE_CRITTER && critterIsDead(object);
+    const double objectHeightScale =
+        objectType == OBJ_TYPE_CRITTER
+            ? (isDeadCritter ? 0.5 : 0.9)
+            : isTree ? 2.0
+            : isTallScenery ? 1.8
+            : isMediumScenery ? 0.8
+            : fallbackHeightScale;
+
+        const double objectWidthScale =
+            isWideScenery ? 1.8
+            : isMediumScenery ? 1.3
+            : fallbackWidthScale;
+        const int maximumActorHeight = std::max(1, static_cast<int>(gTileWindowHeight
+            * (objectType == OBJ_TYPE_CRITTER
+                            ? 0.8
+                            : isTree || isTallScenery ? 1.2 : isMediumScenery ? 0.8 : 0.6)));
     const int projectedActorHeight = std::max(1, static_cast<int>(projectionScale * objectHeightScale));
     const int actorHeight = std::min(maximumActorHeight, projectedActorHeight);
-    const int actorBottom = std::min(gTileWindowHeight,
-        renderContext->horizonY + static_cast<int>(projectionScale * 0.5));
-    const double objectWidthScale = isWideScenery ? 1.8 : 1.0;
+    const int projectedActorBottom = renderContext->horizonY
+        + static_cast<int>(projectionScale * 0.5);
+    const int actorBottom = isRock
+        ? projectedActorBottom + std::max(20, actorHeight / 3)
+        : std::min(gTileWindowHeight, projectedActorBottom);
+
     const int spriteWidth = std::max(1, static_cast<int>(
         actorHeight * 0.42 / objectHeightScale * objectWidthScale));
     const int spriteTop = actorBottom - actorHeight;

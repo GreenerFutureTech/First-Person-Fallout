@@ -657,6 +657,28 @@ static bool gameFirstPersonPreviewUseObject(Object* object)
     return false;
 }
 
+static void gameFirstPersonPreviewLogObject(Object* object)
+{
+    if (object == nullptr) {
+        return;
+    }
+
+    const SceneryProtoTypeId sceneryProtoId = ProtoId(object).protoId<SceneryProtoTypeId>();
+
+    debugPrint(
+        "F11 object click: proto=%d type=%d pid=%d fid=%d frame=%d rotation=%d tile=%d elevation=%d position=(%d,%d)\n",
+        static_cast<int>(sceneryProtoId),
+        static_cast<int>(FrmId(object).objectType()),
+        object->pid,
+        object->fid,
+        object->frame,
+        static_cast<int>(object->rotation),
+        object->tile,
+        static_cast<int>(object->elevation),
+        object->x,
+        object->y);
+}
+
 static bool gameFirstPersonPreviewCanShowObjectMenu(Object* object)
 {
     if (object == nullptr) {
@@ -941,6 +963,7 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                         ? tileFirstPersonPreviewPickCritterAt(mouseX, mouseY)
                         : nullptr;
                     if (critter != nullptr) {
+                        gameFirstPersonPreviewLogObject(critter);
                         if (critterIsDead(critter)) {
                             gameFirstPersonPreviewStartLoot(critter);
                         } else {
@@ -948,10 +971,12 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                         }
                     } else {
                         Object* object = tileFirstPersonPreviewPickObjectAt(mouseX, mouseY);
+                        gameFirstPersonPreviewLogObject(object);
                         bool handled = gameFirstPersonPreviewUseObject(object);
                         if (!handled) {
                             Object* door = tileFirstPersonPreviewPickDoorAt(mouseX, mouseY);
                             if (door != nullptr) {
+                                gameFirstPersonPreviewLogObject(door);
                                 _action_use_an_object(gDude, door);
                                 handled = true;
                             }
@@ -1000,6 +1025,7 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                 Object* critter = tileFirstPersonPreviewPickCritterAt(centerX, centerY);
                 bool handled = false;
                 if (critter != nullptr) {
+                    gameFirstPersonPreviewLogObject(critter);
                     if (critterIsDead(critter)) {
                         gameFirstPersonPreviewStartLoot(critter);
                         handled = true;
@@ -1009,10 +1035,12 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                     }
                 }
                 Object* object = handled ? nullptr : tileFirstPersonPreviewPickObjectAt(centerX, centerY);
+                gameFirstPersonPreviewLogObject(object);
                 handled = handled || gameFirstPersonPreviewUseObject(object);
                 if (!handled) {
                     Object* door = tileFirstPersonPreviewPickDoorAt(centerX, centerY);
                     if (door != nullptr) {
+                        gameFirstPersonPreviewLogObject(door);
                         _action_use_an_object(gDude, door);
                         handled = true;
                     }
@@ -1066,14 +1094,17 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                                 && gFirstPersonPreviewLeftClickStartTime != 0) {
                                 Object* critter = tileFirstPersonPreviewPickCritterAt(mouseX, mouseY);
                                 if (critter != nullptr) {
+                                    gameFirstPersonPreviewLogObject(critter);
                                     if (_obj_action_can_talk_to(critter)) actionTalk(gDude, critter);
                                     else gameFirstPersonPreviewStartLoot(critter);
                                 } else {
                                     Object* object = tileFirstPersonPreviewPickObjectAt(mouseX, mouseY);
+                                    gameFirstPersonPreviewLogObject(object);
                                     bool handled = gameFirstPersonPreviewUseObject(object);
                                     if (!handled) {
                                         Object* door = tileFirstPersonPreviewPickDoorAt(mouseX, mouseY);
                                         if (door != nullptr) {
+                                            gameFirstPersonPreviewLogObject(door);
                                             _action_use_an_object(gDude, door);
                                             handled = true;
                                         }
@@ -1143,10 +1174,12 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                                     const int centerX = isoWindowRect.left + windowGetWidth(gIsoWindow) / 2;
                                     const int centerY = isoWindowRect.top + windowGetHeight(gIsoWindow) / 2;
                                     Object* object = tileFirstPersonPreviewPickObjectAt(centerX, centerY);
+                                    gameFirstPersonPreviewLogObject(object);
                                     bool handled = gameFirstPersonPreviewUseObject(object);
                                     if (!handled) {
                                         Object* door = tileFirstPersonPreviewPickDoorAt(centerX, centerY);
                                         if (door != nullptr) {
+                                            gameFirstPersonPreviewLogObject(door);
                                             _action_use_an_object(gDude, door);
                                         }
                                     }

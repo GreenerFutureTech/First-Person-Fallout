@@ -535,6 +535,9 @@ enum class SceneryProtoTypeId : int {
     unknown1 = 297,
     unknown2 = 287,
     unknown3 = 296,
+
+    FireHydrant = 243,
+
 };
 
 enum class MiscProtoTypeId : int {
