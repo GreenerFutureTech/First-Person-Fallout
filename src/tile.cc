@@ -1853,15 +1853,9 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
             facingRotation,
         });
 
-        for (int y = std::max(0, artTop); y < std::min(gTileWindowHeight, artBottom); y++) {
-            const int sourceY = (y - artTop) * frame.height / artHeight;
-            for (int x = std::max(0, artLeft); x < std::min(gTileWindowWidth, artLeft + artWidth); x++) {
-                const int sourceX = (x - artLeft) * frame.width / artWidth;
-                const unsigned char color = frame.data[sourceY * frame.width + sourceX];
-                if (color == 0) {
-                    continue;
-                }
-
+        for (int x = std::max(0, artLeft); x < std::min(gTileWindowWidth, artLeft + artWidth); x++) {
+            const int sourceX = (x - artLeft) * frame.width / artWidth;
+            for (int y = std::max(0, artTop); y < std::min(gTileWindowHeight, artBottom); y++) {
                 const bool blockedByWall = y < renderContext->horizonY
                     ? transformY >= (*renderContext->wallDepths)[x]
                     : transformY >= std::min((*renderContext->wallDepths)[x],
@@ -1869,8 +1863,10 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                 if (blockedByWall) {
                     continue;
                 }
+                const int sourceY = (y - artTop) * frame.height / artHeight;
+                const unsigned char color = frame.data[sourceY * frame.width + sourceX];
                 const size_t depthIndex = static_cast<size_t>(y) * gTileWindowWidth + x;
-                if (transformY < (*renderContext->actorDepths)[depthIndex]) {
+                if (color != 0 && transformY < (*renderContext->actorDepths)[depthIndex]) {
                     gTileWindowBuffer[y * gTileWindowPitch + x] = color;
                     (*renderContext->actorDepths)[depthIndex] = transformY;
                 }
@@ -1898,31 +1894,30 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         object->frame,
         facingRotation,
     });
-    for (int y = std::max(0, spriteTop); y < std::min(gTileWindowHeight, spriteBottom); y++) {
-        const double normalizedY = (y - spriteTop) / static_cast<double>(actorHeight);
-        double silhouetteWidth;
-        if (normalizedY < 0.2) {
-            silhouetteWidth = 0.2;
-        } else if (normalizedY < 0.3) {
-            silhouetteWidth = 0.1;
-        } else if (normalizedY < 0.72) {
-            silhouetteWidth = 0.46;
-        } else {
-            silhouetteWidth = 0.34;
-        }
-
-        for (int x = std::max(0, spriteLeft); x < std::min(gTileWindowWidth, spriteRight); x++) {
-            const double normalizedX = (x - spriteLeft) / static_cast<double>(spriteWidth);
-            const double centerDistance = fabs(normalizedX - 0.5);
-            if (centerDistance > silhouetteWidth / 2.0) {
-                continue;
-            }
-
+    for (int x = std::max(0, spriteLeft); x < std::min(gTileWindowWidth, spriteRight); x++) {
+        const double normalizedX = (x - spriteLeft) / static_cast<double>(spriteWidth);
+        for (int y = std::max(0, spriteTop); y < std::min(gTileWindowHeight, spriteBottom); y++) {
             const bool blockedByWall = y < renderContext->horizonY
                 ? transformY >= (*renderContext->wallDepths)[x]
                 : transformY >= std::min((*renderContext->wallDepths)[x],
                     (*renderContext->wallSillDepths)[x]);
             if (blockedByWall) {
+                continue;
+            }
+            const double normalizedY = (y - spriteTop) / static_cast<double>(actorHeight);
+            double silhouetteWidth;
+            if (normalizedY < 0.2) {
+                silhouetteWidth = 0.2;
+            } else if (normalizedY < 0.3) {
+                silhouetteWidth = 0.1;
+            } else if (normalizedY < 0.72) {
+                silhouetteWidth = 0.46;
+            } else {
+                silhouetteWidth = 0.34;
+            }
+
+            const double centerDistance = fabs(normalizedX - 0.5);
+            if (centerDistance > silhouetteWidth / 2.0) {
                 continue;
             }
 
