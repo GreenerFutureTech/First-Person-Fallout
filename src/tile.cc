@@ -2165,16 +2165,18 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                     + startY * gTileWindowPitch + x;
                 for (int y = startY; y < endY; y++) {
                     const unsigned char color = frame.data[sourceY * frame.width + sourceX];
-                    if ((*renderContext->actorDepthStamps)[depthIndex]
-                        != renderContext->actorDepthStamp) {
-                        (*renderContext->actorDepthStamps)[depthIndex] =
-                            renderContext->actorDepthStamp;
-                        (*renderContext->actorDepths)[depthIndex] =
-                            std::numeric_limits<double>::infinity();
-                    }
-                    if (color != 0 && transformY < (*renderContext->actorDepths)[depthIndex]) {
-                        *destination = color;
-                        (*renderContext->actorDepths)[depthIndex] = transformY;
+                    if (color != 0) {
+                        if ((*renderContext->actorDepthStamps)[depthIndex]
+                            != renderContext->actorDepthStamp) {
+                            (*renderContext->actorDepthStamps)[depthIndex] =
+                                renderContext->actorDepthStamp;
+                            (*renderContext->actorDepths)[depthIndex] =
+                                std::numeric_limits<double>::infinity();
+                        }
+                        if (transformY < (*renderContext->actorDepths)[depthIndex]) {
+                            *destination = color;
+                            (*renderContext->actorDepths)[depthIndex] = transformY;
+                        }
                     }
                     sourceRemainder += frame.height;
                     while (sourceRemainder >= artHeight) {
@@ -2202,13 +2204,15 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
             }
         }
 
-        textObjectsRenderForOwner(object,
-            gTileWindowBuffer,
-            gTileWindowPitch,
-            gTileWindowWidth,
-            gTileWindowHeight,
-            screenCenterX,
-            artTop - 3);
+        if (objectType != OBJ_TYPE_SCENERY) {
+            textObjectsRenderForOwner(object,
+                gTileWindowBuffer,
+                gTileWindowPitch,
+                gTileWindowWidth,
+                gTileWindowHeight,
+                screenCenterX,
+                artTop - 3);
+        }
 
         return;
     }
