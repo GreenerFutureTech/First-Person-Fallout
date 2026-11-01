@@ -8,6 +8,7 @@
 #include <array>
 #include <limits>
 #include <stack>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -131,6 +132,7 @@ struct TileFirstPersonActorRenderContext {
     double directionY;
     double cameraPlaneX;
     double cameraPlaneY;
+    double inverseDeterminant;
     int horizonY;
     std::vector<double>* wallDepths;
     std::vector<double>* wallSillDepths;
@@ -1092,6 +1094,8 @@ static void tileRenderFirstPersonPreview()
     const double directionY = -cos(yaw);
     const double cameraPlaneX = -directionY * kFieldOfViewScale;
     const double cameraPlaneY = directionX * kFieldOfViewScale;
+    const double inverseDeterminant =
+        1.0 / (cameraPlaneX * directionY - directionX * cameraPlaneY);
     static std::vector<double> rayDirectionXs;
     static std::vector<double> rayDirectionYs;
     rayDirectionXs.resize(gTileWindowWidth);
@@ -1528,6 +1532,7 @@ static void tileRenderFirstPersonPreview()
         directionY,
         cameraPlaneX,
         cameraPlaneY,
+        inverseDeterminant,
         horizonY,
         &wallDepths,
         &wallSillDepths,
@@ -1749,16 +1754,9 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
 
     const double relativeX = objectX - renderContext->cameraX;
     const double relativeY = objectY - renderContext->cameraY;
-    const double determinant = renderContext->cameraPlaneX * renderContext->directionY
-        - renderContext->directionX * renderContext->cameraPlaneY;
-    if (determinant == 0.0) {
-        return;
-    }
-
-    const double inverseDeterminant = 1.0 / determinant;
-    const double transformX = inverseDeterminant
+    const double transformX = renderContext->inverseDeterminant
         * (renderContext->directionY * relativeX - renderContext->directionX * relativeY);
-    const double transformY = inverseDeterminant
+    const double transformY = renderContext->inverseDeterminant
         * (-renderContext->cameraPlaneY * relativeX + renderContext->cameraPlaneX * relativeY);
     if (transformY <= 0.1) {
         return;
@@ -1772,36 +1770,50 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
             ? object->rotation
             : ROTATION_NE;
     }
-    {
-        double viewX = renderContext->cameraX - objectX;
-        double viewY = renderContext->cameraY - objectY;
-        const double viewLength = sqrt(viewX * viewX + viewY * viewY);
-        if (viewLength > 0.0) {
-            viewX /= viewLength;
-            viewY /= viewLength;
-
-            double bestDot = -std::numeric_limits<double>::infinity();
-            for (int rotationIndex = ROTATION_FIRST; rotationIndex < ROTATION_COUNT; rotationIndex++) {
-                const Rotation rotation = static_cast<Rotation>(rotationIndex);
-                const int adjacentTile = tileGetTileInDirection(object->tile, rotation, 1);
-                double adjacentX;
-                double adjacentY;
-                if (!tileFirstPersonGetWorldPosition(adjacentTile, &adjacentX, &adjacentY)) {
+    if (objectType != OBJ_TYPE_CRITTER) {
+        static std::array<std::array<std::array<double, 2>, ROTATION_COUNT>, 2> facingDirections {};
+        static int facingDirectionsGridWidth = 0;
+        if (facingDirectionsGridWidth != gHexGridWidth) {
+            for (int parity = 0; parity < 2; parity++) {
+                const int referenceTile = gHexGridWidth * 2 + 2 + parity;
+                double referenceX;
+                double referenceY;
+                if (!tileFirstPersonGetWorldPosition(referenceTile, &referenceX, &referenceY)) {
                     continue;
                 }
+                for (int rotationIndex = ROTATION_FIRST; rotationIndex < ROTATION_COUNT; rotationIndex++) {
+                    const Rotation rotation = static_cast<Rotation>(rotationIndex);
+                    const int adjacentTile = tileGetTileInDirection(referenceTile, rotation, 1);
+                    double adjacentX;
+                    double adjacentY;
+                    if (!tileFirstPersonGetWorldPosition(adjacentTile, &adjacentX, &adjacentY)) {
+                        continue;
+                    }
 
-                const double directionX = adjacentX - objectX;
-                const double directionY = adjacentY - objectY;
-                const double directionLength = sqrt(directionX * directionX + directionY * directionY);
-                if (directionLength <= 0.0) {
-                    continue;
+                    const double directionX = adjacentX - referenceX;
+                    const double directionY = adjacentY - referenceY;
+                    const double directionLength = sqrt(directionX * directionX + directionY * directionY);
+                    if (directionLength > 0.0) {
+                        facingDirections[parity][rotationIndex] = {
+                            directionX / directionLength,
+                            directionY / directionLength,
+                        };
+                    }
                 }
+            }
+            facingDirectionsGridWidth = gHexGridWidth;
+        }
 
-                const double dot = (directionX * viewX + directionY * viewY) / directionLength;
-                if (dot > bestDot) {
-                    bestDot = dot;
-                    facingRotation = rotation;
-                }
+        const double viewX = renderContext->cameraX - objectX;
+        const double viewY = renderContext->cameraY - objectY;
+        double bestDot = -std::numeric_limits<double>::infinity();
+        const int parity = (object->tile % gHexGridWidth) & 1;
+        for (int rotationIndex = ROTATION_FIRST; rotationIndex < ROTATION_COUNT; rotationIndex++) {
+            const double dot = facingDirections[parity][rotationIndex][0] * viewX
+                + facingDirections[parity][rotationIndex][1] * viewY;
+            if (dot > bestDot) {
+                bestDot = dot;
+                facingRotation = static_cast<Rotation>(rotationIndex);
             }
         }
     }
@@ -2021,6 +2033,31 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
     const int spriteBottom = actorBottom;
     const int spriteLeft = screenCenterX - spriteWidth / 2;
     const int spriteRight = spriteLeft + spriteWidth;
+    if (spriteRight <= 0 || spriteLeft >= gTileWindowWidth
+        || spriteBottom <= 0 || spriteTop >= gTileWindowHeight) {
+        return;
+    }
+    const int firstColumn = std::max(0, spriteLeft);
+    const int lastColumn = std::min(gTileWindowWidth, spriteRight);
+    const int upperTop = std::max(0, spriteTop);
+    const int upperBottom = std::min(renderContext->horizonY, spriteBottom);
+    const int lowerTop = std::max(renderContext->horizonY, spriteTop);
+    const int lowerBottom = std::min(gTileWindowHeight, spriteBottom);
+    bool upperVisible = upperTop >= upperBottom;
+    bool lowerVisible = lowerTop >= lowerBottom;
+    for (int x = firstColumn; x < lastColumn && (!upperVisible || !lowerVisible); x++) {
+        if (!upperVisible && transformY < (*renderContext->wallDepths)[x]) {
+            upperVisible = true;
+        }
+        if (!lowerVisible
+            && transformY < std::min((*renderContext->wallDepths)[x],
+                (*renderContext->wallSillDepths)[x])) {
+            lowerVisible = true;
+        }
+    }
+    if (!upperVisible && !lowerVisible) {
+        return;
+    }
     Color actorColor = COLOR_AMBER;
     if (objectType == OBJ_TYPE_CRITTER) {
         if (objectIsPartyMember(object)
@@ -2042,23 +2079,55 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         const int artWidth = std::max(1,
             static_cast<int>(artHeight * frame.width / static_cast<double>(frame.height)
                 * objectWidthScale));
-        int visibleBottom = -1;
-        for (int sourceY = frame.height - 1; sourceY >= 0 && visibleBottom < 0; sourceY--) {
-            for (int sourceX = 0; sourceX < frame.width; sourceX++) {
-                if (frame.data[sourceY * frame.width + sourceX] != 0) {
-                    visibleBottom = sourceY;
-                    break;
+        struct SpriteBounds {
+            int width;
+            int height;
+            int left;
+            int top;
+            int right;
+            int bottom;
+        };
+        static std::unordered_map<const unsigned char*, SpriteBounds> spriteBoundsCache;
+        SpriteBounds spriteBounds {};
+        const auto spriteBoundsIt = spriteBoundsCache.find(frame.data);
+        if (spriteBoundsIt != spriteBoundsCache.end()
+            && spriteBoundsIt->second.width == frame.width
+            && spriteBoundsIt->second.height == frame.height) {
+            spriteBounds = spriteBoundsIt->second;
+        } else {
+            spriteBounds = {
+                frame.width,
+                frame.height,
+                frame.width,
+                frame.height,
+                -1,
+                -1,
+            };
+            for (int sourceY = 0; sourceY < frame.height; sourceY++) {
+                for (int sourceX = 0; sourceX < frame.width; sourceX++) {
+                    if (frame.data[sourceY * frame.width + sourceX] != 0) {
+                        spriteBounds.left = std::min(spriteBounds.left, sourceX);
+                        spriteBounds.top = std::min(spriteBounds.top, sourceY);
+                        spriteBounds.right = std::max(spriteBounds.right, sourceX);
+                        spriteBounds.bottom = std::max(spriteBounds.bottom, sourceY);
+                    }
                 }
             }
+            spriteBoundsCache[frame.data] = spriteBounds;
         }
-        if (visibleBottom < 0) {
+        if (spriteBounds.right < 0) {
             return;
         }
         const int visibleHeight = std::max(1,
-            (visibleBottom + 1) * artHeight / frame.height);
+            (spriteBounds.bottom + 1) * artHeight / frame.height);
         const int artTop = actorBottom - visibleHeight;
-        const int artBottom = artTop + artHeight;
         const int artLeft = screenCenterX - artWidth / 2;
+        const int opaqueLeft = artLeft + spriteBounds.left * artWidth / frame.width;
+        const int opaqueRight = artLeft
+            + (spriteBounds.right + 1) * artWidth / frame.width;
+        const int opaqueTop = artTop + spriteBounds.top * artHeight / frame.height;
+        const int opaqueBottom = artTop
+            + (spriteBounds.bottom + 1) * artHeight / frame.height;
         renderContext->hitTargets->push_back({
             object,
             transformY,
@@ -2070,30 +2139,66 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
             facingRotation,
         });
 
-        for (int x = std::max(0, artLeft); x < std::min(gTileWindowWidth, artLeft + artWidth); x++) {
-            const int sourceX = (x - artLeft) * frame.width / artWidth;
-            for (int y = std::max(0, artTop); y < std::min(gTileWindowHeight, artBottom); y++) {
-                const bool blockedByWall = y < renderContext->horizonY
-                    ? transformY >= (*renderContext->wallDepths)[x]
-                    : transformY >= std::min((*renderContext->wallDepths)[x],
-                        (*renderContext->wallSillDepths)[x]);
-                if (blockedByWall) {
-                    continue;
+        const int firstOpaqueColumn = std::max(0, opaqueLeft);
+        const int lastColumn = std::min(gTileWindowWidth, opaqueRight);
+        int sourceXNumerator = (firstOpaqueColumn - artLeft) * frame.width;
+        int sourceX = sourceXNumerator / artWidth;
+        int sourceXRemainder = sourceXNumerator % artWidth;
+        for (int x = firstOpaqueColumn; x < lastColumn; x++) {
+            if (sourceX < spriteBounds.left || sourceX > spriteBounds.right) {
+                sourceXRemainder += frame.width;
+                while (sourceXRemainder >= artWidth) {
+                    sourceXRemainder -= artWidth;
+                    sourceX++;
                 }
-                const int sourceY = (y - artTop) * frame.height / artHeight;
-                const unsigned char color = frame.data[sourceY * frame.width + sourceX];
-                const size_t depthIndex = static_cast<size_t>(y) * gTileWindowWidth + x;
-                if ((*renderContext->actorDepthStamps)[depthIndex]
-                    != renderContext->actorDepthStamp) {
-                    (*renderContext->actorDepthStamps)[depthIndex] =
-                        renderContext->actorDepthStamp;
-                    (*renderContext->actorDepths)[depthIndex] =
-                        std::numeric_limits<double>::infinity();
+                continue;
+            }
+            const auto renderColumnRange = [&](int startY, int endY) {
+                if (startY >= endY) {
+                    return;
                 }
-                if (color != 0 && transformY < (*renderContext->actorDepths)[depthIndex]) {
-                    gTileWindowBuffer[y * gTileWindowPitch + x] = color;
-                    (*renderContext->actorDepths)[depthIndex] = transformY;
+                int sourceNumerator = (startY - artTop) * frame.height;
+                int sourceY = sourceNumerator / artHeight;
+                int sourceRemainder = sourceNumerator % artHeight;
+                size_t depthIndex = static_cast<size_t>(startY) * gTileWindowWidth + x;
+                unsigned char* destination = gTileWindowBuffer
+                    + startY * gTileWindowPitch + x;
+                for (int y = startY; y < endY; y++) {
+                    const unsigned char color = frame.data[sourceY * frame.width + sourceX];
+                    if ((*renderContext->actorDepthStamps)[depthIndex]
+                        != renderContext->actorDepthStamp) {
+                        (*renderContext->actorDepthStamps)[depthIndex] =
+                            renderContext->actorDepthStamp;
+                        (*renderContext->actorDepths)[depthIndex] =
+                            std::numeric_limits<double>::infinity();
+                    }
+                    if (color != 0 && transformY < (*renderContext->actorDepths)[depthIndex]) {
+                        *destination = color;
+                        (*renderContext->actorDepths)[depthIndex] = transformY;
+                    }
+                    sourceRemainder += frame.height;
+                    while (sourceRemainder >= artHeight) {
+                        sourceRemainder -= artHeight;
+                        sourceY++;
+                    }
+                    depthIndex += gTileWindowWidth;
+                    destination += gTileWindowPitch;
                 }
+            };
+            const int clippedTop = std::max(0, opaqueTop);
+            const int clippedBottom = std::min(gTileWindowHeight, opaqueBottom);
+            const int horizon = renderContext->horizonY;
+            if (transformY < (*renderContext->wallDepths)[x]) {
+                renderColumnRange(clippedTop, std::min(clippedBottom, horizon));
+            }
+            if (transformY < std::min((*renderContext->wallDepths)[x],
+                    (*renderContext->wallSillDepths)[x])) {
+                renderColumnRange(std::max(clippedTop, horizon), clippedBottom);
+            }
+            sourceXRemainder += frame.width;
+            while (sourceXRemainder >= artWidth) {
+                sourceXRemainder -= artWidth;
+                sourceX++;
             }
         }
 
@@ -2120,43 +2225,48 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
     });
     for (int x = std::max(0, spriteLeft); x < std::min(gTileWindowWidth, spriteRight); x++) {
         const double normalizedX = (x - spriteLeft) / static_cast<double>(spriteWidth);
-        for (int y = std::max(0, spriteTop); y < std::min(gTileWindowHeight, spriteBottom); y++) {
-            const bool blockedByWall = y < renderContext->horizonY
-                ? transformY >= (*renderContext->wallDepths)[x]
-                : transformY >= std::min((*renderContext->wallDepths)[x],
-                    (*renderContext->wallSillDepths)[x]);
-            if (blockedByWall) {
-                continue;
-            }
-            const double normalizedY = (y - spriteTop) / static_cast<double>(actorHeight);
-            double silhouetteWidth;
-            if (normalizedY < 0.2) {
-                silhouetteWidth = 0.2;
-            } else if (normalizedY < 0.3) {
-                silhouetteWidth = 0.1;
-            } else if (normalizedY < 0.72) {
-                silhouetteWidth = 0.46;
-            } else {
-                silhouetteWidth = 0.34;
-            }
+        const auto renderSilhouetteRange = [&](int startY, int endY) {
+            for (int y = startY; y < endY; y++) {
+                const double normalizedY = (y - spriteTop) / static_cast<double>(actorHeight);
+                double silhouetteWidth;
+                if (normalizedY < 0.2) {
+                    silhouetteWidth = 0.2;
+                } else if (normalizedY < 0.3) {
+                    silhouetteWidth = 0.1;
+                } else if (normalizedY < 0.72) {
+                    silhouetteWidth = 0.46;
+                } else {
+                    silhouetteWidth = 0.34;
+                }
 
-            const double centerDistance = fabs(normalizedX - 0.5);
-            if (centerDistance > silhouetteWidth / 2.0) {
-                continue;
-            }
+                const double centerDistance = fabs(normalizedX - 0.5);
+                if (centerDistance > silhouetteWidth / 2.0) {
+                    continue;
+                }
 
-            const size_t depthIndex = static_cast<size_t>(y) * gTileWindowWidth + x;
-            if ((*renderContext->actorDepthStamps)[depthIndex]
-                != renderContext->actorDepthStamp) {
-                (*renderContext->actorDepthStamps)[depthIndex] =
-                    renderContext->actorDepthStamp;
-                (*renderContext->actorDepths)[depthIndex] =
-                    std::numeric_limits<double>::infinity();
+                const size_t depthIndex = static_cast<size_t>(y) * gTileWindowWidth + x;
+                if ((*renderContext->actorDepthStamps)[depthIndex]
+                    != renderContext->actorDepthStamp) {
+                    (*renderContext->actorDepthStamps)[depthIndex] =
+                        renderContext->actorDepthStamp;
+                    (*renderContext->actorDepths)[depthIndex] =
+                        std::numeric_limits<double>::infinity();
+                }
+                if (transformY < (*renderContext->actorDepths)[depthIndex]) {
+                    gTileWindowBuffer[y * gTileWindowPitch + x] = actorColor;
+                    (*renderContext->actorDepths)[depthIndex] = transformY;
+                }
             }
-            if (transformY < (*renderContext->actorDepths)[depthIndex]) {
-                gTileWindowBuffer[y * gTileWindowPitch + x] = actorColor;
-                (*renderContext->actorDepths)[depthIndex] = transformY;
-            }
+        };
+        const int clippedTop = std::max(0, spriteTop);
+        const int clippedBottom = std::min(gTileWindowHeight, spriteBottom);
+        const int horizon = renderContext->horizonY;
+        if (transformY < (*renderContext->wallDepths)[x]) {
+            renderSilhouetteRange(clippedTop, std::min(clippedBottom, horizon));
+        }
+        if (transformY < std::min((*renderContext->wallDepths)[x],
+                (*renderContext->wallSillDepths)[x])) {
+            renderSilhouetteRange(std::max(clippedTop, horizon), clippedBottom);
         }
     }
 }
