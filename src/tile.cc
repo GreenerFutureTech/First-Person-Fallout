@@ -1218,13 +1218,21 @@ static void tileRenderFirstPersonPreview()
 
     for (int y = horizonY + 1; y < gTileWindowHeight; y++) {
         const double rowDistance = (gTileWindowHeight * 0.5) / (y - horizonY);
+        double worldX = cameraX + rayDirectionXs[0] * rowDistance;
+        double worldY = cameraY + rayDirectionYs[0] * rowDistance;
+        const double worldXStep = gTileWindowWidth > 1
+            ? (rayDirectionXs[1] - rayDirectionXs[0]) * rowDistance
+            : 0.0;
+        const double worldYStep = gTileWindowWidth > 1
+            ? (rayDirectionYs[1] - rayDirectionYs[0]) * rowDistance
+            : 0.0;
         for (int x = 0; x < gTileWindowWidth; x++) {
-            const double worldX = cameraX + rayDirectionXs[x] * rowDistance;
-            const double worldY = cameraY + rayDirectionYs[x] * rowDistance;
             const int mapX = static_cast<int>(floor(worldX));
             const int mapY = static_cast<int>(floor(worldY));
             if (mapX < 0 || mapX >= SQUARE_GRID_WIDTH
                 || mapY < 0 || mapY >= SQUARE_GRID_HEIGHT) {
+                worldX += worldXStep;
+                worldY += worldYStep;
                 continue;
             }
 
@@ -1235,6 +1243,8 @@ static void tileRenderFirstPersonPreview()
             const int cacheIndex = (mapY * SQUARE_GRID_WIDTH + mapX) * kFloorCacheCellArea
                 + sampleY * kFloorCacheCellResolution + sampleX;
             gTileWindowBuffer[y * gTileWindowPitch + x] = cachedFloorColors[cacheIndex];
+            worldX += worldXStep;
+            worldY += worldYStep;
         }
     }
 
