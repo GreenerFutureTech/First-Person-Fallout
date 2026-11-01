@@ -1012,6 +1012,7 @@ static void tileRenderFirstPersonPreview()
 {
     constexpr double kPi = 3.14159265358979323846;
     constexpr double kFieldOfViewScale = 0.66;
+    gpuBillboardBeginFrame();
     gFirstPersonPreviewActorHitTargets.clear();
 
     bufferFill(gTileWindowBuffer,
@@ -2149,7 +2150,54 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
 
         const int firstOpaqueColumn = std::max(0, opaqueLeft);
         const int lastColumn = std::min(gTileWindowWidth, opaqueRight);
-        const int spriteSampleStep = objectType == OBJ_TYPE_SCENERY ? 2 : 1;
+        if (objectType == OBJ_TYPE_SCENERY && screenIsHardwareAccelerated()) {
+            const SDL_Rect destination = { artLeft, artTop, artWidth, artHeight };
+            const auto submitVisibleRange = [&](int top, int bottom, bool upper) {
+                if (top >= bottom) {
+                    return;
+                }
+                int rangeStart = firstOpaqueColumn;
+                bool visible = false;
+                for (int x = firstOpaqueColumn; x <= lastColumn; x++) {
+                    const bool nextVisible = x < lastColumn
+                        && (upper
+                                ? transformY < (*renderContext->wallDepths)[x]
+                                : transformY < std::min(
+                                    (*renderContext->wallDepths)[x],
+                                    (*renderContext->wallSillDepths)[x]));
+                    if (x == firstOpaqueColumn) {
+                        visible = nextVisible;
+                    } else if (nextVisible != visible) {
+                        if (visible) {
+                            const SDL_Rect clip = {
+                                rangeStart,
+                                top,
+                                x - rangeStart,
+                                bottom - top,
+                            };
+                            gpuBillboardSubmit(frame.data, frame.width, frame.height,
+                                destination, clip, transformY);
+                        }
+                        rangeStart = x;
+                        visible = nextVisible;
+                    }
+                }
+            };
+            submitVisibleRange(std::max(0, opaqueTop),
+                std::min(gTileWindowHeight, std::min(opaqueBottom, renderContext->horizonY)), true);
+            submitVisibleRange(std::max(0, std::max(opaqueTop, renderContext->horizonY)),
+                std::min(gTileWindowHeight, opaqueBottom), false);
+            return;
+        }
+
+        // Large scenery billboards are intentionally rendered as coarse
+        // blocks. Their source art is already heavily magnified at close
+        // range, and full-resolution depth testing dominates frame time.
+        const int spriteSampleStep = objectType != OBJ_TYPE_SCENERY
+            ? 1
+            : artHeight >= 192 ? 4
+            : artHeight >= 96 ? 3
+            : 2;
         int sourceXNumerator = (firstOpaqueColumn - artLeft) * frame.width;
         int sourceX = sourceXNumerator / artWidth;
         int sourceXRemainder = sourceXNumerator % artWidth;

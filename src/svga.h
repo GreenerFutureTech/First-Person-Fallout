@@ -53,6 +53,10 @@ void handleWindowSizeChanged();
 void renderFpsCounter();
 void renderPresent();
 bool screenIsExclusiveFullscreen();
+bool screenIsHardwareAccelerated();
+void gpuBillboardBeginFrame();
+void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
+    const SDL_Rect& destination, const SDL_Rect& clip, double depth);
 
 } // namespace fallout
 

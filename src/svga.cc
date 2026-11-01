@@ -4,10 +4,16 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <algorithm>
+#include <cstdint>
+#include <unordered_map>
+#include <vector>
+
 #include <SDL.h>
 
 #include "color.h"
 #include "config.h"
+#include "debug.h"
 #include "dinput.h"
 #include "draw.h"
 #include "game.h"
@@ -42,6 +48,26 @@ SDL_Surface* gSdlSurface = nullptr;
 SDL_Renderer* gSdlRenderer = nullptr;
 SDL_Texture* gSdlTexture = nullptr;
 SDL_Surface* gSdlTextureSurface = nullptr;
+static bool gSdlRendererHardwareAccelerated = false;
+
+struct GpuBillboard {
+    SDL_Texture* texture;
+    SDL_Rect destination;
+    SDL_Rect clip;
+    double depth;
+};
+
+struct GpuBillboardTexture {
+    SDL_Texture* texture;
+    int width;
+    int height;
+    unsigned int paletteHash;
+};
+
+static std::vector<GpuBillboard> gGpuBillboards;
+static std::unordered_map<const unsigned char*, GpuBillboardTexture> gGpuBillboardTextures;
+static unsigned char gGpuPalette[256 * 3];
+static unsigned int gGpuPaletteHash = 0;
 
 // TODO: Remove once migration to update-render cycle is completed.
 FpsLimiter sharedFpsLimiter;
@@ -50,6 +76,82 @@ FpsLimiter sharedFpsLimiter;
 int _init_mode_320_200()
 {
     return _GNW95_init_mode_ex(320, 200, 8);
+}
+
+bool screenIsHardwareAccelerated()
+{
+    return gSdlRendererHardwareAccelerated;
+}
+
+void gpuBillboardBeginFrame()
+{
+    gGpuBillboards.clear();
+    unsigned char* palette = directDrawGetPalette();
+    gGpuPaletteHash = 2166136261u;
+    for (int index = 0; index < 256 * 3; index++) {
+        gGpuPalette[index] = palette[index];
+        gGpuPaletteHash ^= palette[index];
+        gGpuPaletteHash *= 16777619u;
+    }
+}
+
+void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
+    const SDL_Rect& destination, const SDL_Rect& clip, double depth)
+{
+    if (!gSdlRendererHardwareAccelerated || pixels == nullptr
+        || width <= 0 || height <= 0 || destination.w <= 0 || destination.h <= 0) {
+        return;
+    }
+
+    GpuBillboardTexture* cachedTexture = nullptr;
+    auto textureIt = gGpuBillboardTextures.find(pixels);
+    if (textureIt != gGpuBillboardTextures.end()
+        && textureIt->second.width == width
+        && textureIt->second.height == height
+        && textureIt->second.paletteHash == gGpuPaletteHash) {
+        cachedTexture = &textureIt->second;
+    } else {
+        SDL_Texture* texture = SDL_CreateTexture(gSdlRenderer,
+            SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, width, height);
+        if (texture == nullptr) {
+            return;
+        }
+        std::vector<uint32_t> rgba(static_cast<size_t>(width) * height);
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                const unsigned char colorIndex = pixels[y * width + x];
+                const int paletteIndex = colorIndex * 3;
+                const uint32_t color = colorIndex == 0
+                    ? 0
+                    : 0xFF000000u
+                        | (static_cast<uint32_t>(gGpuPalette[paletteIndex]) << 18)
+                        | (static_cast<uint32_t>(gGpuPalette[paletteIndex + 1]) << 10)
+                        | (static_cast<uint32_t>(gGpuPalette[paletteIndex + 2]) << 2);
+                rgba[static_cast<size_t>(y) * width + x] = color;
+            }
+        }
+        if (SDL_UpdateTexture(texture, nullptr, rgba.data(), width * sizeof(uint32_t)) != 0) {
+            SDL_DestroyTexture(texture);
+            return;
+        }
+        SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+        if (textureIt != gGpuBillboardTextures.end()) {
+            SDL_DestroyTexture(textureIt->second.texture);
+            textureIt->second = { texture, width, height, gGpuPaletteHash };
+            cachedTexture = &textureIt->second;
+        } else {
+            cachedTexture =
+                &gGpuBillboardTextures.emplace(pixels,
+                    GpuBillboardTexture { texture, width, height, gGpuPaletteHash }).first->second;
+        }
+    }
+
+    gGpuBillboards.push_back({
+        cachedTexture->texture,
+        destination,
+        clip,
+        depth,
+    });
 }
 
 // 0x4CAD40 init_mode_320_400
@@ -360,9 +462,23 @@ bool screenIsExclusiveFullscreen()
 
 static bool createRenderer(int width, int height)
 {
-    gSdlRenderer = SDL_CreateRenderer(gSdlWindow, -1, 0);
+    gSdlRenderer = SDL_CreateRenderer(gSdlWindow, -1, SDL_RENDERER_ACCELERATED);
+    if (gSdlRenderer == nullptr) {
+        debugPrint("Accelerated SDL renderer unavailable; using fallback renderer: %s\n",
+            SDL_GetError());
+        gSdlRenderer = SDL_CreateRenderer(gSdlWindow, -1, 0);
+    }
     if (gSdlRenderer == nullptr) {
         return false;
+    }
+
+    SDL_RendererInfo rendererInfo {};
+    if (SDL_GetRendererInfo(gSdlRenderer, &rendererInfo) == 0) {
+        gSdlRendererHardwareAccelerated =
+            (rendererInfo.flags & SDL_RENDERER_ACCELERATED) != 0;
+        debugPrint("SDL renderer: %s (%s)\n",
+            rendererInfo.name != nullptr ? rendererInfo.name : "unknown",
+            gSdlRendererHardwareAccelerated ? "accelerated" : "software");
     }
 
     if (SDL_RenderSetLogicalSize(gSdlRenderer, width, height) != 0) {
@@ -389,6 +505,12 @@ static bool createRenderer(int width, int height)
 
 static void destroyRenderer()
 {
+    gGpuBillboards.clear();
+    for (const auto& entry : gGpuBillboardTextures) {
+        SDL_DestroyTexture(entry.second.texture);
+    }
+    gGpuBillboardTextures.clear();
+    gSdlRendererHardwareAccelerated = false;
     if (gSdlTextureSurface != nullptr) {
         SDL_FreeSurface(gSdlTextureSurface);
         gSdlTextureSurface = nullptr;
@@ -477,6 +599,16 @@ void renderPresent()
     SDL_UpdateTexture(gSdlTexture, nullptr, gSdlTextureSurface->pixels, gSdlTextureSurface->pitch);
     SDL_RenderClear(gSdlRenderer);
     SDL_RenderCopy(gSdlRenderer, gSdlTexture, nullptr, nullptr);
+    std::stable_sort(gGpuBillboards.begin(), gGpuBillboards.end(),
+        [](const GpuBillboard& lhs, const GpuBillboard& rhs) {
+            return lhs.depth > rhs.depth;
+        });
+    for (const GpuBillboard& billboard : gGpuBillboards) {
+        SDL_RenderSetClipRect(gSdlRenderer, &billboard.clip);
+        SDL_RenderCopy(gSdlRenderer, billboard.texture, nullptr, &billboard.destination);
+    }
+    SDL_RenderSetClipRect(gSdlRenderer, nullptr);
+    gGpuBillboards.clear();
     // render movie SDL texture if present
     movieRenderDirectOverlay();
     SDL_RenderPresent(gSdlRenderer);
