@@ -1942,6 +1942,40 @@ static double tileFirstPersonPreviewGetYaw()
     return yaw;
 }
 
+static void tileFirstPersonPreviewResetForModeRefresh()
+{
+    gFirstPersonPreviewCameraInitialized = false;
+    gFirstPersonPreviewMoveMarkerTile = -1;
+    gFirstPersonPreviewPendingMoveDirection = -1;
+    gFirstPersonPreviewYawTurning = false;
+    gFirstPersonPreviewYaw = 0;
+
+    if (gDude == nullptr || !tileIsValid(gDude->tile) || !rotationIsValid(gDude->rotation)) {
+        return;
+    }
+
+    const int playerSquareTile = squareTileFromTile(gDude->tile);
+    for (int distance = 1; distance <= 4; distance++) {
+        const int facingTile = tileGetTileInDirection(gDude->tile, gDude->rotation, distance);
+        const int facingSquareTile = squareTileFromTile(facingTile);
+        if (!squareGridTileIsValid(playerSquareTile)
+            || !squareGridTileIsValid(facingSquareTile)) {
+            continue;
+        }
+
+        const int deltaX = facingSquareTile % SQUARE_GRID_WIDTH - playerSquareTile % SQUARE_GRID_WIDTH;
+        const int deltaY = facingSquareTile / SQUARE_GRID_WIDTH - playerSquareTile / SQUARE_GRID_WIDTH;
+        if (deltaX != 0 || deltaY != 0) {
+            constexpr double kPi = 3.14159265358979323846;
+            gFirstPersonPreviewYaw = static_cast<int>(atan2(deltaX, -deltaY) * 180.0 / kPi);
+            if (gFirstPersonPreviewYaw < 0) {
+                gFirstPersonPreviewYaw += 360;
+            }
+            break;
+        }
+    }
+}
+
 static void tileFirstPersonGetCameraPosition(int tile, MapElevation elevation, double* x, double* y)
 {
     double targetX;
@@ -1963,6 +1997,7 @@ static void tileFirstPersonGetCameraPosition(int tile, MapElevation elevation, d
         if (combatStateChanged) {
             gFirstPersonPreviewPendingMoveDirection = -1;
         }
+
         gFirstPersonPreviewCameraInitialized = true;
         gFirstPersonPreviewCameraTile = tile;
         gFirstPersonPreviewCameraElevation = elevation;
@@ -3018,6 +3053,20 @@ void tileFirstPersonPreviewRefresh()
     }
 }
 
+void tileFirstPersonPreviewRefreshCombat()
+{
+    if (!gFirstPersonPreviewEnabled) {
+        return;
+    }
+
+    const int preservedYaw = static_cast<int>(tileFirstPersonPreviewGetYaw());
+    tileFirstPersonPreviewToggle();
+    tileFirstPersonPreviewToggle();
+    gFirstPersonPreviewYaw = preservedYaw;
+    gFirstPersonPreviewYawTurning = false;
+    tileFirstPersonPreviewRefresh();
+}
+
 void tileFirstPersonPreviewToggleTopology()
 {
     if (!gFirstPersonPreviewEnabled) {
@@ -3104,36 +3153,11 @@ void tileFirstPersonPreviewToggle()
     }
 
     gFirstPersonPreviewEnabled = !gFirstPersonPreviewEnabled;
-    gFirstPersonPreviewCameraInitialized = false;
-    gFirstPersonPreviewMoveMarkerTile = -1;
-    gFirstPersonPreviewPendingMoveDirection = -1;
     if (gFirstPersonPreviewEnabled) {
         gFirstPersonPreviewTopologyEnabled = false;
         gFirstPersonPreviewTopologyPosition = -1;
         gFirstPersonPreviewTopologyZoom = 0;
-        gFirstPersonPreviewYaw = 0;
-        if (gDude != nullptr && tileIsValid(gDude->tile) && rotationIsValid(gDude->rotation)) {
-            const int playerSquareTile = squareTileFromTile(gDude->tile);
-            for (int distance = 1; distance <= 4; distance++) {
-                const int facingTile = tileGetTileInDirection(gDude->tile, gDude->rotation, distance);
-                const int facingSquareTile = squareTileFromTile(facingTile);
-                if (!squareGridTileIsValid(playerSquareTile)
-                    || !squareGridTileIsValid(facingSquareTile)) {
-                    continue;
-                }
-
-                const int deltaX = facingSquareTile % SQUARE_GRID_WIDTH - playerSquareTile % SQUARE_GRID_WIDTH;
-                const int deltaY = facingSquareTile / SQUARE_GRID_WIDTH - playerSquareTile / SQUARE_GRID_WIDTH;
-                if (deltaX != 0 || deltaY != 0) {
-                    constexpr double kPi = 3.14159265358979323846;
-                    gFirstPersonPreviewYaw = static_cast<int>(atan2(deltaX, -deltaY) * 180.0 / kPi);
-                    if (gFirstPersonPreviewYaw < 0) {
-                        gFirstPersonPreviewYaw += 360;
-                    }
-                    break;
-                }
-            }
-        }
+        tileFirstPersonPreviewResetForModeRefresh();
         tileFirstPersonPreviewRefresh();
     } else {
         tileRefreshGame(&gTileWindowRect, gElevation);

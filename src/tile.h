@@ -51,6 +51,7 @@ void tileFirstPersonPreviewSetMoveMarkerTile(int tile);
 bool tileFirstPersonPreviewMove(int relativeDirection);
 void tileFirstPersonPreviewProcessPendingMove();
 void tileFirstPersonPreviewRefresh();
+void tileFirstPersonPreviewRefreshCombat();
 void tileFirstPersonPreviewLook(int deltaX);
 void tileFirstPersonPreviewTurnToTile(int tile);
 void tileFirstPersonPreviewToggleTopology();

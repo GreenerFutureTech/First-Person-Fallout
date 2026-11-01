@@ -2738,6 +2738,7 @@ static void _combat_begin(Object* attacker)
 
         gCombatState |= COMBAT_STATE_IN_COMBAT;
 
+        tileFirstPersonPreviewRefreshCombat();
         tileWindowRefresh();
         gameUiDisable(0);
         gameMouseSetCursor(MOUSE_CURSOR_WAIT_WATCH);
