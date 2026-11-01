@@ -84,6 +84,35 @@ bool screenIsHardwareAccelerated()
     return gSdlRendererHardwareAccelerated;
 }
 
+const char* screenGetRendererName()
+{
+    if (gSdlRenderer == nullptr) {
+        return nullptr;
+    }
+
+    SDL_RendererInfo rendererInfo;
+    if (SDL_GetRendererInfo(gSdlRenderer, &rendererInfo) != 0) {
+        return nullptr;
+    }
+
+    return rendererInfo.name;
+}
+
+bool screenSupportsGpuFirstPersonPass()
+{
+    if (!gSdlRendererHardwareAccelerated || gSdlRenderer == nullptr) {
+        return false;
+    }
+
+    SDL_RendererInfo rendererInfo;
+    if (SDL_GetRendererInfo(gSdlRenderer, &rendererInfo) != 0) {
+        return false;
+    }
+
+    return (rendererInfo.flags & SDL_RENDERER_TARGETTEXTURE) != 0
+        && (rendererInfo.flags & SDL_RENDERER_ACCELERATED) != 0;
+}
+
 void gpuBillboardBeginFrame()
 {
     gGpuBillboards.clear();
@@ -518,9 +547,10 @@ static bool createRenderer(int width, int height)
     if (SDL_GetRendererInfo(gSdlRenderer, &rendererInfo) == 0) {
         gSdlRendererHardwareAccelerated =
             (rendererInfo.flags & SDL_RENDERER_ACCELERATED) != 0;
-        debugPrint("SDL renderer: %s (%s)\n",
+        debugPrint("SDL renderer: %s (%s), target textures: %s\n",
             rendererInfo.name != nullptr ? rendererInfo.name : "unknown",
-            gSdlRendererHardwareAccelerated ? "accelerated" : "software");
+            gSdlRendererHardwareAccelerated ? "accelerated" : "software",
+            (rendererInfo.flags & SDL_RENDERER_TARGETTEXTURE) != 0 ? "yes" : "no");
     }
 
     if (SDL_RenderSetLogicalSize(gSdlRenderer, width, height) != 0) {

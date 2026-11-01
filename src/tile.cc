@@ -1779,6 +1779,8 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
     if (transformY <= 0.1) {
         return;
     }
+
+    // SHOW OBJECTS ONLY WITHIN 25 TILES
     if (objectType == OBJ_TYPE_SCENERY && transformY > 24.0) {
         return;
     }

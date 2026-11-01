@@ -54,6 +54,8 @@ void renderFpsCounter();
 void renderPresent();
 bool screenIsExclusiveFullscreen();
 bool screenIsHardwareAccelerated();
+const char* screenGetRendererName();
+bool screenSupportsGpuFirstPersonPass();
 void gpuBillboardBeginFrame();
 void gpuBillboardMarkSceneComplete();
 void gpuBillboardClear();
