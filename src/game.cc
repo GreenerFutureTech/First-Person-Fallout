@@ -865,6 +865,9 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
 {
     const bool firstPersonPreviewMouseWasReleased = gFirstPersonPreviewMouseReleased;
     gameHandleFirstPersonPreviewInput(eventCode);
+    if (tileFirstPersonPreviewIsEnabled()) {
+        tileFirstPersonPreviewProcessPendingMove();
+    }
 
     if (tileFirstPersonPreviewIsEnabled()
         && eventCode == -1
