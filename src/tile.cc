@@ -221,6 +221,11 @@ static std::vector<TileFirstPersonDoorHitTarget> gFirstPersonPreviewDoorHitTarge
 static std::vector<unsigned char> gFirstPersonPreviewWallCells;
 static std::vector<unsigned char> gFirstPersonPreviewWallOrientations;
 static std::vector<TileFirstPersonTopologyMarker> gFirstPersonPreviewTopologyMarkers;
+static unsigned int gFirstPersonPreviewProfileFrames = 0;
+static unsigned int gFirstPersonPreviewProfileTotalMs = 0;
+static unsigned int gFirstPersonPreviewProfileFloorMs = 0;
+static unsigned int gFirstPersonPreviewProfileWallMs = 0;
+static unsigned int gFirstPersonPreviewProfileActorMs = 0;
 
 // 0x51D96C off_tile
 const int _off_tile[ROTATION_COUNT] = {
@@ -1012,6 +1017,8 @@ static void tileRenderFirstPersonPreview()
 {
     constexpr double kPi = 3.14159265358979323846;
     constexpr double kFieldOfViewScale = 0.66;
+    const bool profileFrame = settings.debug.show_fps;
+    const unsigned int frameStart = profileFrame ? getTicks() : 0;
     gpuBillboardBeginFrame();
     gFirstPersonPreviewActorHitTargets.clear();
 
@@ -1221,20 +1228,25 @@ static void tileRenderFirstPersonPreview()
         cachedFloorElevation = static_cast<int>(gElevation);
     }
 
-    constexpr int kFloorRenderStep = 2;
-    for (int y = horizonY + 1; y < gTileWindowHeight; y += kFloorRenderStep) {
+    const unsigned int floorStart = profileFrame ? getTicks() : 0;
+    constexpr int kFloorNearStep = 2;
+    constexpr int kFloorDistantStep = 4;
+    for (int y = horizonY + 1; y < gTileWindowHeight;) {
+        const int floorRenderStep = y < horizonY + gTileWindowHeight / 2
+            ? kFloorDistantStep
+            : kFloorNearStep;
         const double rowDistance = (gTileWindowHeight * 0.5) / (y - horizonY);
         double worldX = cameraX + rayDirectionXs[0] * rowDistance;
         double worldY = cameraY + rayDirectionYs[0] * rowDistance;
         const double worldXStep = gTileWindowWidth > 1
-            ? (rayDirectionXs[std::min(kFloorRenderStep, gTileWindowWidth - 1)]
+            ? (rayDirectionXs[std::min(floorRenderStep, gTileWindowWidth - 1)]
                     - rayDirectionXs[0]) * rowDistance
             : 0.0;
         const double worldYStep = gTileWindowWidth > 1
-            ? (rayDirectionYs[std::min(kFloorRenderStep, gTileWindowWidth - 1)]
+            ? (rayDirectionYs[std::min(floorRenderStep, gTileWindowWidth - 1)]
                     - rayDirectionYs[0]) * rowDistance
             : 0.0;
-        for (int x = 0; x < gTileWindowWidth; x += kFloorRenderStep) {
+        for (int x = 0; x < gTileWindowWidth; x += floorRenderStep) {
             const int mapX = static_cast<int>(floor(worldX));
             const int mapY = static_cast<int>(floor(worldY));
             if (mapX < 0 || mapX >= SQUARE_GRID_WIDTH
@@ -1252,10 +1264,10 @@ static void tileRenderFirstPersonPreview()
                 + sampleY * kFloorCacheCellResolution + sampleX;
             const unsigned char color = cachedFloorColors[cacheIndex];
             for (int blockY = y;
-                 blockY < std::min(gTileWindowHeight, y + kFloorRenderStep);
+                 blockY < std::min(gTileWindowHeight, y + floorRenderStep);
                  blockY++) {
                 for (int blockX = x;
-                     blockX < std::min(gTileWindowWidth, x + kFloorRenderStep);
+                     blockX < std::min(gTileWindowWidth, x + floorRenderStep);
                      blockX++) {
                     gTileWindowBuffer[blockY * gTileWindowPitch + blockX] = color;
                 }
@@ -1263,8 +1275,10 @@ static void tileRenderFirstPersonPreview()
             worldX += worldXStep;
             worldY += worldYStep;
         }
+        y += floorRenderStep;
     }
 
+    const unsigned int floorEnd = profileFrame ? getTicks() : 0;
     std::vector<double>& wallDepths = gFirstPersonPreviewWallDepths;
     wallDepths.assign(gTileWindowWidth, std::numeric_limits<double>::infinity());
     static std::vector<double> wallSillDepths;
@@ -1284,6 +1298,7 @@ static void tileRenderFirstPersonPreview()
         actorDepthStamp = 1;
     }
 
+    const unsigned int wallStart = profileFrame ? getTicks() : 0;
     for (int x = 0; x < gTileWindowWidth; x++) {
         const double rayDirectionX = rayDirectionXs[x];
         const double rayDirectionY = rayDirectionYs[x];
@@ -1542,6 +1557,7 @@ static void tileRenderFirstPersonPreview()
         }
     }
 
+    const unsigned int wallEnd = profileFrame ? getTicks() : 0;
     TileFirstPersonActorRenderContext actorContext = {
         gElevation,
         cameraX,
@@ -1559,10 +1575,33 @@ static void tileRenderFirstPersonPreview()
         actorDepthStamp,
         &gFirstPersonPreviewActorHitTargets,
     };
+    const unsigned int actorStart = profileFrame ? getTicks() : 0;
     objectVisitAll(tileFirstPersonRenderActor, &actorContext);
+    const unsigned int actorEnd = profileFrame ? getTicks() : 0;
     tileFirstPersonDrawMoveMarker(directionX, directionY);
     tileFirstPersonDrawCrosshair(directionX, directionY);
     tileRenderFirstPersonTopologyOverlay();
+
+    if (profileFrame) {
+        gFirstPersonPreviewProfileFrames++;
+        gFirstPersonPreviewProfileTotalMs += getTicksBetween(getTicks(), frameStart);
+        gFirstPersonPreviewProfileFloorMs += getTicksBetween(floorEnd, floorStart);
+        gFirstPersonPreviewProfileWallMs += getTicksBetween(wallEnd, wallStart);
+        gFirstPersonPreviewProfileActorMs += getTicksBetween(actorEnd, actorStart);
+        if (gFirstPersonPreviewProfileFrames >= 60) {
+            const double frameCount = gFirstPersonPreviewProfileFrames;
+            debugPrint("F11 timing avg ms: total=%.2f floor=%.2f wall=%.2f actors=%.2f\n",
+                gFirstPersonPreviewProfileTotalMs / frameCount,
+                gFirstPersonPreviewProfileFloorMs / frameCount,
+                gFirstPersonPreviewProfileWallMs / frameCount,
+                gFirstPersonPreviewProfileActorMs / frameCount);
+            gFirstPersonPreviewProfileFrames = 0;
+            gFirstPersonPreviewProfileTotalMs = 0;
+            gFirstPersonPreviewProfileFloorMs = 0;
+            gFirstPersonPreviewProfileWallMs = 0;
+            gFirstPersonPreviewProfileActorMs = 0;
+        }
+    }
 }
 
 static void tileFirstPersonSnapshotTopologyObject(Object* object, void* context)

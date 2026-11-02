@@ -1,6 +1,8 @@
 #ifndef FALLOUT_SVGA_H_
 #define FALLOUT_SVGA_H_
 
+#include <cstdint>
+
 #include <SDL.h>
 
 #include "fps_limiter.h"
@@ -56,6 +58,7 @@ bool screenIsExclusiveFullscreen();
 bool screenIsHardwareAccelerated();
 const char* screenGetRendererName();
 bool screenSupportsGpuFirstPersonPass();
+bool screenHasOpenGLContext();
 void gpuBillboardBeginFrame();
 void gpuBillboardMarkSceneComplete();
 void gpuBillboardClear();

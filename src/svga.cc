@@ -65,7 +65,8 @@ struct GpuBillboardTexture {
 };
 
 static std::vector<GpuBillboard> gGpuBillboards;
-static std::vector<SDL_Rect> gGpuOverlayRects;
+static SDL_Rect gGpuOverlayRect {};
+static bool gGpuHasOverlayRect = false;
 static std::unordered_map<const unsigned char*, GpuBillboardTexture> gGpuBillboardTextures;
 static unsigned char gGpuPalette[256 * 3];
 static unsigned int gGpuPaletteHash = 0;
@@ -113,10 +114,17 @@ bool screenSupportsGpuFirstPersonPass()
         && (rendererInfo.flags & SDL_RENDERER_ACCELERATED) != 0;
 }
 
+bool screenHasOpenGLContext()
+{
+    return gSdlWindow != nullptr
+        && (SDL_GetWindowFlags(gSdlWindow) & SDL_WINDOW_OPENGL) != 0
+        && SDL_GL_GetCurrentContext() != nullptr;
+}
+
 void gpuBillboardBeginFrame()
 {
     gGpuBillboards.clear();
-    gGpuOverlayRects.clear();
+    gGpuHasOverlayRect = false;
     const size_t expectedBillboardCount =
         static_cast<size_t>(std::max(64, screenGetWidth() / 2));
     if (gGpuBillboards.capacity() < expectedBillboardCount) {
@@ -133,13 +141,13 @@ void gpuBillboardBeginFrame()
 
 void gpuBillboardMarkSceneComplete()
 {
-    gGpuOverlayRects.clear();
+    gGpuHasOverlayRect = false;
 }
 
 void gpuBillboardClear()
 {
     gGpuBillboards.clear();
-    gGpuOverlayRects.clear();
+    gGpuHasOverlayRect = false;
 }
 
 void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
@@ -480,7 +488,19 @@ void _GNW95_ShowRect(unsigned char* src, int srcPitch, int unused, int srcX, int
     SDL_BlitSurface(gSdlSurface, &srcRect, gSdlTextureSurface, &destRect);
 
     if (gSdlRendererHardwareAccelerated) {
-        gGpuOverlayRects.push_back(destRect);
+        if (!gGpuHasOverlayRect) {
+            gGpuOverlayRect = destRect;
+            gGpuHasOverlayRect = true;
+        } else {
+            const int right = std::max(gGpuOverlayRect.x + gGpuOverlayRect.w,
+                destRect.x + destRect.w);
+            const int bottom = std::max(gGpuOverlayRect.y + gGpuOverlayRect.h,
+                destRect.y + destRect.h);
+            gGpuOverlayRect.x = std::min(gGpuOverlayRect.x, destRect.x);
+            gGpuOverlayRect.y = std::min(gGpuOverlayRect.y, destRect.y);
+            gGpuOverlayRect.w = right - gGpuOverlayRect.x;
+            gGpuOverlayRect.h = bottom - gGpuOverlayRect.y;
+        }
     }
 }
 
@@ -551,6 +571,10 @@ static bool createRenderer(int width, int height)
             rendererInfo.name != nullptr ? rendererInfo.name : "unknown",
             gSdlRendererHardwareAccelerated ? "accelerated" : "software",
             (rendererInfo.flags & SDL_RENDERER_TARGETTEXTURE) != 0 ? "yes" : "no");
+        debugPrint("GPU first-person backend: %s\n",
+            screenSupportsGpuFirstPersonPass() && screenHasOpenGLContext()
+                ? "available for isolated shader integration"
+                : "CPU fallback");
     }
 
     if (SDL_RenderSetLogicalSize(gSdlRenderer, width, height) != 0) {
@@ -693,8 +717,8 @@ void renderPresent()
     if (hasActiveClip) {
         SDL_RenderSetClipRect(gSdlRenderer, nullptr);
     }
-    for (const SDL_Rect& overlayRect : gGpuOverlayRects) {
-        SDL_RenderCopy(gSdlRenderer, gSdlTexture, &overlayRect, &overlayRect);
+    if (gGpuHasOverlayRect) {
+        SDL_RenderCopy(gSdlRenderer, gSdlTexture, &gGpuOverlayRect, &gGpuOverlayRect);
     }
     // render movie SDL texture if present
     movieRenderDirectOverlay();
