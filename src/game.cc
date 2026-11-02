@@ -1649,6 +1649,10 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
             }
         }
         break;
+    case KEY_F8:
+        debugPrint("GPU first-person experimental mode: %s\n",
+            screenToggleGpuFirstPersonExperimentalMode() ? "armed" : "disarmed");
+        break;
     case KEY_F9:
         tileFirstPersonPreviewToggleTopology();
         break;

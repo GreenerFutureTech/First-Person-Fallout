@@ -59,6 +59,25 @@ bool screenIsHardwareAccelerated();
 const char* screenGetRendererName();
 bool screenSupportsGpuFirstPersonPass();
 bool screenHasOpenGLContext();
+bool screenSupportsGpuFirstPersonShaders();
+bool screenUsesGpuFirstPersonScene();
+bool screenToggleGpuFirstPersonExperimentalMode();
+bool screenGpuFirstPersonExperimentalModeEnabled();
+bool screenGpuFirstPersonStagedInputsReady();
+void screenGpuFirstPersonMarkFrameActive(bool active);
+bool screenGpuFirstPersonPresentationEligible();
+bool gpuFirstPersonPresentStagedFloor();
+bool gpuFirstPersonBeginScene();
+void gpuFirstPersonEndScene();
+void gpuFirstPersonStageFloorCache(const unsigned char* pixels, int width, int height);
+void gpuFirstPersonInvalidateFloorCachePalette();
+void gpuFirstPersonStageCamera(double cameraX, double cameraY,
+    double directionX, double directionY, double cameraPlaneX, double cameraPlaneY,
+    double mapWidth, double mapHeight);
+bool gpuFirstPersonDrawStagedFloor(double cameraX, double cameraY,
+    double directionX, double directionY, double cameraPlaneX, double cameraPlaneY,
+    double mapWidth, double mapHeight);
+void gpuFirstPersonStageWallColumns(const float* columns, int width);
 void gpuBillboardBeginFrame();
 void gpuBillboardMarkSceneComplete();
 void gpuBillboardClear();

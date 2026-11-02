@@ -2278,6 +2278,27 @@ void objectVisitAll(ObjectVisitorProc* visitor, void* context)
     }
 }
 
+void objectVisitAllAtElevation(MapElevation elevation, ObjectVisitorProc* visitor, void* context)
+{
+    if (visitor == nullptr) {
+        return;
+    }
+
+    for (int tile = 0; tile < HEX_GRID_SIZE; tile++) {
+        for (ObjectListNode* node = gObjectListHeadByTile[tile]; node != nullptr; node = node->next) {
+            if (node->obj->elevation == elevation) {
+                visitor(node->obj, context);
+            }
+        }
+    }
+
+    for (ObjectListNode* node = gObjectListHead; node != nullptr; node = node->next) {
+        if (node->obj->elevation == elevation) {
+            visitor(node->obj, context);
+        }
+    }
+}
+
 // 0x48B48C obj_find_first_at
 Object* objectFindFirstAtElevation(MapElevation elevation)
 {
