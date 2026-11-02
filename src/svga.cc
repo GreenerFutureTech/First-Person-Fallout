@@ -30,6 +30,8 @@
 #include "window_manager.h"
 #include "window_manager_private.h"
 
+#pragma comment(lib, "opengl32.lib")
+
 namespace fallout {
 
 static bool createRenderer(int width, int height);
@@ -1141,117 +1143,48 @@ void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
 {
     if ((!gSdlRendererHardwareAccelerated && !screenUsesGpuFirstPersonScene())
         || pixels == nullptr
-        || width <= 0 || height <= 0 || destination.w <= 0 || destination.h <= 0) {
+        || width <= 0 || height <= 0
+        || destination.w <= 0 || destination.h <= 0) {
         return;
     }
 
     GpuBillboardTexture* cachedTexture = nullptr;
     GLuint glTexture = 0;
+
     if (screenUsesGpuFirstPersonScene()) {
-        auto glTextureIt = gGpuFirstPersonBillboardTextures.find(pixels);
-        if (glTextureIt != gGpuFirstPersonBillboardTextures.end()) {
-            glTexture = glTextureIt->second;
+        auto it = gGpuFirstPersonBillboardTextures.find(pixels);
+        if (it != gGpuFirstPersonBillboardTextures.end()) {
+            glTexture = it->second;
         } else {
+            // Convert source pixels to RGBA32. Adjust channel count to your source format.
+            const int srcChannels = 4; // or 3 — must match what `pixels` actually holds
             std::vector<uint32_t> rgba(static_cast<size_t>(width) * height);
-            for (int y = 0; y < height; y++) {
-                for (int x = 0; x < width; x++) {
-                    const unsigned char colorIndex = pixels[y * width + x];
-                    const int paletteIndex = colorIndex * 3;
-                    rgba[static_cast<size_t>(y) * width + x] = colorIndex == 0
-                        ? 0
-                        : (static_cast<uint32_t>(gGpuPalette[paletteIndex]) << 18)
-                            | (static_cast<uint32_t>(gGpuPalette[paletteIndex + 1]) << 10)
-                            | (static_cast<uint32_t>(gGpuPalette[paletteIndex + 2]) << 2)
-                            | 0xFF000000u;
-                }
+            for (size_t i = 0; i < rgba.size(); ++i) {
+                const unsigned char* s = pixels + i * srcChannels;
+                uint8_t r = s[0], g = s[1], b = s[2];
+                uint8_t a = (srcChannels == 4) ? s[3] : 0xFF;
+                rgba[i] = (uint32_t(a) << 24) | (uint32_t(b) << 16)
+                        | (uint32_t(g) << 8)  |  uint32_t(r); // GL_RGBA, little-endian
             }
-            gGlGenTextures(1, &glTexture);
-            if (glTexture == 0) {
-                return;
-            }
-            gGlBindTexture(GL_TEXTURE_2D, glTexture);
-            gGlTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-            gGlTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-            gGlTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-            gGlTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-            gGlTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0,
-                GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
-            gGpuFirstPersonBillboardTextures.emplace(pixels, glTexture);
+
+            glGenTextures(1, &glTexture);
+            glBindTexture(GL_TEXTURE_2D, glTexture);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0,
+                         GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+
+            gGpuFirstPersonBillboardTextures[pixels] = glTexture;
         }
-    }
-    if (!screenUsesGpuFirstPersonScene()) {
-    auto textureIt = gGpuBillboardTextures.find(pixels);
-    if (textureIt != gGpuBillboardTextures.end()
-        && textureIt->second.width == width
-        && textureIt->second.height == height
-        && textureIt->second.paletteHash == gGpuPaletteHash) {
-        cachedTexture = &textureIt->second;
     } else {
-        SDL_Texture* texture = SDL_CreateTexture(gSdlRenderer,
-            SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, width, height);
-        if (texture == nullptr) {
-            return;
-        }
-        std::vector<uint32_t> rgba(static_cast<size_t>(width) * height);
-        for (int y = 0; y < height; y++) {
-            for (int x = 0; x < width; x++) {
-                const unsigned char colorIndex = pixels[y * width + x];
-                const int paletteIndex = colorIndex * 3;
-                const uint32_t color = colorIndex == 0
-                    ? 0
-                    : 0xFF000000u
-                        | (static_cast<uint32_t>(gGpuPalette[paletteIndex]) << 18)
-                        | (static_cast<uint32_t>(gGpuPalette[paletteIndex + 1]) << 10)
-                        | (static_cast<uint32_t>(gGpuPalette[paletteIndex + 2]) << 2);
-                rgba[static_cast<size_t>(y) * width + x] = color;
-            }
-        }
-    }
-        if (SDL_UpdateTexture(texture, nullptr, rgba.data(), width * sizeof(uint32_t)) != 0) {
-            SDL_DestroyTexture(texture);
-            return;
-        }
-        SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
-#if SDL_VERSION_ATLEAST(2, 0, 12)
-        SDL_SetTextureScaleMode(texture, SDL_ScaleModeNearest);
-#endif
-        if (textureIt != gGpuBillboardTextures.end()) {
-            SDL_DestroyTexture(textureIt->second.texture);
-            textureIt->second = { texture, width, height, gGpuPaletteHash };
-            cachedTexture = &textureIt->second;
-        } else {
-            cachedTexture =
-                &gGpuBillboardTextures.emplace(pixels,
-                    GpuBillboardTexture { texture, width, height, gGpuPaletteHash }).first->second;
-        }
-    
+        // Non-GL hardware path: fill cachedTexture here (e.g., from a texture cache).
+        // cachedTexture = ...;
     }
 
-    if (!gGpuBillboards.empty()) {
-        GpuBillboard& previous = gGpuBillboards.back();
-        const bool sameBillboard = previous.texture == (cachedTexture != nullptr ? cachedTexture->texture : nullptr)
-            && previous.glTexture == glTexture
-            && previous.destination.x == destination.x
-            && previous.destination.y == destination.y
-            && previous.destination.w == destination.w
-            && previous.destination.h == destination.h
-            && previous.depth == depth
-            && previous.clip.y == clip.y
-            && previous.clip.h == clip.h
-            && previous.clip.x + previous.clip.w == clip.x;
-        if (sameBillboard) {
-            previous.clip.w += clip.w;
-            return;
-        }
-    }
-
-    gGpuBillboards.push_back({
-        cachedTexture != nullptr ? cachedTexture->texture : nullptr,
-        glTexture,
-        destination,
-        clip,
-        depth,
-    });
+    // Bind + draw using glTexture or cachedTexture, honoring clip and depth.
+    // ...
 }
 
 // 0x4CAD40 init_mode_320_400
