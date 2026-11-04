@@ -213,8 +213,11 @@ int mouseSetFrame(unsigned char* frame, int width, int height, int pitch, int ho
     bool cursorWasHidden = gCursorIsHidden;
     if (!gCursorIsHidden && gMouseInitialized) {
         gCursorIsHidden = true;
+        gpuBillboardHideCursor();
         mouseGetRect(&rect);
+        gpuBillboardBeginCursorRestore();
         windowRefreshAll(&rect);
+        gpuBillboardEndCursorRestore();
     }
 
     if (width != gMouseCursorWidth || height != gMouseCursorHeight) {
@@ -342,13 +345,17 @@ void mouseShowCursor()
             clipY = _scr_size.top - gMouseCursorY;
             clipHeight = gMouseCursorHeight - (_scr_size.top - gMouseCursorY);
         }
-
         gMouseCursorData = cursorData;
+        gpuBillboardBeginCursorDraw();
         if (_mouse_blit_trans && gCursorIsHidden) {
             _mouse_blit_trans(_mouse_shape, gMouseCursorPitch, gMouseCursorHeight, clipX, clipY, clipWidth, clipHeight, clipX + gMouseCursorX, clipY + gMouseCursorY, _mouse_trans);
         } else {
             _mouse_blit(gMouseCursorData, gMouseCursorWidth, gMouseCursorHeight, clipX, clipY, clipWidth, clipHeight, clipX + gMouseCursorX, clipY + gMouseCursorY);
         }
+        gpuBillboardEndCursorDraw();
+        gpuBillboardSetCursor(_mouse_shape, gMouseCursorWidth, gMouseCursorHeight,
+            gMouseCursorPitch, static_cast<unsigned char>(_mouse_trans),
+            gMouseCursorX, gMouseCursorY);
 
         cursorData = gMouseCursorData;
         gCursorIsHidden = false;
@@ -369,7 +376,10 @@ void mouseHideCursor()
             rect.bottom = gMouseCursorY + gMouseCursorHeight - 1;
 
             gCursorIsHidden = true;
+            gpuBillboardHideCursor();
+            gpuBillboardBeginCursorRestore();
             windowRefreshAll(&rect);
+            gpuBillboardEndCursorRestore();
         }
     }
 }
@@ -693,7 +703,9 @@ void _mouse_simulate_input(int delta_x, int delta_y, int buttons)
         }
         _mouse_clip();
 
+        gpuBillboardBeginCursorRestore();
         windowRefreshAll(&mouseRect);
+        gpuBillboardEndCursorRestore();
 
         mouseShowCursor();
 
