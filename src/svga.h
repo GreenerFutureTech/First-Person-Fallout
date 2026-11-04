@@ -62,6 +62,13 @@ bool screenHasOpenGLContext();
 void gpuBillboardBeginFrame();
 void gpuBillboardMarkSceneComplete();
 void gpuBillboardClear();
+void gpuBillboardBeginCursorRestore();
+void gpuBillboardEndCursorRestore();
+void gpuBillboardBeginCursorDraw();
+void gpuBillboardEndCursorDraw();
+void gpuBillboardHideCursor();
+void gpuBillboardSetCursor(const unsigned char* pixels, int width, int height,
+    int pitch, unsigned char transparentColor, int x, int y);
 void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
     const SDL_Rect& destination, const SDL_Rect& clip, double depth);
 

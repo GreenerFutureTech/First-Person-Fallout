@@ -536,8 +536,8 @@ void gameMouseRefresh()
         return;
     }
 
-    if (tileFirstPersonPreviewIsEnabled() && !cursorIsHidden()) {
-        if (gGameMouseCursor == MOUSE_CURSOR_NONE) {
+    if (tileFirstPersonPreviewIsEnabled()) {
+        if (!cursorIsHidden() && gGameMouseCursor == MOUSE_CURSOR_NONE) {
             gameMouseSetCursor(MOUSE_CURSOR_ARROW);
         }
         return;
