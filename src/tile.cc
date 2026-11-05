@@ -20,6 +20,7 @@
 #include "critter.h"
 #include "debug.h"
 #include "draw.h"
+#include "first_person_sky.h"
 #include "game_mouse.h"
 #include "input.h"
 #include "light.h"
@@ -1073,45 +1074,13 @@ static void tileRenderFirstPersonPreview()
     gFirstPersonPreviewDoorHitTargets.clear();
 
     const int horizonY = gTileWindowHeight / 2;
-    bufferFill(gTileWindowBuffer,
-        gTileWindowWidth,
-        horizonY,
-        gTileWindowPitch,
-        COLOR_LIGHT_BLUE);
+    firstPersonSkyRender(gTileWindowBuffer, gTileWindowWidth, gTileWindowHeight,
+        gTileWindowPitch, tileFirstPersonPreviewGetYaw(), kFieldOfViewScale);
     bufferFill(gTileWindowBuffer + horizonY * gTileWindowPitch,
         gTileWindowWidth,
         gTileWindowHeight - horizonY,
         gTileWindowPitch,
         COLOR_DULL_BROWN);
-
-    // A low-resolution sky and distant desert ridge give outdoor maps a simple
-    // horizon without adding another texture or asset dependency.
-    constexpr int kSkylineStep = 8;
-    const double skyYaw = tileFirstPersonPreviewGetYaw();
-    const int panoramaWidth = std::max(kSkylineStep, gTileWindowWidth * 2);
-    const int panoramaSegments = std::max(1, panoramaWidth / kSkylineStep);
-    const int parallaxOffset = static_cast<int>(skyYaw * panoramaWidth / 360.0);
-    for (int x = 0; x < gTileWindowWidth; x += kSkylineStep) {
-        const int panoramaX = (x + parallaxOffset) % panoramaWidth;
-        const int segment = (panoramaX / kSkylineStep) % panoramaSegments;
-        unsigned int noise = static_cast<unsigned int>(segment) * 1103515245u + 12345u;
-        noise ^= noise >> 11;
-        const int ridgeHeight = std::max(2, horizonY / 12
-            + static_cast<int>(noise % static_cast<unsigned int>(std::max(1, horizonY / 10))));
-        const int ridgeTop = std::max(0, horizonY - ridgeHeight);
-        const int ridgeWidth = std::min(kSkylineStep, gTileWindowWidth - x);
-        bufferFill(gTileWindowBuffer + ridgeTop * gTileWindowPitch + x,
-            ridgeWidth,
-            horizonY - ridgeTop,
-            gTileWindowPitch,
-            COLOR_SAGE_GREEN);
-        const int foregroundHeight = std::max(1, ridgeHeight / 3);
-        bufferFill(gTileWindowBuffer + (horizonY - foregroundHeight) * gTileWindowPitch + x,
-            ridgeWidth,
-            foregroundHeight,
-            gTileWindowPitch,
-            COLOR_DULL_BROWN);
-    }
 
     gFirstPersonPreviewWallCells.assign(gHexGridSize, 0);
     gFirstPersonPreviewWallOrientations.assign(gHexGridSize, 0);

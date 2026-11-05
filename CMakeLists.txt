@@ -115,6 +115,8 @@ set(FALLOUT_ENGINE_SOURCES
     "src/file_find.h"
     "src/file_utils.cc"
     "src/file_utils.h"
+    "src/first_person_sky.cc"
+    "src/first_person_sky.h"
     "src/font_manager.cc"
     "src/font_manager.h"
     "src/game_config.cc"
