@@ -2552,22 +2552,13 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                 || objectType == OBJ_TYPE_ITEM)
             && screenIsHardwareAccelerated()) {
             bool hasVisibleColumn = false;
-            const int clippedOpaqueTop = std::max(0, opaqueTop);
-            const int clippedOpaqueBottom = std::min(gTileWindowHeight, opaqueBottom);
             for (int x = firstOpaqueColumn; x < lastColumn; x++) {
-                for (int y = clippedOpaqueTop; y < clippedOpaqueBottom; y++) {
-                    if (transformY < tileFirstPersonGetWallDepthAt(
-                            x,
-                            y,
-                            renderContext->horizonY,
-                            renderContext->wallDepths,
-                            renderContext->wallSillDepths,
-                            renderContext->doorCapDepths)) {
-                        hasVisibleColumn = true;
-                        break;
-                    }
-                }
-                if (hasVisibleColumn) {
+                const double visibleDepth = x < renderContext->horizonY
+                    ? (*renderContext->wallDepths)[x]
+                    : std::min((*renderContext->wallDepths)[x],
+                        (*renderContext->wallSillDepths)[x]);
+                if (transformY < visibleDepth) {
+                    hasVisibleColumn = true;
                     break;
                 }
             }
@@ -2584,65 +2575,53 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                 return;
             }
             const SDL_Rect destination = { artLeft, artTop, artWidth, artHeight };
-            const auto submitVisibleRange = [&](int top, int bottom) {
+            const auto submitVisibleRange = [&](int top, int bottom, bool upper) {
                 if (top >= bottom) {
                     return;
                 }
-                std::vector<SDL_Rect> activeClips;
-                for (int y = top; y < bottom; y++) {
-                    std::vector<SDL_Rect> nextClips;
-                    std::vector<bool> retained(activeClips.size(), false);
-                    int runStart = firstOpaqueColumn;
-                    bool inRun = false;
-                    const auto finishRun = [&](int runEnd) {
-                        SDL_Rect clip = { runStart, y, runEnd - runStart, 1 };
-                        for (size_t index = 0; index < activeClips.size(); index++) {
-                            SDL_Rect& active = activeClips[index];
-                            if (!retained[index]
-                                && active.x == clip.x && active.w == clip.w
-                                && active.y + active.h == y) {
-                                active.h++;
-                                nextClips.push_back(active);
-                                retained[index] = true;
-                                return;
-                            }
-                        }
-                        nextClips.push_back(clip);
-                    };
-                    for (int x = firstOpaqueColumn; x <= lastColumn; x++) {
-                        const bool nextVisible = x < lastColumn
-                            && transformY < tileFirstPersonGetWallDepthAt(
-                                x,
-                                y,
-                                renderContext->horizonY,
-                                renderContext->wallDepths,
-                                renderContext->wallSillDepths,
-                                renderContext->doorCapDepths);
-                        if (nextVisible && !inRun) {
-                            runStart = x;
-                            inRun = true;
-                        } else if (!nextVisible && inRun) {
-                            finishRun(x);
-                            inRun = false;
-                        }
-                    }
-                    for (size_t index = 0; index < activeClips.size(); index++) {
-                        if (!retained[index]) {
+                int rangeStart = firstOpaqueColumn;
+                bool visible = false;
+                bool fullyVisible = true;
+                for (int x = firstOpaqueColumn; x <= lastColumn; x++) {
+                    const bool nextVisible = x < lastColumn
+                        && (upper
+                                ? transformY < (*renderContext->wallDepths)[x]
+                                : transformY < std::min(
+                                    (*renderContext->wallDepths)[x],
+                                    (*renderContext->wallSillDepths)[x]));
+                    if (x == firstOpaqueColumn) {
+                        visible = nextVisible;
+                    } else if (nextVisible != visible) {
+                        fullyVisible = false;
+                        if (visible) {
+                            const SDL_Rect clip = {
+                                rangeStart,
+                                top,
+                                x - rangeStart,
+                                bottom - top,
+                            };
                             gpuBillboardSubmit(frame.data, frame.width, frame.height,
-                                destination, activeClips[index], transformY);
+                                destination, clip, transformY);
                         }
+                        rangeStart = x;
+                        visible = nextVisible;
                     }
-                    activeClips.swap(nextClips);
                 }
-                for (const SDL_Rect& clip : activeClips) {
+                if (fullyVisible && visible) {
+                    const SDL_Rect clip = {
+                        firstOpaqueColumn,
+                        top,
+                        lastColumn - firstOpaqueColumn,
+                        bottom - top,
+                    };
                     gpuBillboardSubmit(frame.data, frame.width, frame.height,
                         destination, clip, transformY);
                 }
             };
             submitVisibleRange(std::max(0, opaqueTop),
-                std::min(gTileWindowHeight, std::min(opaqueBottom, renderContext->horizonY)));
+                std::min(gTileWindowHeight, std::min(opaqueBottom, renderContext->horizonY)), true);
             submitVisibleRange(std::max(0, std::max(opaqueTop, renderContext->horizonY)),
-                std::min(gTileWindowHeight, opaqueBottom));
+                std::min(gTileWindowHeight, opaqueBottom), false);
             if (objectType != OBJ_TYPE_SCENERY) {
                 textObjectsRenderForOwner(object,
                     gTileWindowBuffer,
