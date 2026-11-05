@@ -126,6 +126,14 @@ struct TileFirstPersonObjectHitTarget {
     double depth;
 };
 
+// Ray traversal retains at most one door cap per column. Bottom is exclusive,
+// matching billboard clip rectangles; an empty span contributes no occlusion.
+struct TileFirstPersonDoorCapSpan {
+    int top = 0;
+    int bottom = 0;
+    double depth = std::numeric_limits<double>::infinity();
+};
+
 struct TileFirstPersonActorRenderContext {
     MapElevation elevation;
     double cameraX;
@@ -138,8 +146,7 @@ struct TileFirstPersonActorRenderContext {
     int horizonY;
     std::vector<double>* wallDepths;
     std::vector<double>* wallSillDepths;
-    std::vector<double>* doorCapDepths;
-    bool hasDoorCaps;
+    std::vector<TileFirstPersonDoorCapSpan>* doorCapDepths;
     std::vector<double>* actorDepths;
     std::vector<unsigned int>* actorDepthStamps;
     unsigned int actorDepthStamp;
@@ -158,7 +165,7 @@ struct TileFirstPersonExitGridRenderContext {
     int horizonY;
     std::vector<double>* wallDepths;
     std::vector<double>* wallSillDepths;
-    std::vector<double>* doorCapDepths;
+    std::vector<TileFirstPersonDoorCapSpan>* doorCapDepths;
 };
 
 static void tileSetBorder(int windowWidth, int windowHeight, int hexGridWidth, int hexGridHeight);
@@ -1310,10 +1317,8 @@ static void tileRenderFirstPersonPreview()
     wallDepths.assign(gTileWindowWidth, std::numeric_limits<double>::infinity());
     static std::vector<double> wallSillDepths;
     wallSillDepths.assign(gTileWindowWidth, std::numeric_limits<double>::infinity());
-    static std::vector<double> doorCapDepths;
-    doorCapDepths.assign(
-        static_cast<size_t>(gTileWindowWidth) * gTileWindowHeight,
-        std::numeric_limits<double>::infinity());
+    static std::vector<TileFirstPersonDoorCapSpan> doorCapDepths;
+    doorCapDepths.assign(gTileWindowWidth, TileFirstPersonDoorCapSpan {});
     bool hasDoorCaps = false;
     static std::vector<double> actorDepths;
     static std::vector<unsigned int> actorDepthStamps;
@@ -1576,6 +1581,10 @@ static void tileRenderFirstPersonPreview()
             const int distanceShade = std::min(48, static_cast<int>(distance * 7.0));
             const int light = std::max(48, faceShade - distanceShade);
             const int wallRenderStep = type == 3 || type == 5 ? 1 : 2;
+            if (type == 5 && wallTop <= wallBottom) {
+                hasDoorCaps = true;
+                doorCapDepths[x] = { wallTop, wallBottom + 1, distance };
+            }
             for (int y = wallTop; y <= wallBottom; y += wallRenderStep) {
                 const bool brickTexture = type != 3 || y < doorSplitY;
                 const auto& texture = brickTexture
@@ -1593,19 +1602,8 @@ static void tileRenderFirstPersonPreview()
                 const Color texel = texture[textureY * kFirstPersonWallTextureSize + textureX];
                 const unsigned char color = intensityColorTable[texel][light];
                 gTileWindowBuffer[y * gTileWindowPitch + x] = color;
-                if (type == 5) {
-                    hasDoorCaps = true;
-                    const size_t depthIndex = static_cast<size_t>(y) * gTileWindowWidth + x;
-                    doorCapDepths[depthIndex] = std::min(doorCapDepths[depthIndex], distance);
-                }
                 if (wallRenderStep == 2 && y + 1 <= wallBottom) {
                     gTileWindowBuffer[(y + 1) * gTileWindowPitch + x] = color;
-                    if (type == 5) {
-                        const size_t depthIndex =
-                            static_cast<size_t>(y + 1) * gTileWindowWidth + x;
-                        doorCapDepths[depthIndex] =
-                            std::min(doorCapDepths[depthIndex], distance);
-                    }
                 }
             }
         };
@@ -1636,7 +1634,7 @@ static void tileRenderFirstPersonPreview()
         horizonY,
         &wallDepths,
         &wallSillDepths,
-        &doorCapDepths,
+        hasDoorCaps ? &doorCapDepths : nullptr,
     };
     tileFirstPersonRenderExitGridMarkers(gFirstPersonPreviewExitGridTiles, &exitGridContext);
 
@@ -1652,8 +1650,7 @@ static void tileRenderFirstPersonPreview()
         horizonY,
         &wallDepths,
         &wallSillDepths,
-        &doorCapDepths,
-        hasDoorCaps,
+        hasDoorCaps ? &doorCapDepths : nullptr,
         &actorDepths,
         &actorDepthStamps,
         actorDepthStamp,
@@ -1872,14 +1869,16 @@ static double tileFirstPersonGetWallDepthAt(
     int horizonY,
     const std::vector<double>* wallDepths,
     const std::vector<double>* wallSillDepths,
-    const std::vector<double>* doorCapDepths)
+    const std::vector<TileFirstPersonDoorCapSpan>* doorCapDepths)
 {
     double depth = y < horizonY
         ? (*wallDepths)[x]
         : std::min((*wallDepths)[x], (*wallSillDepths)[x]);
     if (doorCapDepths != nullptr) {
-        const size_t depthIndex = static_cast<size_t>(y) * gTileWindowWidth + x;
-        depth = std::min(depth, (*doorCapDepths)[depthIndex]);
+        const TileFirstPersonDoorCapSpan& cap = (*doorCapDepths)[x];
+        if (y >= cap.top && y < cap.bottom) {
+            depth = std::min(depth, cap.depth);
+        }
     }
     return depth;
 }
@@ -2548,19 +2547,23 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
             bool hasVisibleColumn = false;
             const int clippedOpaqueTop = std::max(0, opaqueTop);
             const int clippedOpaqueBottom = std::min(gTileWindowHeight, opaqueBottom);
+            // Within each horizon band, wall depth is constant vertically and
+            // a door cap is one contiguous interval. If neither endpoint is
+            // visible, the entire band is hidden; no per-pixel scan is needed.
+            const auto bandVisible = [&](int x, int top, int bottom) {
+                return top < bottom
+                    && (transformY < tileFirstPersonGetWallDepthAt(x, top,
+                            renderContext->horizonY, renderContext->wallDepths,
+                            renderContext->wallSillDepths, renderContext->doorCapDepths)
+                        || transformY < tileFirstPersonGetWallDepthAt(x, bottom - 1,
+                            renderContext->horizonY, renderContext->wallDepths,
+                            renderContext->wallSillDepths, renderContext->doorCapDepths));
+            };
             for (int x = firstOpaqueColumn; x < lastColumn; x++) {
-                for (int y = clippedOpaqueTop; y < clippedOpaqueBottom; y++) {
-                    if (transformY < tileFirstPersonGetWallDepthAt(
-                            x,
-                            y,
-                            renderContext->horizonY,
-                            renderContext->wallDepths,
-                            renderContext->wallSillDepths,
-                            renderContext->doorCapDepths)) {
-                        hasVisibleColumn = true;
-                        break;
-                    }
-                }
+                hasVisibleColumn = bandVisible(x, clippedOpaqueTop,
+                                       std::min(clippedOpaqueBottom, renderContext->horizonY))
+                    || bandVisible(x, std::max(clippedOpaqueTop, renderContext->horizonY),
+                        clippedOpaqueBottom);
                 if (hasVisibleColumn) {
                     break;
                 }
@@ -2580,6 +2583,41 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
             const SDL_Rect destination = { artLeft, artTop, artWidth, artHeight };
             const auto submitVisibleRange = [&](int top, int bottom) {
                 if (top >= bottom) {
+                    return;
+                }
+                bool overlapsDoorCap = false;
+                if (renderContext->doorCapDepths != nullptr) {
+                    for (int x = firstOpaqueColumn; x < lastColumn; x++) {
+                        const TileFirstPersonDoorCapSpan& cap = (*renderContext->doorCapDepths)[x];
+                        if (cap.top < cap.bottom && cap.top < bottom && cap.bottom > top
+                            && transformY >= cap.depth) {
+                            overlapsDoorCap = true;
+                            break;
+                        }
+                    }
+                }
+                if (!overlapsDoorCap) {
+                    // Each call stays on one side of the horizon. Visibility
+                    // therefore depends only on x; merge adjacent columns into
+                    // full-height clips without allocating vectors per row.
+                    int runStart = firstOpaqueColumn;
+                    bool inRun = false;
+                    for (int x = firstOpaqueColumn; x <= lastColumn; x++) {
+                        const bool visible = x < lastColumn
+                            && transformY < (top < renderContext->horizonY
+                                    ? (*renderContext->wallDepths)[x]
+                                    : std::min((*renderContext->wallDepths)[x],
+                                          (*renderContext->wallSillDepths)[x]));
+                        if (visible && !inRun) {
+                            runStart = x;
+                            inRun = true;
+                        } else if (!visible && inRun) {
+                            const SDL_Rect clip = { runStart, top, x - runStart, bottom - top };
+                            gpuBillboardSubmit(frame.data, frame.width, frame.height,
+                                destination, clip, transformY);
+                            inRun = false;
+                        }
+                    }
                     return;
                 }
                 std::vector<SDL_Rect> activeClips;

@@ -129,6 +129,19 @@ map conversion logic should get focused tests if they are introduced.
 
 ### GPU billboard migration plan
 
+Current checkout optimization (November 2026): door-top occlusion is stored as
+one vertical span per screen column, matching the single cap retained by ray
+traversal, rather than a full-resolution double depth buffer. Empty scenes
+skip cap-depth queries. GPU billboard visibility rejection checks the endpoints
+of each horizon band; bands without an overlapping occluding cap are clipped
+once per column and adjacent visible columns are submitted as rectangles.
+Bands overlapping caps retain the existing detailed clipping path. This removes
+resolution-dependent work in the common case without changing door geometry.
+Randomized algorithm-level comparisons against dense per-pixel depth passed;
+native compilation and in-game 1080p/1440p comparisons remain pending because
+the local Visual Studio/CMake toolchain was unavailable. Validate open/closed
+doors, sprites crossing door tops, window sills, and CPU fallback before release.
+
 The current F11 renderer is a CPU software renderer. `tileRenderFirstPersonPreview`
 writes palette indices into the shared 8-bit window buffer; SDL uploads that
 completed image to a texture afterward. The GPU therefore does not accelerate
