@@ -2138,11 +2138,15 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                             : isTree || isTallScenery ? 1.2 : isMediumScenery ? 0.8 : 0.6)));
     const int projectedActorHeight = std::max(1, static_cast<int>(projectionScale * objectHeightScale));
     const int sceneryHeightLimit = std::max(1, static_cast<int>(gTileWindowHeight * 0.85));
-    const int actorHeight = std::min(
-        objectType == OBJ_TYPE_SCENERY
-            ? std::min(maximumActorHeight, sceneryHeightLimit)
-            : maximumActorHeight,
-        projectedActorHeight);
+    // Let trees grow beyond the viewport as the camera approaches instead of
+    // shrinking them to fit the scenery height limits.
+    const int actorHeight = isTree
+        ? projectedActorHeight
+        : std::min(
+            objectType == OBJ_TYPE_SCENERY
+                ? std::min(maximumActorHeight, sceneryHeightLimit)
+                : maximumActorHeight,
+            projectedActorHeight);
     const int projectedActorBottom = renderContext->horizonY
         + static_cast<int>(projectionScale * 0.5);
     const int actorBottom = isRock
