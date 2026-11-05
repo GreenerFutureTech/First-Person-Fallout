@@ -14,6 +14,7 @@
 
 #include "art.h"
 #include "animation.h"
+#include "billboard_clip_bands.h"
 #include "combat.h"
 #include "color.h"
 #include "critter.h"
@@ -2643,13 +2644,15 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                     return;
                 }
                 bool overlapsDoorCap = false;
+                static BillboardClipBands clipBands;
+                clipBands.reset(top, bottom);
                 if (renderContext->doorCapDepths != nullptr) {
                     for (int x = firstOpaqueColumn; x < lastColumn; x++) {
                         const TileFirstPersonDoorCapSpan& cap = (*renderContext->doorCapDepths)[x];
                         if (cap.top < cap.bottom && cap.top < bottom && cap.bottom > top
                             && transformY >= cap.depth) {
                             overlapsDoorCap = true;
-                            break;
+                            clipBands.addOccluder(cap.top, cap.bottom);
                         }
                     }
                 }
@@ -2677,20 +2680,28 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                     }
                     return;
                 }
-                std::vector<SDL_Rect> activeClips;
-                for (int y = top; y < bottom; y++) {
-                    std::vector<SDL_Rect> nextClips;
-                    std::vector<bool> retained(activeClips.size(), false);
+                // Depth is unchanged between cap edges. Scan each distinct
+                // band once instead of repeating the same work on every row.
+                const std::vector<int>& boundaries = clipBands.boundaries();
+                static std::vector<SDL_Rect> activeClips;
+                static std::vector<SDL_Rect> nextClips;
+                static std::vector<bool> retained;
+                activeClips.clear();
+                for (size_t band = 0; band + 1 < boundaries.size(); band++) {
+                    const int y = boundaries[band];
+                    const int bandHeight = boundaries[band + 1] - y;
+                    nextClips.clear();
+                    retained.assign(activeClips.size(), false);
                     int runStart = firstOpaqueColumn;
                     bool inRun = false;
                     const auto finishRun = [&](int runEnd) {
-                        SDL_Rect clip = { runStart, y, runEnd - runStart, 1 };
+                        SDL_Rect clip = { runStart, y, runEnd - runStart, bandHeight };
                         for (size_t index = 0; index < activeClips.size(); index++) {
                             SDL_Rect& active = activeClips[index];
                             if (!retained[index]
                                 && active.x == clip.x && active.w == clip.w
                                 && active.y + active.h == y) {
-                                active.h++;
+                                active.h += bandHeight;
                                 nextClips.push_back(active);
                                 retained[index] = true;
                                 return;
