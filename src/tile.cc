@@ -1275,19 +1275,19 @@ static void tileRenderFirstPersonPreview()
                     - rayDirectionYs[0]) * rowDistance
             : 0.0;
         for (int x = 0; x < gTileWindowWidth; x += kFloorRenderStep) {
-            const int mapX = static_cast<int>(floor(worldX));
-            const int mapY = static_cast<int>(floor(worldY));
-            if (mapX < 0 || mapX >= SQUARE_GRID_WIDTH
-                || mapY < 0 || mapY >= SQUARE_GRID_HEIGHT) {
+            if (worldX < 0.0 || worldX >= SQUARE_GRID_WIDTH
+                || worldY < 0.0 || worldY >= SQUARE_GRID_HEIGHT) {
                 worldX += worldXStep;
                 worldY += worldYStep;
                 continue;
             }
 
-            const int sampleX = std::min(kFloorCacheCellResolution - 1,
-                static_cast<int>((worldX - mapX) * kFloorCacheCellResolution));
-            const int sampleY = std::min(kFloorCacheCellResolution - 1,
-                static_cast<int>((worldY - mapY) * kFloorCacheCellResolution));
+            const int mapX = static_cast<int>(worldX);
+            const int mapY = static_cast<int>(worldY);
+            const int sampleX =
+                static_cast<int>((worldX - mapX) * kFloorCacheCellResolution);
+            const int sampleY =
+                static_cast<int>((worldY - mapY) * kFloorCacheCellResolution);
             const int cacheIndex = (mapY * SQUARE_GRID_WIDTH + mapX) * kFloorCacheCellArea
                 + sampleY * kFloorCacheCellResolution + sampleX;
             const unsigned char color = cachedFloorColors[cacheIndex];
