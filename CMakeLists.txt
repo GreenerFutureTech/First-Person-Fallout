@@ -140,6 +140,7 @@ set(FALLOUT_ENGINE_SOURCES
     "src/heap.h"
     "src/input.cc"
     "src/input.h"
+    "src/indexed_texture_palette.h"
     "src/interface.cc"
     "src/interface.h"
     "src/interpreter_extra.cc"

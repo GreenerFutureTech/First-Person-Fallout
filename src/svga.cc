@@ -17,6 +17,7 @@
 #include "dinput.h"
 #include "draw.h"
 #include "game.h"
+#include "indexed_texture_palette.h"
 #include "interface.h"
 #include "map.h"
 #include "memory.h"
@@ -62,7 +63,8 @@ struct GpuBillboardTexture {
     SDL_Texture* texture;
     int width;
     int height;
-    unsigned int paletteHash;
+    uint64_t paletteRevision;
+    IndexedTexturePalette palette;
 };
 
 enum class GpuOverlayType {
@@ -86,7 +88,7 @@ static SDL_Rect gGpuCursorRect {};
 static bool gGpuHasCursor = false;
 static std::unordered_map<const unsigned char*, GpuBillboardTexture> gGpuBillboardTextures;
 static unsigned char gGpuPalette[256 * 3];
-static unsigned int gGpuPaletteHash = 0;
+static uint64_t gGpuPaletteRevision = 0;
 
 // TODO: Remove once migration to update-render cycle is completed.
 FpsLimiter sharedFpsLimiter;
@@ -149,11 +151,9 @@ void gpuBillboardBeginFrame()
         gGpuBillboards.reserve(expectedBillboardCount);
     }
     unsigned char* palette = directDrawGetPalette();
-    gGpuPaletteHash = 2166136261u;
-    for (int index = 0; index < 256 * 3; index++) {
-        gGpuPalette[index] = palette[index];
-        gGpuPaletteHash ^= palette[index];
-        gGpuPaletteHash *= 16777619u;
+    if (memcmp(gGpuPalette, palette, sizeof(gGpuPalette)) != 0) {
+        memcpy(gGpuPalette, palette, sizeof(gGpuPalette));
+        gGpuPaletteRevision++;
     }
 }
 
@@ -275,19 +275,30 @@ void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
     auto textureIt = gGpuBillboardTextures.find(pixels);
     if (textureIt != gGpuBillboardTextures.end()
         && textureIt->second.width == width
-        && textureIt->second.height == height
-        && textureIt->second.paletteHash == gGpuPaletteHash) {
-        cachedTexture = &textureIt->second;
-    } else {
+        && textureIt->second.height == height) {
+        GpuBillboardTexture& candidate = textureIt->second;
+        // Color cycling changes a small palette range many times per second.
+        // Reuse textures whose opaque pixels do not use the changed colors.
+        // Check once per palette revision, not once per wall-clipped span.
+        if (candidate.paletteRevision == gGpuPaletteRevision
+            || candidate.palette.matches(gGpuPalette)) {
+            candidate.paletteRevision = gGpuPaletteRevision;
+            cachedTexture = &candidate;
+        }
+    }
+    if (cachedTexture == nullptr) {
         SDL_Texture* texture = SDL_CreateTexture(gSdlRenderer,
             SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, width, height);
         if (texture == nullptr) {
             return;
         }
+        IndexedTexturePalette texturePalette;
+        texturePalette.capture(gGpuPalette);
         std::vector<uint32_t> rgba(static_cast<size_t>(width) * height);
         for (int y = 0; y < height; y++) {
             for (int x = 0; x < width; x++) {
                 const unsigned char colorIndex = pixels[y * width + x];
+                texturePalette.useColor(colorIndex);
                 const int paletteIndex = colorIndex * 3;
                 const uint32_t color = colorIndex == 0
                     ? 0
@@ -308,12 +319,12 @@ void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
 #endif
         if (textureIt != gGpuBillboardTextures.end()) {
             SDL_DestroyTexture(textureIt->second.texture);
-            textureIt->second = { texture, width, height, gGpuPaletteHash };
+            textureIt->second = { texture, width, height, gGpuPaletteRevision, texturePalette };
             cachedTexture = &textureIt->second;
         } else {
             cachedTexture =
                 &gGpuBillboardTextures.emplace(pixels,
-                    GpuBillboardTexture { texture, width, height, gGpuPaletteHash }).first->second;
+                    GpuBillboardTexture { texture, width, height, gGpuPaletteRevision, texturePalette }).first->second;
         }
     }
 
