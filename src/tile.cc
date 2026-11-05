@@ -2147,6 +2147,7 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         + static_cast<int>(projectionScale * 0.5);
     const int actorBottom = isRock
         ? projectedActorBottom + std::max(20, actorHeight / 3)
+        : isTree ? projectedActorBottom
         : std::min(gTileWindowHeight, projectedActorBottom);
 
     const int spriteWidth = std::max(1, static_cast<int>(
