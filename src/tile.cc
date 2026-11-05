@@ -1819,10 +1819,6 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         return;
     }
 
-    // SHOW OBJECTS ONLY WITHIN 25 TILES
-    if (objectType == OBJ_TYPE_SCENERY && transformY > 24.0) {
-        return;
-    }
 
     const int screenCenterX = static_cast<int>(
         (gTileWindowWidth / 2.0) * (1.0 + transformX / transformY));

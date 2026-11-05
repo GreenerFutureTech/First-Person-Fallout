@@ -3244,6 +3244,10 @@ void _combat_turn_run()
         // until COMBAT_STATE_PLAYER_TURN is set again.
         gameHandleFirstPersonPreviewInput(inputGetInput());
 
+        if (tileFirstPersonPreviewIsEnabled()) {
+            tileFirstPersonPreviewRefresh();
+        }
+
         renderPresent();
         sharedFpsLimiter.throttle();
     }
@@ -3296,6 +3300,11 @@ static int _combat_input()
         } else {
             _scripts_check_state_in_combat();
             gameHandleKey(keyCode, true);
+        }
+
+        if (tileFirstPersonPreviewIsEnabled()) {
+            tileFirstPersonPreviewProcessPendingMove();
+            tileFirstPersonPreviewRefresh();
         }
 
         renderPresent();
