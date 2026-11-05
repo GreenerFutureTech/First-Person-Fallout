@@ -1185,6 +1185,31 @@ int windowGetAtPoint(int x, int y)
     return -1;
 }
 
+void windowGetVisibleRects(std::vector<Rect>& rects, int excludedWindowId)
+{
+    rects.clear();
+    if (!gWindowSystemInitialized) {
+        return;
+    }
+
+    for (int index = 1; index < gWindowsLength; index++) {
+        Window* window = gWindows[index];
+        if (window->id == excludedWindowId || (window->flags & WINDOW_HIDDEN) != 0) {
+            continue;
+        }
+
+        Rect rect {
+            std::max(window->rect.left, _scr_size.left),
+            std::max(window->rect.top, _scr_size.top),
+            std::min(window->rect.right, _scr_size.right),
+            std::min(window->rect.bottom, _scr_size.bottom),
+        };
+        if (rect.left <= rect.right && rect.top <= rect.bottom) {
+            rects.push_back(rect);
+        }
+    }
+}
+
 // 0x4D7918
 int windowGetWidth(int win)
 {

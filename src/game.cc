@@ -592,12 +592,8 @@ void gameHandleFirstPersonPreviewInput(int eventCode)
         tileFirstPersonPreviewLook(static_cast<int>(deltaX * settings.preferences.mouse_sensitivity));
     }
 
-    if (eventCode == -2) {
-        const int mouseState = mouseGetEvent();
-        if ((mouseState & MOUSE_EVENT_RIGHT_BUTTON_DOWN) != 0
-            && (mouseState & MOUSE_EVENT_RIGHT_BUTTON_REPEAT) == 0) {
-            gameFirstPersonPreviewSetMouseReleased(!gFirstPersonPreviewMouseReleased);
-        }
+    if (eventCode == INPUT_EVENT_FIRST_PERSON_RIGHT_CLICK) {
+        gameFirstPersonPreviewSetMouseReleased(!gFirstPersonPreviewMouseReleased);
     }
 }
 

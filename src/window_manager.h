@@ -225,6 +225,7 @@ Window* windowGetWindow(int win);
 unsigned char* windowGetBuffer(int win);
 Buffer2D windowGetBuffer2D(int win);
 int windowGetAtPoint(int x, int y);
+void windowGetVisibleRects(std::vector<Rect>& rects, int excludedWindowId);
 int windowGetWidth(int win);
 int windowGetHeight(int win);
 int windowGetRect(int win, Rect* rect);

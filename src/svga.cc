@@ -18,6 +18,7 @@
 #include "draw.h"
 #include "game.h"
 #include "interface.h"
+#include "map.h"
 #include "memory.h"
 #include "mouse.h"
 #include "movie.h"
@@ -813,6 +814,7 @@ void renderPresent()
     for (const SDL_Rect& restoreRect : gGpuCursorRestoreRects) {
         SDL_RenderCopy(gSdlRenderer, gSdlTexture, &restoreRect, &restoreRect);
     }
+    const bool firstPersonPreviewEnabled = tileFirstPersonPreviewIsEnabled();
     std::stable_sort(gGpuBillboards.begin(), gGpuBillboards.end(),
         [](const GpuBillboard& lhs, const GpuBillboard& rhs) {
             return lhs.depth > rhs.depth;
@@ -834,6 +836,19 @@ void renderPresent()
     }
     if (hasActiveClip) {
         SDL_RenderSetClipRect(gSdlRenderer, nullptr);
+    }
+    if (firstPersonPreviewEnabled) {
+        static std::vector<Rect> visibleWindowRects;
+        windowGetVisibleRects(visibleWindowRects, gIsoWindow);
+        for (const Rect& rect : visibleWindowRects) {
+            SDL_Rect windowRect {
+                rect.left,
+                rect.top,
+                rectGetWidth(&rect),
+                rectGetHeight(&rect),
+            };
+            SDL_RenderCopy(gSdlRenderer, gSdlTexture, &windowRect, &windowRect);
+        }
     }
     for (const SDL_Rect& overlayRect : gGpuOverlayRects) {
         SDL_RenderCopy(gSdlRenderer, gSdlTexture, &overlayRect, &overlayRect);

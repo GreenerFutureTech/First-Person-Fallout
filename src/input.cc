@@ -1008,7 +1008,12 @@ void _GNW95_process_message()
             if (e.type == SDL_MOUSEBUTTONDOWN || e.type == SDL_MOUSEBUTTONUP) {
                 inputHandleMouseClickHook(e.button.button, e.type == SDL_MOUSEBUTTONDOWN);
                 if (e.type == SDL_MOUSEBUTTONDOWN
-                    && tileFirstPersonPreviewIsEnabled()) {
+                    && tileFirstPersonPreviewIsEnabled()
+                    && !GameMode::isInGameMode(GameMode::kInventory)
+                    && !GameMode::isInGameMode(GameMode::kLoot)
+                    && !GameMode::isInGameMode(GameMode::kUseOn)
+                    && !GameMode::isInGameMode(GameMode::kBarter)
+                    && !GameMode::isInGameMode(GameMode::kCounter)) {
                     if (e.button.button == SDL_BUTTON_LEFT) {
                         enqueueInputEvent(INPUT_EVENT_FIRST_PERSON_LEFT_CLICK);
                     } else if (e.button.button == SDL_BUTTON_RIGHT) {

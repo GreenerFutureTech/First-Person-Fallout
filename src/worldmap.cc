@@ -24,6 +24,7 @@
 #include "db.h"
 #include "dbox.h"
 #include "debug.h"
+#include "dinput.h"
 #include "display_monitor.h"
 #include "draw.h"
 #include "game.h"
@@ -3421,10 +3422,48 @@ void wmWorldMap()
     wmWorldMapFunc(0);
 }
 
+class WorldmapFirstPersonMouseScope {
+public:
+    WorldmapFirstPersonMouseScope()
+        : _firstPersonPreviewWasEnabled(tileFirstPersonPreviewIsEnabled())
+        , _relativeModeWasEnabled(mouseDeviceUsesRelativeMode())
+        , _cursorWasHidden(cursorIsHidden())
+    {
+        if (_firstPersonPreviewWasEnabled) {
+            if (_relativeModeWasEnabled && !mouseDeviceSetRelativeModeForced(false)) {
+                debugPrint("Failed to release mouse for world map: %s\n", SDL_GetError());
+            }
+            mouseShowCursor();
+        }
+    }
+
+    ~WorldmapFirstPersonMouseScope()
+    {
+        if (!_firstPersonPreviewWasEnabled || !tileFirstPersonPreviewIsEnabled()) {
+            return;
+        }
+
+        if (_relativeModeWasEnabled && !mouseDeviceSetRelativeModeForced(true)) {
+            debugPrint("Failed to restore mouse mode after world map: %s\n", SDL_GetError());
+        }
+        if (_cursorWasHidden) {
+            mouseHideCursor();
+        } else {
+            mouseShowCursor();
+        }
+    }
+
+private:
+    bool _firstPersonPreviewWasEnabled;
+    bool _relativeModeWasEnabled;
+    bool _cursorWasHidden;
+};
+
 // 0x4BFE10 wmWorldMapFunc
 static int wmWorldMapFunc(int a1)
 {
     ScopedGameMode gm(GameMode::kWorldmap);
+    WorldmapFirstPersonMouseScope firstPersonMouseScope;
 
     wmResetTrailMarkers();
 
