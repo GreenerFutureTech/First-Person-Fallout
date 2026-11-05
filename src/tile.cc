@@ -1901,10 +1901,11 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
     const double projectionScale = gTileWindowHeight / transformY;
     constexpr double kCritterFullSizeDistance = 0.75;
     constexpr double kCritterReducedSizeDistance = 1.5;
+    constexpr double kMinimumCritterScale = 0.75;
     const double critterScale = std::clamp(
         (kCritterReducedSizeDistance - transformY)
             / (kCritterReducedSizeDistance - kCritterFullSizeDistance),
-        0.5,
+        kMinimumCritterScale,
         1.0);
     const double actorProjectionScale = objectType == OBJ_TYPE_CRITTER
         ? projectionScale * critterScale

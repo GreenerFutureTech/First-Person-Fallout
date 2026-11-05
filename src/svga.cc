@@ -813,12 +813,6 @@ void renderPresent()
     for (const SDL_Rect& restoreRect : gGpuCursorRestoreRects) {
         SDL_RenderCopy(gSdlRenderer, gSdlTexture, &restoreRect, &restoreRect);
     }
-    const bool firstPersonPreviewEnabled = tileFirstPersonPreviewIsEnabled();
-    if (firstPersonPreviewEnabled) {
-        for (const SDL_Rect& overlayRect : gGpuOverlayRects) {
-            SDL_RenderCopy(gSdlRenderer, gSdlTexture, &overlayRect, &overlayRect);
-        }
-    }
     std::stable_sort(gGpuBillboards.begin(), gGpuBillboards.end(),
         [](const GpuBillboard& lhs, const GpuBillboard& rhs) {
             return lhs.depth > rhs.depth;
@@ -841,10 +835,8 @@ void renderPresent()
     if (hasActiveClip) {
         SDL_RenderSetClipRect(gSdlRenderer, nullptr);
     }
-    if (!firstPersonPreviewEnabled) {
-        for (const SDL_Rect& overlayRect : gGpuOverlayRects) {
-            SDL_RenderCopy(gSdlRenderer, gSdlTexture, &overlayRect, &overlayRect);
-        }
+    for (const SDL_Rect& overlayRect : gGpuOverlayRects) {
+        SDL_RenderCopy(gSdlRenderer, gSdlTexture, &overlayRect, &overlayRect);
     }
     if (gGpuHasCursor && gGpuCursorTexture != nullptr) {
         SDL_RenderCopy(gSdlRenderer, gGpuCursorTexture, nullptr, &gGpuCursorRect);

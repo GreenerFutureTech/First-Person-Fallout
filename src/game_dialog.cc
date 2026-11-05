@@ -2812,6 +2812,63 @@ static void gameDialogBlitIsoWindowToDisplayBuffer()
         GAME_DIALOG_WINDOW_WIDTH);
 }
 
+static bool gameDialogRenderSpeakerInDisplayBuffer()
+{
+    if (!tileFirstPersonPreviewIsEnabled()
+        || gGameDialogSpeaker == nullptr
+        || FrmId(gGameDialogSpeaker).objectType() != OBJ_TYPE_CRITTER
+        || gGameDialogHeadFrmId.valid()) {
+        return false;
+    }
+
+    Rotation facingRotation = rotationIsValid(gGameDialogSpeaker->rotation)
+        ? gGameDialogSpeaker->rotation
+        : ROTATION_NE;
+    if (gDude != nullptr && tileIsValid(gGameDialogSpeaker->tile) && tileIsValid(gDude->tile)) {
+        if (gGameDialogSpeaker->tile == gDude->tile && rotationIsValid(gDude->rotation)) {
+            facingRotation = static_cast<Rotation>((gDude->rotation + ROTATION_COUNT / 2) % ROTATION_COUNT);
+        } else if (gGameDialogSpeaker->tile != gDude->tile) {
+            facingRotation = tileGetRotationTo(gGameDialogSpeaker->tile, gDude->tile);
+        }
+    }
+
+    CacheEntry* speakerFrmHandle = nullptr;
+    Art* speakerFrm = artLock(FrmId(gGameDialogSpeaker, ANIM_STAND, facingRotation), &speakerFrmHandle);
+    if (speakerFrm == nullptr) {
+        return false;
+    }
+
+    ConstBuffer2D speakerFrame = artGetFrameBuffer(speakerFrm, 0, facingRotation);
+    bool rendered = false;
+    if (speakerFrame && speakerFrame.width > 0 && speakerFrame.height > 0) {
+        int destWidth;
+        int destHeight;
+        if (static_cast<int64_t>(speakerFrame.width) * 200
+            > static_cast<int64_t>(speakerFrame.height) * 388) {
+            destWidth = 388;
+            destHeight = std::max(1, speakerFrame.height * destWidth / speakerFrame.width);
+        } else {
+            destHeight = 200;
+            destWidth = std::max(1, speakerFrame.width * destHeight / speakerFrame.height);
+        }
+
+        Buffer2D displayBuffer { gameDialogDisplayBuffer, 388, 200 };
+        blitBuffer2DScaledTrans(speakerFrame,
+            displayBuffer,
+            (displayBuffer.width - destWidth) / 2,
+            (displayBuffer.height - destHeight) / 2,
+            destWidth,
+            destHeight);
+        rendered = true;
+    }
+
+    if (artUnlock(speakerFrmHandle) == -1) {
+        debugPrint("\tError unlocking dialogue speaker art...\n");
+    }
+
+    return rendered;
+}
+
 static void gameDialogRenderMapInDisplayBuffer()
 {
     int oldCenterTile = gCenterTile;
@@ -4913,7 +4970,11 @@ void gameDialogRenderTalkingHead(Art* headFrm, int frame)
         return;
     }
 
-    if (headFrm != nullptr) {
+    const bool renderSpeaker = tileFirstPersonPreviewIsEnabled()
+        && gGameDialogSpeaker != nullptr
+        && FrmId(gGameDialogSpeaker).objectType() == OBJ_TYPE_CRITTER
+        && !gGameDialogHeadFrmId.valid();
+    if (headFrm != nullptr || renderSpeaker) {
         if (frame == 0) {
             _totalHotx = 0;
         }
@@ -4930,38 +4991,43 @@ void gameDialogRenderTalkingHead(Art* headFrm, int frame)
             debugPrint("\tError getting background data in display...\n");
         }
 
-        int width = artGetWidth(headFrm, frame);
-        int height = artGetHeight(headFrm, frame);
-        unsigned char* data = artGetFrameData(headFrm, frame);
+        const bool speakerRendered = renderSpeaker && gameDialogRenderSpeakerInDisplayBuffer();
+        if (!speakerRendered && headFrm != nullptr) {
+            int width = artGetWidth(headFrm, frame);
+            int height = artGetHeight(headFrm, frame);
+            unsigned char* data = artGetFrameData(headFrm, frame);
 
-        int rotationOffsetX;
-        int rotationOffsetY;
-        artGetRotationOffsets(headFrm, ROTATION_NE, &rotationOffsetX, &rotationOffsetY);
+            int rotationOffsetX;
+            int rotationOffsetY;
+            artGetRotationOffsets(headFrm, ROTATION_NE, &rotationOffsetX, &rotationOffsetY);
 
-        int frameOffsetX;
-        int frameOffsetY;
-        artGetFrameOffsets(headFrm, frame, ROTATION_NE, &frameOffsetX, &frameOffsetY);
-        (void)frameOffsetY;
+            int frameOffsetX;
+            int frameOffsetY;
+            artGetFrameOffsets(headFrm, frame, ROTATION_NE, &frameOffsetX, &frameOffsetY);
+            (void)frameOffsetY;
 
-        _totalHotx += frameOffsetX;
-        rotationOffsetX += _totalHotx;
+            _totalHotx += frameOffsetX;
+            rotationOffsetX += _totalHotx;
 
-        if (data != nullptr) {
-            int destWidth = GAME_DIALOG_WINDOW_WIDTH;
-            int destOffset = destWidth * (200 - height) + rotationOffsetX + (388 - width) / 2;
-            if (destOffset + destWidth * rotationOffsetY > 0) {
-                destOffset += destWidth * rotationOffsetY;
+            if (data != nullptr) {
+                int destWidth = GAME_DIALOG_WINDOW_WIDTH;
+                int destOffset = destWidth * (200 - height) + rotationOffsetX + (388 - width) / 2;
+                if (destOffset + destWidth * rotationOffsetY > 0) {
+                    destOffset += destWidth * rotationOffsetY;
+                }
+
+                blitBufferToBufferTrans(
+                    data,
+                    width,
+                    height,
+                    width,
+                    gameDialogDisplayBuffer + destOffset,
+                    destWidth);
+            } else {
+                debugPrint("\tError getting head data in display...\n");
             }
-
-            blitBufferToBufferTrans(
-                data,
-                width,
-                height,
-                width,
-                gameDialogDisplayBuffer + destOffset,
-                destWidth);
-        } else {
-            debugPrint("\tError getting head data in display...\n");
+        } else if (!speakerRendered) {
+            gameDialogRenderMapInDisplayBuffer();
         }
     } else {
         gameDialogRenderMapInDisplayBuffer();

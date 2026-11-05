@@ -592,14 +592,11 @@ void gameHandleFirstPersonPreviewInput(int eventCode)
         tileFirstPersonPreviewLook(static_cast<int>(deltaX * settings.preferences.mouse_sensitivity));
     }
 
-    if (eventCode == INPUT_EVENT_FIRST_PERSON_RIGHT_CLICK) {
-        gameFirstPersonPreviewSetMouseReleased(!gFirstPersonPreviewMouseReleased);
-    } else if (eventCode == -2) {
+    if (eventCode == -2) {
         const int mouseState = mouseGetEvent();
-        if (gFirstPersonPreviewMouseReleased
-            && (mouseState & MOUSE_EVENT_RIGHT_BUTTON_DOWN) != 0
+        if ((mouseState & MOUSE_EVENT_RIGHT_BUTTON_DOWN) != 0
             && (mouseState & MOUSE_EVENT_RIGHT_BUTTON_REPEAT) == 0) {
-            gameFirstPersonPreviewSetMouseReleased(false);
+            gameFirstPersonPreviewSetMouseReleased(!gFirstPersonPreviewMouseReleased);
         }
     }
 }
@@ -883,9 +880,34 @@ static void gameFirstPersonPreviewShowActionMenu(Object* targetObj, int mouseX, 
 }
 
 // 0x442D44
+static bool gameFirstPersonPreviewSetMouseReleased(bool enabled);
+
+class FirstPersonPreviewMouseReleaseScope {
+public:
+    FirstPersonPreviewMouseReleaseScope()
+        : _firstPersonPreviewWasEnabled(tileFirstPersonPreviewIsEnabled())
+        , _mouseWasReleased(gFirstPersonPreviewMouseReleased)
+    {
+        if (_firstPersonPreviewWasEnabled) {
+            gameFirstPersonPreviewSetMouseReleased(true);
+            mouseResetButtonState();
+        }
+    }
+
+    ~FirstPersonPreviewMouseReleaseScope()
+    {
+        if (_firstPersonPreviewWasEnabled && tileFirstPersonPreviewIsEnabled()) {
+            gameFirstPersonPreviewSetMouseReleased(_mouseWasReleased);
+        }
+    }
+
+private:
+    bool _firstPersonPreviewWasEnabled;
+    bool _mouseWasReleased;
+};
+
 int gameHandleKey(int eventCode, bool isInCombatMode)
 {
-    const bool firstPersonPreviewMouseWasReleased = gFirstPersonPreviewMouseReleased;
     gameHandleFirstPersonPreviewInput(eventCode);
 
     if (tileFirstPersonPreviewIsEnabled()
@@ -938,8 +960,7 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
     if (tileFirstPersonPreviewIsEnabled()
         && (eventCode == -1 || eventCode == -2 || eventCode == INPUT_EVENT_FIRST_PERSON_LEFT_CLICK)) {
         const int mouseState = mouseGetEvent();
-        if (firstPersonPreviewMouseWasReleased
-            && eventCode == -2
+        if (eventCode == -2
             && (mouseState & MOUSE_EVENT_RIGHT_BUTTON_DOWN) != 0
             && (mouseState & MOUSE_EVENT_RIGHT_BUTTON_REPEAT) == 0) {
             return 0;
@@ -1312,9 +1333,12 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
     case KEY_CTRL_Q:
     case KEY_CTRL_X:
     case KEY_F10:
+    {
         soundPlayFile("ib1p1xx1");
+        FirstPersonPreviewMouseReleaseScope mouseReleaseScope;
         showQuitConfirmationDialog();
         break;
+    }
     case KEY_TAB:
         if (interfaceBarEnabled()
             && gPressedPhysicalKeys[SDL_SCANCODE_LALT] == 0
@@ -1346,9 +1370,12 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
         }
         break;
     case KEY_CTRL_P:
+    {
         soundPlayFile("ib1p1xx1");
+        FirstPersonPreviewMouseReleaseScope mouseReleaseScope;
         showPause(false);
         break;
+    }
     case KEY_UPPERCASE_A:
     case KEY_LOWERCASE_A:
         if (interfaceBarEnabled()) {
@@ -1381,6 +1408,7 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
         if (interfaceBarEnabled()) {
             soundPlayFile("ib1p1xx1");
             bool isoWasEnabled = isoDisable();
+            FirstPersonPreviewMouseReleaseScope mouseReleaseScope;
             characterEditorShow(false);
             if (isoWasEnabled) {
                 isoEnable();
@@ -1414,6 +1442,7 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
         // options
         if (interfaceBarEnabled()) {
             soundPlayFile("ib1p1xx1");
+            FirstPersonPreviewMouseReleaseScope mouseReleaseScope;
             showOptions();
         }
         break;
@@ -1431,6 +1460,7 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                 showDialogBox(title, nullptr, 0, 192, 116, COLOR_AMBER, nullptr, COLOR_AMBER, 0);
             } else {
                 soundPlayFile("ib1p1xx1");
+                FirstPersonPreviewMouseReleaseScope mouseReleaseScope;
                 pipboyOpen(PIPBOY_OPEN_INTENT_UNSPECIFIED);
             }
         }
@@ -1443,6 +1473,7 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
 
             // NOTE: There is an `inc` for this value to build jump table which
             // is not needed.
+            FirstPersonPreviewMouseReleaseScope mouseReleaseScope;
             SkilldexRC rc = skilldexOpen();
 
             gameHandleSkilldexResult(rc);
@@ -1461,6 +1492,7 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                 showDialogBox(title, nullptr, 0, 192, 116, COLOR_AMBER, nullptr, COLOR_AMBER, 0);
             } else {
                 soundPlayFile("ib1p1xx1");
+                FirstPersonPreviewMouseReleaseScope mouseReleaseScope;
                 pipboyOpen(PIPBOY_OPEN_INTENT_REST);
             }
         }
@@ -1596,9 +1628,12 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
         }
         break;
     case KEY_F1:
+    {
         soundPlayFile("ib1p1xx1");
+        FirstPersonPreviewMouseReleaseScope mouseReleaseScope;
         showHelp();
         break;
+    }
     case KEY_F2:
         gameSoundSetMasterVolume(gameSoundGetMasterVolume() - 2047);
         break;
@@ -1607,22 +1642,29 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
         break;
     case KEY_CTRL_S:
     case KEY_F4:
+    {
         soundPlayFile("ib1p1xx1");
+        FirstPersonPreviewMouseReleaseScope mouseReleaseScope;
         if (lsgSaveGame(1) == -1) {
             debugPrint("\n ** Error calling SaveGame()! **\n");
         }
         break;
+    }
     case KEY_CTRL_L:
     case KEY_F5:
+    {
         soundPlayFile("ib1p1xx1");
+        FirstPersonPreviewMouseReleaseScope mouseReleaseScope;
         if (lsgLoadGame(LOAD_SAVE_MODE_NORMAL) == -1) {
             debugPrint("\n ** Error calling LoadGame()! **\n");
         }
         break;
+    }
     case KEY_F6:
         if (1) {
             soundPlayFile("ib1p1xx1");
 
+            FirstPersonPreviewMouseReleaseScope mouseReleaseScope;
             int rc = lsgSaveGame(LOAD_SAVE_MODE_QUICK);
             if (rc == -1) {
                 debugPrint("\n ** Error calling SaveGame()! **\n");
@@ -1638,6 +1680,7 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
         if (1) {
             soundPlayFile("ib1p1xx1");
 
+            FirstPersonPreviewMouseReleaseScope mouseReleaseScope;
             int rc = lsgLoadGame(LOAD_SAVE_MODE_QUICK);
             if (rc == -1) {
                 debugPrint("\n ** Error calling LoadGame()! **\n");
