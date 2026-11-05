@@ -231,11 +231,23 @@ CPU overlay rectangles updated after the F11 scene refresh are replayed after
 the GPU billboard pass. This preserves the expected ordering for menus,
 widgets, and the software cursor while retaining GPU rendering for the scene.
 
-The CPU fallback floor pass now uses adaptive blocks: distant rows near the
-horizon use 4x4 blocks, while the close foreground retains 2x2 blocks. This
-reduces the dominant full-screen floor loop while retaining detail where
-perspective changes fastest. A shader-based floor pass remains the long-term
-solution.
+The current CPU floor pass retains fixed 2x2 samples; the earlier adaptive
+4x4 treatment was removed to preserve detail. Walls now rasterize first and
+record their floor-covering bottom edge per column. Entirely covered 2x2 blocks
+skip floor sampling, while partial blocks keep the original sample and write
+only uncovered pixels. Sample coordinates still advance through skipped blocks
+to preserve texture alignment. Openings and above-horizon door caps do not
+suppress visible floor. Exit markers and billboards render after both passes.
+
+Floor-cache invalidation now compares only the floor half of packed tile IDs.
+Room entry/exit changes roof visibility in the other half; it previously caused
+an unnecessary full floor-cache rebuild. Floor art/flag changes and elevation
+changes still invalidate the cache. This is a candidate fix for room-transition
+hitches, pending runtime confirmation. Algorithm-level reference checks matched
+3,000 randomized framebuffers and verified roof-only versus floor-bit changes;
+native build and in-game 1080p/1440p tests remain pending because the local C++
+toolchain is unavailable. Compare wall edges, windows, open doors, and room
+transitions, preserving the existing floor quality.
 
 The CPU wall pass likewise samples each wall texture column in vertical
 2-pixel blocks. Wall ray traversal and one depth result per screen column are

@@ -1168,7 +1168,12 @@ static void tileRenderFirstPersonPreview()
     const int* currentFloorFids = gTileSquares[gElevation]->tileFid;
     const bool floorLayoutChanged = cachedFloorElevation != static_cast<int>(gElevation)
         || cachedFloorFids.size() != SQUARE_GRID_SIZE
-        || !std::equal(currentFloorFids, currentFloorFids + SQUARE_GRID_SIZE, cachedFloorFids.begin());
+        || !std::equal(currentFloorFids, currentFloorFids + SQUARE_GRID_SIZE,
+            cachedFloorFids.begin(), [](int current, int cached) {
+                // Packed tile IDs also contain roof visibility. Walking into
+                // a room hides its roof but does not change the floor cache.
+                return FloorTileFrmId(current).fid() == FloorTileFrmId(cached).fid();
+            });
     if (floorLayoutChanged) {
         cachedFloorFids.assign(currentFloorFids, currentFloorFids + SQUARE_GRID_SIZE);
         floorTextures.clear();
@@ -1269,52 +1274,6 @@ static void tileRenderFirstPersonPreview()
         cachedFloorElevation = static_cast<int>(gElevation);
     }
 
-    const unsigned int floorStart = profileFrame ? getTicks() : 0;
-    constexpr int kFloorRenderStep = 2;
-    for (int y = horizonY + 1; y < gTileWindowHeight; y += kFloorRenderStep) {
-        const double rowDistance = (gTileWindowHeight * 0.5) / (y - horizonY);
-        double worldX = cameraX + rayDirectionXs[0] * rowDistance;
-        double worldY = cameraY + rayDirectionYs[0] * rowDistance;
-        const double worldXStep = gTileWindowWidth > 1
-            ? (rayDirectionXs[std::min(kFloorRenderStep, gTileWindowWidth - 1)]
-                    - rayDirectionXs[0]) * rowDistance
-            : 0.0;
-        const double worldYStep = gTileWindowWidth > 1
-            ? (rayDirectionYs[std::min(kFloorRenderStep, gTileWindowWidth - 1)]
-                    - rayDirectionYs[0]) * rowDistance
-            : 0.0;
-        for (int x = 0; x < gTileWindowWidth; x += kFloorRenderStep) {
-            const int mapX = static_cast<int>(floor(worldX));
-            const int mapY = static_cast<int>(floor(worldY));
-            if (mapX < 0 || mapX >= SQUARE_GRID_WIDTH
-                || mapY < 0 || mapY >= SQUARE_GRID_HEIGHT) {
-                worldX += worldXStep;
-                worldY += worldYStep;
-                continue;
-            }
-
-            const int sampleX = std::min(kFloorCacheCellResolution - 1,
-                static_cast<int>((worldX - mapX) * kFloorCacheCellResolution));
-            const int sampleY = std::min(kFloorCacheCellResolution - 1,
-                static_cast<int>((worldY - mapY) * kFloorCacheCellResolution));
-            const int cacheIndex = (mapY * SQUARE_GRID_WIDTH + mapX) * kFloorCacheCellArea
-                + sampleY * kFloorCacheCellResolution + sampleX;
-            const unsigned char color = cachedFloorColors[cacheIndex];
-            for (int blockY = y;
-                 blockY < std::min(gTileWindowHeight, y + kFloorRenderStep);
-                 blockY++) {
-                for (int blockX = x;
-                     blockX < std::min(gTileWindowWidth, x + kFloorRenderStep);
-                     blockX++) {
-                    gTileWindowBuffer[blockY * gTileWindowPitch + blockX] = color;
-                }
-            }
-            worldX += worldXStep;
-            worldY += worldYStep;
-        }
-    }
-
-    const unsigned int floorEnd = profileFrame ? getTicks() : 0;
     std::vector<double>& wallDepths = gFirstPersonPreviewWallDepths;
     wallDepths.assign(gTileWindowWidth, std::numeric_limits<double>::infinity());
     static std::vector<double> wallSillDepths;
@@ -1336,6 +1295,12 @@ static void tileRenderFirstPersonPreview()
         std::fill(actorDepthStamps.begin(), actorDepthStamps.end(), 0);
         actorDepthStamp = 1;
     }
+
+    // Solid walls and window sills cover a continuous span from the horizon
+    // down to their floor edge. Door caps end above the floor and do not hide
+    // it. Record actual raster bounds so floor clipping agrees at every edge.
+    static std::vector<int> floorOcclusionBottoms;
+    floorOcclusionBottoms.assign(gTileWindowWidth, horizonY);
 
     const unsigned int wallStart = profileFrame ? getTicks() : 0;
     for (int x = 0; x < gTileWindowWidth; x++) {
@@ -1566,6 +1531,9 @@ static void tileRenderFirstPersonPreview()
                 static_cast<int>(ceil(unclippedWallTop)));
             const int wallBottom = std::min(gTileWindowHeight - 1,
                 static_cast<int>(floor(type == 5 ? doorSplitY : floorY)));
+            if (wallTop <= horizonY + 1 && wallBottom >= horizonY + 1) {
+                floorOcclusionBottoms[x] = std::max(floorOcclusionBottoms[x], wallBottom);
+            }
             const double hitWorldX = cameraX + rayDirectionX * distance;
             const double hitWorldY = cameraY + rayDirectionY * distance;
             const double wallCoordinate = orientation == TILE_FIRST_PERSON_WALL_ORIENTATION_NORTH_SOUTH
@@ -1624,6 +1592,70 @@ static void tileRenderFirstPersonPreview()
     }
 
     const unsigned int wallEnd = profileFrame ? getTicks() : 0;
+
+    const unsigned int floorStart = profileFrame ? getTicks() : 0;
+    constexpr int kFloorRenderStep = 2;
+    for (int y = horizonY + 1; y < gTileWindowHeight; y += kFloorRenderStep) {
+        const double rowDistance = (gTileWindowHeight * 0.5) / (y - horizonY);
+        double worldX = cameraX + rayDirectionXs[0] * rowDistance;
+        double worldY = cameraY + rayDirectionYs[0] * rowDistance;
+        const double worldXStep = gTileWindowWidth > 1
+            ? (rayDirectionXs[std::min(kFloorRenderStep, gTileWindowWidth - 1)]
+                    - rayDirectionXs[0]) * rowDistance
+            : 0.0;
+        const double worldYStep = gTileWindowWidth > 1
+            ? (rayDirectionYs[std::min(kFloorRenderStep, gTileWindowWidth - 1)]
+                    - rayDirectionYs[0]) * rowDistance
+            : 0.0;
+        for (int x = 0; x < gTileWindowWidth; x += kFloorRenderStep) {
+            const int blockBottom = std::min(gTileWindowHeight, y + kFloorRenderStep);
+            const int blockRight = std::min(gTileWindowWidth, x + kFloorRenderStep);
+            int coveredThrough = floorOcclusionBottoms[x];
+            for (int blockX = x + 1; blockX < blockRight; blockX++) {
+                coveredThrough = std::min(coveredThrough, floorOcclusionBottoms[blockX]);
+            }
+            if (blockBottom - 1 <= coveredThrough) {
+                // Preserve the original incremental coordinates even when a
+                // sample is skipped, avoiding texture shifts at wall edges.
+                worldX += worldXStep;
+                worldY += worldYStep;
+                continue;
+            }
+            const int mapX = static_cast<int>(floor(worldX));
+            const int mapY = static_cast<int>(floor(worldY));
+            if (mapX < 0 || mapX >= SQUARE_GRID_WIDTH
+                || mapY < 0 || mapY >= SQUARE_GRID_HEIGHT) {
+                worldX += worldXStep;
+                worldY += worldYStep;
+                continue;
+            }
+
+            const int sampleX = std::min(kFloorCacheCellResolution - 1,
+                static_cast<int>((worldX - mapX) * kFloorCacheCellResolution));
+            const int sampleY = std::min(kFloorCacheCellResolution - 1,
+                static_cast<int>((worldY - mapY) * kFloorCacheCellResolution));
+            const int cacheIndex = (mapY * SQUARE_GRID_WIDTH + mapX) * kFloorCacheCellArea
+                + sampleY * kFloorCacheCellResolution + sampleX;
+            const unsigned char color = cachedFloorColors[cacheIndex];
+            for (int blockY = y;
+                 blockY < blockBottom;
+                 blockY++) {
+                for (int blockX = x;
+                     blockX < blockRight;
+                     blockX++) {
+                    // Partially covered blocks retain the same sample, but
+                    // must not overwrite wall pixels drawn earlier.
+                    if (blockY > floorOcclusionBottoms[blockX]) {
+                        gTileWindowBuffer[blockY * gTileWindowPitch + blockX] = color;
+                    }
+                }
+            }
+            worldX += worldXStep;
+            worldY += worldYStep;
+        }
+    }
+
+    const unsigned int floorEnd = profileFrame ? getTicks() : 0;
     TileFirstPersonExitGridRenderContext exitGridContext = {
         gElevation,
         cameraX,
