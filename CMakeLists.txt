@@ -50,6 +50,7 @@ set(FALLOUT_ENGINE_SOURCES
     "src/art.cc"
     "src/art.h"
     "src/billboard_clip_bands.h"
+    "src/transparent_window_rects.h"
     "src/audio.cc"
     "src/audio.h"
     "src/audio_channels.cc"

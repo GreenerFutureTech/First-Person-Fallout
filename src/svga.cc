@@ -619,7 +619,12 @@ void _GNW95_ShowRect(unsigned char* src, int srcPitch, int unused, int srcX, int
         case GpuOverlayType::Cursor:
             break;
         case GpuOverlayType::Default:
-            gGpuOverlayRects.push_back(destRect);
+            // F11 UI coverage comes from the live windows at presentation.
+            // A dirty rectangle can include the CPU-only map background and
+            // is not an opaque overlay (notably for transparent hold menus).
+            if (!tileFirstPersonPreviewIsEnabled()) {
+                gGpuOverlayRects.push_back(destRect);
+            }
             break;
         }
     }
@@ -866,8 +871,10 @@ void renderPresent()
             SDL_RenderCopy(gSdlRenderer, gSdlTexture, &windowRect, &windowRect);
         }
     }
-    for (const SDL_Rect& overlayRect : gGpuOverlayRects) {
-        SDL_RenderCopy(gSdlRenderer, gSdlTexture, &overlayRect, &overlayRect);
+    if (!firstPersonPreviewEnabled) {
+        for (const SDL_Rect& overlayRect : gGpuOverlayRects) {
+            SDL_RenderCopy(gSdlRenderer, gSdlTexture, &overlayRect, &overlayRect);
+        }
     }
     if (gGpuHasCursor && gGpuCursorTexture != nullptr) {
         SDL_RenderCopy(gSdlRenderer, gGpuCursorTexture, nullptr, &gGpuCursorRect);

@@ -11,3 +11,8 @@ add_executable(billboard_clip_bands_test billboard_clip_bands_test.cc)
 target_compile_features(billboard_clip_bands_test PRIVATE cxx_std_17)
 target_include_directories(billboard_clip_bands_test PRIVATE ../../src)
 add_test(NAME billboard_clip_bands COMMAND billboard_clip_bands_test)
+
+add_executable(transparent_window_rects_test transparent_window_rects_test.cc)
+target_compile_features(transparent_window_rects_test PRIVATE cxx_std_17)
+target_include_directories(transparent_window_rects_test PRIVATE ../../src)
+add_test(NAME transparent_window_rects COMMAND transparent_window_rects_test)
