@@ -1,0 +1,10 @@
+
+            if (!isTallScenery
+                && artHeight >= 70
+                && artHeight > artWidth * 1.5) {
+                debugPrint(
+                    "Tall candidate: proto=%d size=%dx%d\n",
+                    static_cast<int>(sceneryProtoId),
+                    artWidth,
+                    artHeight);
+            }

@@ -127,6 +127,269 @@ in-game script tests; it is not a general C++ unit-test suite. No standard
 CTest/unit-test target was found during this inspection, so renderer math and
 map conversion logic should get focused tests if they are introduced.
 
+### GPU billboard migration plan
+
+The current F11 renderer is a CPU software renderer. `tileRenderFirstPersonPreview`
+writes palette indices into the shared 8-bit window buffer; SDL uploads that
+completed image to a texture afterward. The GPU therefore does not accelerate
+wall raycasting, floor projection, billboard scaling, alpha testing, or depth
+checks.
+
+The migration should be incremental and retain the CPU renderer as a fallback:
+
+1. **Verify the presentation renderer.** Request an accelerated SDL renderer,
+   record the selected backend, and fall back explicitly when acceleration is
+   unavailable. This is the first implementation step.
+2. **Cache GPU-ready FRM textures.** Convert each scenery frame from indexed FRM
+   pixels plus the active palette to an RGBA texture once, retaining transparent
+   index 0 as alpha 0. Invalidate or update cached textures on palette changes.
+3. **Submit scenery billboards to the GPU.** Keep CPU projection and object
+   visibility initially, but replace CPU per-pixel scenery rasterization with
+   textured billboard submissions. Keep critters and items on the CPU path until
+   occlusion is proven.
+4. **Preserve depth and wall occlusion.** The preferred implementation is an
+   OpenGL shader pass with a wall-depth texture or depth buffer. A simple
+   `SDL_RenderCopy` overlay is not sufficient because it cannot represent
+   per-column wall depth.
+5. **Move floor and walls only after billboards are validated.** A full shader
+   raycaster is a later phase, not a prerequisite for the billboard win.
+
+The initial GPU step is implemented in `src/svga.cc`: SDL now requests
+`SDL_RENDERER_ACCELERATED`, logs the selected backend, and exposes
+`screenIsHardwareAccelerated()` for the upcoming billboard backend. This does
+not yet move F11 billboard work to the GPU; it makes the presentation path
+explicit and provides a safe capability check for the next phase.
+
+The first billboard pass is now implemented as a hybrid: scenery remains
+projected and clipped against CPU wall-depth columns, but its indexed FRM
+pixels are converted to cached RGBA SDL textures and scaled/blended by the
+accelerated renderer. Critters and items continue using the CPU rasterizer.
+The CPU renderer remains active automatically when SDL acceleration is absent.
+This first pass clips against wall depth and sorts scenery far-to-near, but it
+does not yet share the CPU actor-depth buffer; actor/scenery overlap is a
+known follow-up before making the GPU path the default.
+
+The next pass also submits item billboards to the same GPU path. GPU texture
+sampling is forced to nearest-neighbor so enlarged FRM pixels retain the
+original art style. Critter FRMs now use the same GPU billboard path. GPU billboards are sorted
+far-to-near together and wall-clipped before submission, so scenery no longer
+has to be disabled when critters are visible. Critter text labels and other
+CPU-only overlays remain a follow-up because the SDL GPU pass is composited
+after the CPU framebuffer.
+
+Adjacent clips from the same billboard are coalesced before the depth sort to
+reduce SDL draw calls when wall visibility changes across neighboring columns.
+Billboards whose projected columns are entirely behind wall/sill depth are
+rejected before GPU texture submission.
+The actor callback also performs a conservative wall/sill occlusion scan using
+an oversized projected footprint before facing and FRM work, avoiding CPU setup
+for actors that cannot contribute any visible pixels.
+
+Fully wall-visible scenery and item billboards now use a single GPU submission
+instead of walking the wall-depth span as multiple visibility segments. The
+per-column clipping path remains for billboards intersecting walls.
+
+The actor projection path also rejects objects that are conservatively outside
+the viewport before doing facing, prototype, or FRM work. This reduces CPU
+setup for actors that cannot contribute any visible pixels. The GPU draw loop
+also avoids repeating SDL clip-state changes when consecutive sorted
+billboards use the same clip rectangle. The per-frame GPU billboard queue also
+reserves a conservative capacity before object traversal to avoid repeated
+allocation and copying in dense scenes.
+
+GPU billboard submissions now persist across repeated presentations until the
+next F11 render begins. This is required because combat and modal UI paths can
+call `renderPresent()` more than once without rerendering the tile scene.
+The queue is explicitly cleared when F11 is disabled.
+
+CPU overlay rectangles updated after the F11 scene refresh are replayed after
+the GPU billboard pass. This preserves the expected ordering for menus,
+widgets, and the software cursor while retaining GPU rendering for the scene.
+
+The CPU fallback floor pass now uses adaptive blocks: distant rows near the
+horizon use 4x4 blocks, while the close foreground retains 2x2 blocks. This
+reduces the dominant full-screen floor loop while retaining detail where
+perspective changes fastest. A shader-based floor pass remains the long-term
+solution.
+
+The CPU wall pass likewise samples each wall texture column in vertical
+2-pixel blocks. Wall ray traversal and one depth result per screen column are
+preserved, so billboard clipping remains column-accurate while wall shading
+does less per-pixel work.
+
+Scenery prototype classification is also cached by prototype ID. Stable visual
+flags are reused across frames, while frame-specific art dimensions continue to
+be queried dynamically so animation and alternate frames retain their existing
+scaling behavior.
+overhead from dense scenery outside the camera while retaining a generous
+projected radius to avoid clipping visible billboards.
+
+### Direct GPU floor and wall migration
+
+The next large performance boundary cannot use the SDL 2D renderer alone.
+F11 still spends CPU time in two full-screen stages:
+
+- floor projection samples the cached floor map for every lower-half screen
+  pixel;
+- wall raycasting walks the hex grid for every screen column and then shades
+  wall pixels into the CPU framebuffer.
+
+The GPU billboard pass does not accelerate either stage. Moving them requires
+an OpenGL renderer path using the existing `SDL_WINDOW_OPENGL` window, with
+SDL renderer presentation replaced or isolated behind a backend interface.
+The renderer now exposes a capability probe for accelerated target textures
+and records that capability at startup. This is only a backend seam; the CPU
+floor/wall path remains authoritative until the GPU pass can be initialized
+and composed without breaking overlays or fallback behavior.
+The backend also verifies that an OpenGL context is current before shader
+integration is attempted. Raw OpenGL calls remain disabled while SDL owns the
+active renderer state; this avoids invalidating SDL texture and clip state on
+platforms where the accelerated renderer is not OpenGL.
+Overlay replay is bounded to one union rectangle per F11 scene rather than
+retaining every historical UI update. Since the source texture contains the
+current final CPU framebuffer, the union safely preserves menu and cursor
+ordering while avoiding unbounded presentation work.
+
+When `debug.show_fps` is enabled, F11 reports rolling 60-frame timing averages
+for total render, floor projection, wall rendering, and actor submission. The
+timers are disabled when the existing FPS display setting is off, allowing the
+next GPU migration step to target the measured dominant stage.
+
+An initial reduced GPU floor composition prototype was tested on accelerated
+target-texture renderers. It reduced the measured floor stage, but per-frame
+palette conversion, wall masking, texture upload, and SDL composition increased
+total F11 frame time, so the prototype was reverted. The adaptive CPU floor
+path remains authoritative until a shader pass can move the projection work
+itself rather than uploading a completed reduced image.
+The planned shader pipeline is:
+
+1. Upload the floor cache as a GPU texture/atlas and pass camera position,
+   direction, viewport size, and horizon to a floor shader.
+2. Upload wall-cell type/orientation data as a compact integer texture or
+   buffer; perform DDA ray traversal in a fragment shader.
+3. Sample GPU wall textures and apply distance/face lighting in the shader.
+4. Render GPU billboards into the same depth-aware target.
+5. Composite CPU-only UI, labels, and interaction overlays afterward.
+
+The selected implementation direction is an isolated OpenGL backend. The
+current SDL renderer remains the active backend until the shader backend can
+own the GL composition target for a complete frame. The first implementation
+unit should include shader compilation, GPU resource creation, and a complete
+floor-only pass behind a runtime fallback; enabling raw GL calls from
+`renderPresent()` while SDL owns the renderer is intentionally avoided.
+The renderer now probes and compiles a modern GLSL 3.30 core floor-projection
+shader through SDL's current context. The shader defines the intended
+fullscreen-triangle, camera, horizon, viewport, and floor-cache sampling
+interface. This is only a capability/resource probe; it does not draw or
+change the active frame path. Startup also logs the OpenGL version, GLSL
+version, and vendor so the first shader texture path can select compatible
+formats and diagnose driver-specific fallback.
+The active test system reports NVIDIA OpenGL 4.6.0, GLSL 4.60, and NVIDIA
+driver 595.97, so the first real pass can use the modern shader interface
+without a legacy compatibility branch.
+The backend now has a persistent OpenGL floor-cache texture resource. It is
+updated only when the floor atlas is explicitly rebuilt; it is not sampled or
+composed yet while SDL owns the active frame target. The update replaces the
+texture contents so same-sized floor layouts cannot leave stale GPU data.
+The floor-cache atlas upload was attempted but reverted after a crash entering
+F11 during the first live OpenGL texture upload. The shader/resource probe
+remains, but GL texture uploads stay disabled until the isolated scene target
+owns the GL state explicitly.
+The renderer now creates and validates an offscreen OpenGL scene target during
+renderer initialization, then restores the default framebuffer. Shader and
+target availability still do not imply that F11 may issue GL draw or texture
+calls; the scene backend remains disabled until F8 performs the explicit
+whole-renderer ownership transition.
+The backend now exposes a guarded begin/end lifecycle for that target. It
+binds the framebuffer and viewport only inside the lifecycle and restores the
+caller's framebuffer and viewport afterward; no F11 call site uses it until
+the complete composition path is ready.
+The F11 floor-cache builder now stages its generated indexed cache through a
+renderer-owned copy when the map layout changes. Staging performs no OpenGL
+calls and does not change visible rendering; a later scene-owned phase will
+convert and upload the staged data while SDL presentation is suspended.
+The F11 camera position, direction, camera plane, and map dimensions are
+staged through the same CPU-only boundary each frame. This keeps the complete
+GPU floor input packet together without allowing tile rendering to touch GL.
+The renderer also has a guarded staged-floor draw operation. It uploads a
+palette-expanded RGBA texture only while the isolated scene target is bound,
+sets the live camera uniforms, and draws the fullscreen floor pass. It is
+called only after F8 has removed SDL renderer ownership; while SDL owns the
+active presentation path, the visible renderer remains CPU/SDL.
+F12 remains the existing screenshot command. OpenGL scene activation will not
+be tied to a gameplay key until the complete renderer-owned presentation path
+is ready.
+F8 is reserved for the experimental OpenGL mode. It arms or disarms a
+renderer-side backend transition. The current experimental output is floor-only
+and does not yet include walls, billboards, or UI.
+The presentation phase now consumes that flag only as a readiness gate and
+logs shader/target availability once per armed period. It still presents the
+existing SDL frame and performs no raw GL calls. The gate also verifies that
+the renderer-owned floor cache and camera packet are populated before a future
+scene backend can consume them. The gate also tracks whether a valid F11 frame
+is currently active, preventing a future presentation switch from consuming
+stale staged data during menus or ordinary map rendering.
+The renderer exposes a separate presentation-eligibility predicate requiring
+all of those conditions simultaneously. F8 reports that predicate but leaves
+the backend disabled. The live floor draw is not invoked while SDL's renderer
+owns presentation; the existing SDL frame remains the visible output.
+The approved experimental transition now tears down SDL renderer ownership
+creates an explicit SDL OpenGL context, and then recreates the shader
+resources. While F8 is active, the experimental
+backend presents the staged floor directly through the OpenGL window swap.
+This first transition is intentionally floor-only; walls, billboards, and UI
+remain follow-up work. If initialization or presentation fails, SDL is
+recreated as the fallback. The explicit context is deleted before SDL is
+recreated.
+The first live floor frame exposed two expected integration issues: CPU cache
+rows are top-down while OpenGL texture rows are bottom-up, and the CPU floor
+loop was still running redundantly during OpenGL presentation. The shader now
+flips the cache's vertical coordinate, and CPU floor rasterization is skipped
+only while the experimental OpenGL scene is active.
+The first direct-window image also exposed OpenGL's bottom-left fragment
+coordinate origin: the floor discard test was applied to the upper half of the
+window. The shader now converts `gl_FragCoord.y` to the game's top-down screen
+coordinate before applying the horizon test.
+The floor-only geometry now uses a lower-half rectangle instead of shortening a
+single fullscreen triangle. The latter created a diagonal top edge and slanted
+the horizon. The rectangle avoids rasterizing the sky while keeping the
+horizon level.
+Runtime validation instead found that the direct OpenGL floor presentation was
+substantially slower than regular F11. The cause was that the F11 callback
+still generated CPU walls, actors, billboards, and interaction data even
+though the OpenGL presentation discarded those layers. F8 now returns after
+staging the floor and camera, so the floor-only experiment no longer pays for
+undisplayed CPU scene work. This is still not a full-scene FPS comparison;
+walls, billboards, and UI remain follow-up composition work.
+The next incremental step adds a compact wall-column upload: the existing CPU
+ray traversal supplies each screen column's projected bounds and shade, while
+OpenGL fills the wall spans after the floor pass. This keeps collision and
+topology behavior unchanged while moving wall pixel fill off the CPU. The
+current wall pass uses a flat shader color; wall texture sampling and shared
+depth with billboards remain follow-up work.
+The experimental path now also accepts the existing scenery, item, and critter
+billboard submissions without creating SDL textures. FRM pixels are palette
+expanded into cached OpenGL textures, sorted far-to-near, alpha blended, and
+drawn as clipped quads after the wall pass. Wall depth is still represented by
+the CPU-generated clip ranges; a shared hardware depth buffer remains a later
+optimization.
+Initialization also runs a non-presented shader draw smoke test using a core
+profile VAO and fullscreen triangle, then restores the default framebuffer.
+The test now also restores the previous framebuffer, viewport, clear color,
+shader program, VAO, active texture unit, and 2D texture binding so SDL
+presentation state is not perturbed.
+The shader uniform locations for the floor cache, camera, direction, camera
+plane, viewport, horizon, and map size are now resolved during initialization.
+The initialization smoke test now binds a real 1x1 RGBA cache texture and sets
+all floor uniforms before drawing. This validates sampler/uniform updates while
+the backend owns the isolated target; it does not upload live F11 floor data.
+
+Do not attempt to fake this by uploading the completed CPU framebuffer: that
+only moves presentation and leaves the expensive loops unchanged. The
+implementation should first add a backend capability probe and an isolated
+shader test scene, then switch F11 floor/wall rendering behind a runtime
+fallback. This is a larger architectural change than the SDL billboard pass.
+
 ## Design rules for the conversion
 
 1. **Keep a hard fallback.** First person must be disabled by default initially
@@ -251,14 +514,13 @@ interpret the whole-map outline as one continuous room boundary.
 F11 now renders a first map-connected graybox in the map viewport. It starts
 at the player's square-grid cell and facing, raycasts against blocking wall
 objects, blocking scenery, and closed doors, and draws
-flat-color perspective columns. Other critters appear as camera-facing
-billboards using their current Fallout FRM frame, scaled by perspective and
-occluded by the raycast wall depth. Their size is capped at 80% of the
-viewport height, with the frame's aspect ratio preserved and feet grounded
-at the projected floor position. A small color marker shows party members
-and same-team critters in green, non-party critters in amber outside combat,
-and opposing teams in red during combat. Mouse look turns the view; F9 still
-switches to the top-down source diagnostic. F11 restores the isometric view
+flat-color perspective columns. Other critters, items, and non-door scenery
+appear as camera-facing billboards using their current Fallout FRM frame,
+scaled by perspective and occluded by the raycast wall depth. Their size is
+capped by object type, with the frame's aspect ratio preserved and the object
+grounded at the projected floor position. Mouse look turns the view.
+While in F11 mode, F9 cycles a small topology overview through the top-left,
+top-right, bottom-left, and bottom-right corners, then hides it. F11 restores the isometric view
 and normal mouse mode. Aim the crosshair at a visible critter and left-click
 to talk to a living, talkable critter or loot a non-talkable critter using
 Fallout's existing looting action. WASD moves one hex step relative to the
@@ -284,7 +546,21 @@ combat system.
 
 F11 wall faces now use a palette-mapped stone-block proof material, with a
 separate plank treatment for closed doors. The saturated orientation colors
-remain in the F9 diagnostic only.
+remain in the F9 diagnostic only. The diagnostic takes a value-only snapshot
+of visible wall, scenery, critter, and item markers during the normal F11
+render. Every zoom level draws from that snapshot instead of traversing the
+live object lists again while movement and animation may be updating them.
+This keeps the overview stable at higher zoom levels and provides a safe
+foundation for replacing the current point markers with player, critter, door,
+and scenery icons.
+Doors now use small black-outlined map icons, with red fill when closed and
+green fill when open.
+The map uses alternating floor tones, subtle cell borders, softer wall lines,
+and a black-outlined red diamond for the player so the overview reads as a
+map rather than a raw diagnostic grid. The player marker uses a thicker
+outline and fill for visibility. The F11 crosshair includes a green facing
+arrow that follows the current view direction. Object-specific icons remain a
+follow-up improvement.
 
 Wall raycasting uses the hex object grid at twice the square-floor resolution,
 preserving each wall object's position instead of collapsing it into a square
@@ -307,7 +583,9 @@ Wall objects carrying Fallout's transparent-glass, transparent-wall, or
 light-through flag render as windows in F11: the upper section is transparent,
 while the lower half remains a solid sill. Walls behind the window remain
 visible through its transparent section. Explicitly non-blocking wall objects
-remain openings.
+remain openings. Solid walls are floor-anchored and extend upward to twice
+their original projected height; window sills retain their floor-side
+placement.
 
 ### 4. Add a small texture proof
 
@@ -326,6 +604,12 @@ faces. Side orientation and distance apply restrained palette shading.
 Closed doors use a separate repeating wood-plank tile. This keeps the F9
 diagnostic and existing raycast geometry intact while replacing the saturated
 debug colors in F11.
+
+Non-door scenery, including trees, remains an FRM billboard that faces the
+camera and is depth-tested against the raycast walls. It must not be added to
+the solid wall grid, or its texture is hidden behind the procedural wall
+material. Closed doors remain structural blockers; open doors and billboard
+scenery remain openings in that grid.
 
 Use Arroyo Temple: Inner Sanctum to tune this first proof: compare stable F11
 views with the same area in the original isometric renderer. Check whether the

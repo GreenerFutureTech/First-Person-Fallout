@@ -1,8 +1,8 @@
 # --------------------------------------------------
 # 1. Heavy Game Data Archives & Binaries (CRITICAL)
 # --------------------------------------------------
-files/*.dat             # ce.dat, f2_res.dat (Game archives hold hundreds of MBs of compressed data)
-*.dat
+<!-- files/*.dat             # ce.dat, f2_res.dat (Game archives hold hundreds of MBs of compressed data)
+*.dat -->
 *.sav
 *.pro
 *.acm

@@ -412,3 +412,9 @@ AGENTS.md
 CLAUDE.md
 GEMINI.md
 opencode.json
+.codexignore
+build-run-debug.ps1
+build-run-release.ps1
+build-run.ps1
+.github/copilot-instructions.md
+docs/first-person-conversion-guide.md
