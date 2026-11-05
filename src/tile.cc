@@ -2150,7 +2150,7 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         ? projectedActorBottom + std::max(20, actorHeight / 3)
         : objectType == OBJ_TYPE_CRITTER
             ? std::min(
-                gTileWindowHeight + static_cast<int>(actorHeight * 0.15),
+                gTileWindowHeight + static_cast<int>(actorHeight * 0.20),
                 projectedActorBottom)
         : projectedActorBottom;
 
