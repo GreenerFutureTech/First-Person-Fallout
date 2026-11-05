@@ -1899,6 +1899,16 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
     }
 
     const double projectionScale = gTileWindowHeight / transformY;
+    constexpr double kCritterFullSizeDistance = 0.75;
+    constexpr double kCritterReducedSizeDistance = 1.5;
+    const double critterScale = std::clamp(
+        (kCritterReducedSizeDistance - transformY)
+            / (kCritterReducedSizeDistance - kCritterFullSizeDistance),
+        0.5,
+        1.0);
+    const double actorProjectionScale = objectType == OBJ_TYPE_CRITTER
+        ? projectionScale * critterScale
+        : projectionScale;
     bool isTree = false;
     bool isWideScenery = false;
     bool isMediumScenery = false;
@@ -2128,27 +2138,21 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
             isWideScenery ? 1.8
             : isMediumScenery ? 1.3
             : fallbackWidthScale;
-        const int maximumActorHeight = std::max(1, static_cast<int>(gTileWindowHeight
-            * (objectType == OBJ_TYPE_CRITTER
-                            ? 0.8
-                            : isTree || isTallScenery ? 1.2 : isMediumScenery ? 0.8 : 0.6)));
-    const int projectedActorHeight = std::max(1, static_cast<int>(projectionScale * objectHeightScale));
-    const int sceneryHeightLimit = std::max(1, static_cast<int>(gTileWindowHeight * 0.85));
-    // Let trees grow beyond the viewport as the camera approaches instead of
-    // shrinking them to fit the scenery height limits.
-    const int actorHeight = isTree
-        ? projectedActorHeight
-        : std::min(
-            objectType == OBJ_TYPE_SCENERY
-                ? std::min(maximumActorHeight, sceneryHeightLimit)
-                : maximumActorHeight,
-            projectedActorHeight);
+    const int projectedActorHeight = std::max(1, static_cast<int>(actorProjectionScale * objectHeightScale));
+    const int actorHeight = objectType == OBJ_TYPE_CRITTER
+        ? std::min(
+            std::max(1, static_cast<int>(gTileWindowHeight * 0.8)),
+            projectedActorHeight)
+        : projectedActorHeight;
     const int projectedActorBottom = renderContext->horizonY
         + static_cast<int>(projectionScale * 0.5);
     const int actorBottom = isRock
         ? projectedActorBottom + std::max(20, actorHeight / 3)
-        : isTree ? projectedActorBottom
-        : std::min(gTileWindowHeight, projectedActorBottom);
+        : objectType == OBJ_TYPE_CRITTER
+            ? std::min(
+                gTileWindowHeight + static_cast<int>(actorHeight * 0.15),
+                projectedActorBottom)
+        : projectedActorBottom;
 
     const int spriteWidth = std::max(1, static_cast<int>(
         actorHeight * 0.42 / objectHeightScale * objectWidthScale));
