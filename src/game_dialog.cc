@@ -2852,11 +2852,17 @@ static bool gameDialogRenderSpeakerInDisplayBuffer()
             destWidth = std::max(1, speakerFrame.width * destHeight / speakerFrame.height);
         }
 
-        Buffer2D displayBuffer { gameDialogDisplayBuffer, 388, 200 };
+        Buffer2D displayBuffer {
+            windowGetBuffer(gameDialogBackgroundWindow),
+            GAME_DIALOG_WINDOW_WIDTH,
+            GAME_DIALOG_WINDOW_HEIGHT,
+        };
+        const int displayX = 126 + (388 - destWidth) / 2;
+        const int displayY = 14 + gameDialogHrArtYOffset() + (200 - destHeight) / 2;
         blitBuffer2DScaledTrans(speakerFrame,
             displayBuffer,
-            (displayBuffer.width - destWidth) / 2,
-            (displayBuffer.height - destHeight) / 2,
+            displayX,
+            displayY,
             destWidth,
             destHeight);
         rendered = true;
