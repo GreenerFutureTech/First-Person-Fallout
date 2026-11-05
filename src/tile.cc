@@ -222,6 +222,8 @@ static TileWindowRefreshElevationProc* gTileWindowRefreshElevationProc = tileRef
 // 0x51D968 refresh_enabled
 static bool gTileEnabled = true;
 static bool gFirstPersonPreviewEnabled = false;
+static bool gFirstPersonPreviewRefreshPending = false;
+static bool gFirstPersonPreviewRefreshing = false;
 static bool gFirstPersonPreviewTopologyEnabled = false;
 static bool gFirstPersonPreviewTopologyRendering = false;
 static int gFirstPersonPreviewTopologyPosition = -1;
@@ -911,7 +913,7 @@ static void tileRefreshMapper(Rect* rect, MapElevation elevation)
 static void tileRefreshGame(Rect* rect, MapElevation elevation)
 {
     if (gFirstPersonPreviewEnabled) {
-        tileFirstPersonPreviewRefresh();
+        tileFirstPersonPreviewRequestRefresh();
         return;
     }
 
@@ -3646,6 +3648,7 @@ bool tileFirstPersonPreviewIsEnabled()
 
 static Object* tileFirstPersonPreviewPickCritterAtPosition(int x, int y)
 {
+    tileFirstPersonPreviewFlushRefresh();
     if (!gFirstPersonPreviewEnabled
         || x < 0
         || x >= gTileWindowWidth
@@ -3716,6 +3719,7 @@ Object* tileFirstPersonPreviewPickCritterAt(int screenX, int screenY)
 
 Object* tileFirstPersonPreviewPickObjectAt(int screenX, int screenY)
 {
+    tileFirstPersonPreviewFlushRefresh();
     if (!gFirstPersonPreviewEnabled
         || gFirstPersonPreviewWallDepths.size() != static_cast<size_t>(gTileWindowWidth)) {
         return nullptr;
@@ -3784,6 +3788,7 @@ Object* tileFirstPersonPreviewPickObjectAt(int screenX, int screenY)
 
 Object* tileFirstPersonPreviewPickDoorAt(int screenX, int screenY)
 {
+    tileFirstPersonPreviewFlushRefresh();
     if (!gFirstPersonPreviewEnabled
         || gFirstPersonPreviewWallDepths.size() != static_cast<size_t>(gTileWindowWidth)) {
         return nullptr;
@@ -3824,6 +3829,7 @@ Object* tileFirstPersonPreviewPickDoorAt(int screenX, int screenY)
 
 int tileFirstPersonPreviewPickGroundTileAt(int screenX, int screenY)
 {
+    tileFirstPersonPreviewFlushRefresh();
     constexpr double kPi = 3.14159265358979323846;
     constexpr double kFieldOfViewScale = 0.66;
     if (!gFirstPersonPreviewEnabled
@@ -3987,19 +3993,39 @@ void tileFirstPersonPreviewProcessPendingMove()
     tileFirstPersonPreviewMove(direction);
 }
 
+void tileFirstPersonPreviewRequestRefresh()
+{
+    if (gFirstPersonPreviewEnabled && !gFirstPersonPreviewTopologyRendering) {
+        gFirstPersonPreviewRefreshPending = true;
+    }
+}
+
+void tileFirstPersonPreviewFlushRefresh()
+{
+    if (gFirstPersonPreviewRefreshPending) {
+        tileFirstPersonPreviewRefresh();
+    }
+}
+
 void tileFirstPersonPreviewRefresh()
 {
     if (!gFirstPersonPreviewEnabled || gFirstPersonPreviewTopologyRendering
+        || gFirstPersonPreviewRefreshing
         || gTileWindowBuffer == nullptr || gTileWindowRefreshProc == nullptr) {
         return;
     }
 
+    // Consume before rendering so any new invalidation is retained. Guard
+    // against recursive flushes from window/cursor composition callbacks.
+    gFirstPersonPreviewRefreshPending = false;
+    gFirstPersonPreviewRefreshing = true;
     tileRenderFirstPersonPreview();
     gTileWindowRefreshProc(&gTileWindowRect);
     gpuBillboardMarkSceneComplete();
     if (!cursorIsHidden()) {
         mouseShowCursor();
     }
+    gFirstPersonPreviewRefreshing = false;
 }
 
 void tileFirstPersonPreviewRefreshCombat()
@@ -4056,7 +4082,7 @@ void tileFirstPersonPreviewLook(int deltaX)
     }
     gFirstPersonPreviewYawTurning = false;
 
-    tileFirstPersonPreviewRefresh();
+    tileFirstPersonPreviewRequestRefresh();
 }
 
 void tileFirstPersonPreviewTurnToTile(int tile)
@@ -4109,6 +4135,7 @@ void tileFirstPersonPreviewToggle()
         tileFirstPersonPreviewResetForModeRefresh();
         tileFirstPersonPreviewRefresh();
     } else {
+        gFirstPersonPreviewRefreshPending = false;
         gpuBillboardClear();
         tileRefreshGame(&gTileWindowRect, gElevation);
     }

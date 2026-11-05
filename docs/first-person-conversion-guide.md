@@ -129,6 +129,18 @@ map conversion logic should get focused tests if they are introduced.
 
 ### GPU billboard migration plan
 
+F11 mouse-look and map rectangle invalidations now request a deferred scene
+refresh. Main/player-combat/NPC-animation loops also request their continuous
+camera refresh; all presentation loops flush pending work through
+`renderPresent()`. This coalesces repeated requests without relying on a return
+to the outer main loop. Picking, screenshots, and the FPS overlay flush first
+when they require current scene data. Explicit synchronous refreshes remain for
+mode transitions and action-menu setup. Disabling F11 clears pending work.
+Native build and runtime validation are pending; compare turning FPS and verify
+player/NPC combat animation, turn-and-click targeting, modal menus, and F11
+toggles. The earlier main-loop-only deferral broke combat and must not be
+reintroduced.
+
 Current checkout optimization (November 2026): door-top occlusion is stored as
 one vertical span per screen column, matching the single cap retained by ray
 traversal, rather than a full-resolution double depth buffer. Empty scenes

@@ -752,6 +752,8 @@ void handleWindowSizeChanged()
 
 void renderFpsCounter()
 {
+    // Finish the scene before painting this direct framebuffer overlay.
+    tileFirstPersonPreviewFlushRefresh();
     if (!settings.debug.show_fps || gSdlSurface == nullptr || gSdlTextureSurface == nullptr) {
         return;
     }
@@ -808,6 +810,9 @@ void renderFpsCounter()
 
 void renderPresent()
 {
+    // Every presentation loop consumes pending F11 work, including combat
+    // animation waits and modal loops that never return to the main loop.
+    tileFirstPersonPreviewFlushRefresh();
     SDL_UpdateTexture(gSdlTexture, nullptr, gSdlTextureSurface->pixels, gSdlTextureSurface->pitch);
     SDL_RenderClear(gSdlRenderer);
     SDL_RenderCopy(gSdlRenderer, gSdlTexture, nullptr, nullptr);
