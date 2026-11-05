@@ -1166,6 +1166,7 @@ static void tileRenderFirstPersonPreview()
     static std::vector<int> floorTextureIndices;
     static int cachedFloorElevation = -1;
     const int* currentFloorFids = gTileSquares[gElevation]->tileFid;
+    const unsigned int floorCacheStart = profileFrame ? getTicks() : 0;
     const bool floorLayoutChanged = cachedFloorElevation != static_cast<int>(gElevation)
         || cachedFloorFids.size() != SQUARE_GRID_SIZE
         || !std::equal(currentFloorFids, currentFloorFids + SQUARE_GRID_SIZE,
@@ -1272,6 +1273,12 @@ static void tileRenderFirstPersonPreview()
             }
         }
         cachedFloorElevation = static_cast<int>(gElevation);
+    }
+    const unsigned int floorCacheEnd = profileFrame ? getTicks() : 0;
+    if (profileFrame && floorLayoutChanged) {
+        debugPrint("F11 floor cache rebuild: tick=%u tile=%d elevation=%d ms=%u\n",
+            floorCacheEnd, gDude != nullptr ? gDude->tile : -1,
+            static_cast<int>(gElevation), getTicksBetween(floorCacheEnd, floorCacheStart));
     }
 
     std::vector<double>& wallDepths = gFirstPersonPreviewWallDepths;
@@ -1698,8 +1705,24 @@ static void tileRenderFirstPersonPreview()
     tileRenderFirstPersonTopologyOverlay();
 
     if (profileFrame) {
+        const unsigned int frameEnd = getTicks();
+        const unsigned int totalMs = getTicksBetween(frameEnd, frameStart);
+        const unsigned int floorMs = getTicksBetween(floorEnd, floorStart);
+        const unsigned int wallMs = getTicksBetween(wallEnd, wallStart);
+        const unsigned int actorMs = getTicksBetween(actorEnd, actorStart);
+        // Averages hide isolated doorway hitches. Include setup/cache and
+        // overlay time, which are outside the three raster/submission stages.
+        if (totalMs >= 50) {
+            debugPrint("F11 slow frame: tick=%u tile=%d elevation=%d total=%u setup=%u cache=%u rebuilt=%d floor=%u wall=%u actors=%u overlay=%u ms\n",
+                frameEnd, gDude != nullptr ? gDude->tile : -1,
+                static_cast<int>(gElevation), totalMs,
+                getTicksBetween(wallStart, frameStart),
+                getTicksBetween(floorCacheEnd, floorCacheStart),
+                floorLayoutChanged ? 1 : 0, floorMs, wallMs, actorMs,
+                getTicksBetween(frameEnd, actorEnd));
+        }
         gFirstPersonPreviewProfileFrames++;
-        gFirstPersonPreviewProfileTotalMs += getTicksBetween(getTicks(), frameStart);
+        gFirstPersonPreviewProfileTotalMs += totalMs;
         gFirstPersonPreviewProfileFloorMs += getTicksBetween(floorEnd, floorStart);
         gFirstPersonPreviewProfileWallMs += getTicksBetween(wallEnd, wallStart);
         gFirstPersonPreviewProfileActorMs += getTicksBetween(actorEnd, actorStart);
@@ -4803,12 +4826,25 @@ static void roof_fill_off_process_task(std::stack<roof_fill_task>& tasks_stack, 
 // 0x4B23D4 tile_fill_roof
 void tile_fill_roof(int x, int y, MapElevation elevation, bool on)
 {
+    const bool profileRoof = gFirstPersonPreviewEnabled && settings.debug.show_fps;
+    const unsigned int start = profileRoof ? getTicks() : 0;
+    unsigned int visitedTasks = 0;
     std::stack<roof_fill_task> tasks_stack;
 
     roof_fill_push_task_if_in_bounds(tasks_stack, x, y);
 
     while (!tasks_stack.empty()) {
         roof_fill_off_process_task(tasks_stack, elevation, on);
+        if (profileRoof) {
+            visitedTasks++;
+        }
+    }
+    if (profileRoof) {
+        const unsigned int end = getTicks();
+        debugPrint("F11 roof fill: tick=%u tile=%d elevation=%d square=(%d,%d) visible=%d tasks=%u ms=%u\n",
+            end, gDude != nullptr ? gDude->tile : -1,
+            static_cast<int>(elevation), x, y, on ? 1 : 0,
+            visitedTasks, getTicksBetween(end, start));
     }
 }
 
