@@ -14,7 +14,7 @@ namespace fallout {
 void characterSnapshotTake(CharacterSnapshot* snapshot)
 {
     Proto* proto;
-    protoGetProto(gDude->pid, &proto);
+    protoGetProto(gDude, &proto);
     critterProtoDataCopy(&snapshot->dudeData, &(proto->critter.data));
 
     snapshot->hitPoints = critterGetHitPoints(gDude);
@@ -34,7 +34,7 @@ void characterSnapshotTakeSkillPoints(CharacterSnapshot* snapshot)
 void characterSnapshotRestore(const CharacterSnapshot* snapshot)
 {
     Proto* proto;
-    protoGetProto(gDude->pid, &proto);
+    protoGetProto(gDude, &proto);
     critterProtoDataCopy(&(proto->critter.data), const_cast<CritterProtoData*>(&snapshot->dudeData));
 
     dudeSetName(snapshot->name);

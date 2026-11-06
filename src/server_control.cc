@@ -34,7 +34,7 @@
 #include "game_movie.h" // gameMovieAck — the movie barrier's release
 #include "game_dialog.h" // _gdialogActive — dialog-active gate for dsay/dend
 #include "input.h" // getTicks — wall-clock rate limit on the busy refusal (feature A)
-#include "inventory.h" // _inven_wield / _inven_unwield / critterGetArmor / _adjust_ac / HAND_*
+#include "inventory.h" // inventoryEquip / inventoryUnequip / critterGetArmor / adjustCritterStatsOnArmorChange / HAND_*
 #include "item.h" // itemGetType / ITEM_TYPE_CONTAINER / itemDropStack / itemRemove
 #include "map.h" // mapGetLoadGeneration — drop latches on a map change
 #include "message.h" // messageListGetItem / MessageListItem
@@ -44,7 +44,7 @@
 #include "pres_record.h" // presRecord* — record the interaction gesture as a presentation sequence
 #include "presenter.h" // presenter()->consoleMessage
 #include "proto.h" // protoGetProto / Proto / SCENERY_TYPE_DOOR
-#include "proto_instance.h" // _obj_use_door / _obj_examine (INTERACTION verbs)
+#include "proto_instance.h" // objectUseDoor / objectExamine (INTERACTION verbs)
 #include "scripts.h" // scriptsRequestDialog
 #include "server_accounts.h" // the account name -> slot table (login verb)
 #include "server_anim.h" // serverAnimWalkInFlightFor
@@ -395,7 +395,7 @@ static void interactionCannotGetThere(Object* actor)
 
 // A GET latch's target vanished from the world before the actor arrived — the
 // contested-pickup loser (MP_PROPOSAL Ch 7.x). Server race resolution already
-// reparented the item to the WINNER (_obj_pickup → _obj_disconnect), so the
+// reparented the item to the WINNER (objectPickup → _obj_disconnect), so the
 // loser's objectFindByNetId now misses it (that lookup walks the world tile list
 // only, never inventories) and this is the specific "another player took it"
 // case — distinct from "you can't get there" (the approach failed with the item
@@ -505,7 +505,7 @@ static void interactionFire(int verb, Object* actor, Object* target, int arg)
         // is why the skill verb is allowed through in combat rather than dropped
         // at the wire: dropping it silently left the player with no feedback at
         // all. Sneak is the exception and toggles as normal (actions.cc:1760).
-        actionUseSkill(actor, target, arg);
+        actionUseSkill(actor, target, static_cast<Skill>(arg));
         break;
     case kInteractTalk:
         // _talk_to's body: latch a dialog request consumed by scriptsHandleRequests
@@ -529,14 +529,14 @@ static void interactionFire(int verb, Object* actor, Object* target, int arg)
         // The viewer opens its loot modal once the dude arrives adjacent
         // (viewerPollPendingLoot), and take/put verbs do the transfer.
         //
-        // Charge the same 3 AP vanilla does. _action_loot_container hangs
-        // _check_scenery_ap_cost off a reg_anim callback (actions.cc:1621) that
+        // Charge the same 3 AP vanilla does. actionLootCritter hangs
+        // checkSceneryUseActionPointCost off a reg_anim callback (actions.cc:1621) that
         // never fires on the server, so the cost has to be applied in-call here;
         // it self-gates on isInCombat, so this stays free out of combat. A
         // refusal (msg 700, streamed by the check) means the container does not
         // open — otherwise looting a corpse mid-fight would be the one free
         // action in the game.
-        if (_check_scenery_ap_cost(actor, target) == -1) {
+        if (checkSceneryUseActionPointCost(actor, target) == -1) {
             break;
         }
         if (!serverLootOpen(actor, target)) {
@@ -546,7 +546,7 @@ static void interactionFire(int verb, Object* actor, Object* target, int arg)
         // line in the log AND no word on the wire: the viewer re-judged adjacency for
         // itself and opened the screen when IT thought the dude had arrived. When the
         // two judgements disagreed the player got nothing at all, and every retry
-        // re-fired this arm — and _obj_use_container is a TOGGLE, so an owner clicking
+        // re-fired this arm — and objectUseContainer is a TOGGLE, so an owner clicking
         // a grave twenty times opened and shut it twenty times while the screen never
         // appeared. The server is the one that knows the interaction fired; addressed
         // to the actor who asked.
@@ -559,7 +559,7 @@ static void interactionFire(int verb, Object* actor, Object* target, int arg)
         // arg = the item pid. Re-resolve it on the actor's TOP-LEVEL inventory at
         // FIRE time — never a cached Object* (the inventory can change during the
         // approach; a consumed/dropped item must not fire). Run the real engine
-        // action: on serverLoopActive() it dispatches straight to _obj_use_item_on
+        // action: on serverLoopActive() it dispatches straight to objectUseItemOn
         // (the reg_anim callback that legacy uses is a server no-op), which runs the
         // item's / target's USE_OBJ_ON script (the Temple Key unlocks its door) or
         // the default use — any world change streams back via OBJECT_DELTA / events.
@@ -581,11 +581,11 @@ static void interactionFire(int verb, Object* actor, Object* target, int arg)
             // stream to every viewer via the actor-HP + OBJECT_DELTA channels, and the
             // stand-up fid + un-flatten ride OBJECT_DELTA_FID / OBJECT_DELTA_FLAGS.
             if (serverDedicatedActive() && playerActorIs(target) && critterIsDead(target)
-                && itemIsHealing(item->pid)) {
+                && itemIsHealing(item)) {
                 if (critterRevive(target)) {
                     // Consume exactly one authoritative unit. itemRemove peels one object
                     // off a stack but deliberately does not destroy that detached object;
-                    // normal drug/item use finishes the same lifecycle with _obj_destroy.
+                    // normal drug/item use finishes the same lifecycle with objectDestroy.
                     // Destroy it here too so there is no leaked duplicate identity that a
                     // later inventory reconcile can mistake for a second consumed powder.
                     if (itemRemove(actor, item, 1) == 0) {
@@ -615,11 +615,11 @@ static void interactionFire(int verb, Object* actor, Object* target, int arg)
 // ground-flagged scenery or container, MIDDLE otherwise.
 static int interactionGestureAnim(int verb, Object* target)
 {
-    int type = FID_TYPE(target->fid);
+    int type = FrmId(target->fid).objectType();
     Proto* proto = nullptr;
     switch (verb) {
     case kInteractUse:
-        if (type == OBJ_TYPE_SCENERY && protoGetProto(target->pid, &proto) == 0) {
+        if (type == OBJ_TYPE_SCENERY && protoGetProto(target, &proto) == 0) {
             if (proto->scenery.type == SCENERY_TYPE_STAIRS) {
                 return -1; // vanilla plays no gesture for stairs
             }
@@ -627,7 +627,7 @@ static int interactionGestureAnim(int verb, Object* target)
                 return ANIM_MAGIC_HANDS_GROUND;
             }
         }
-        if (type == OBJ_TYPE_CRITTER && _critter_is_prone(target)) {
+        if (type == OBJ_TYPE_CRITTER && critterIsProne(target)) {
             return ANIM_MAGIC_HANDS_GROUND;
         }
         return ANIM_MAGIC_HANDS_MIDDLE;
@@ -637,17 +637,17 @@ static int interactionGestureAnim(int verb, Object* target)
         // only an OPENED-in-place container consults its ground/middle openFlag. The
         // old code read openFlags on non-container protos (garbage union) → every
         // ground item wrongly played MIDDLE (same as a door).
-        if (protoGetProto(target->pid, &proto) != 0) {
+        if (protoGetProto(target, &proto) != 0) {
             return ANIM_MAGIC_HANDS_GROUND; // proto miss: default to the common case
         }
-        if (proto->item.type != ITEM_TYPE_CONTAINER || _proto_action_can_pickup(target->pid)) {
+        if (proto->item.type != ITEM_TYPE_CONTAINER || _proto_action_can_pickup(target)) {
             return ANIM_MAGIC_HANDS_GROUND;
         }
         return (proto->item.data.container.openFlags & 0x01) != 0
             ? ANIM_MAGIC_HANDS_GROUND
             : ANIM_MAGIC_HANDS_MIDDLE;
     case kInteractSkill:
-        return (type == OBJ_TYPE_CRITTER && _critter_is_prone(target))
+        return (type == OBJ_TYPE_CRITTER && critterIsProne(target))
             ? ANIM_MAGIC_HANDS_GROUND
             : ANIM_MAGIC_HANDS_MIDDLE;
     default:
@@ -680,7 +680,7 @@ static void interactionEmitGesture(int verb, Object* actor, Object* target)
     if (faceTarget) {
         animationRegisterRotateToTile(actor, target->tile);
     }
-    animationRegisterAnimate(actor, anim, 0);
+    animationRegisterAnimate(actor, static_cast<AnimationType>(anim), 0);
     reg_anim_end();
     presRecordSectionEnd();
     presenter()->presSeq(presRecordData(), presRecordSize(), presRecordOpCount(), actor->netId);
@@ -735,11 +735,11 @@ static void serverControlEmitReloadPresentation(Object* weapon)
 // effect of the presSeq below, presenter_network.cc). Idempotent (explicit target
 // hand, not a toggle), so a resend re-derives the same fid and re-plays the draw.
 //
-// This mirrors _invenWieldFunc's weapon branch (inventory.cc:441-494) MINUS the
+// This mirrors inventoryEquipFunc's weapon branch (inventory.cc:441-494) MINUS the
 // blocking reg_anim pump and the HUD callbacks: it records the same leaves and ships
 // them as EVENT_PRES_SEQ. The authoritative armed fid is set DIRECTLY (rides
 // OBJECT_DELTA; viewers HOLD it during the replay) — and unconditionally, not just in
-// combat like _invenWieldFunc, because out of combat this is the whole point: the
+// combat like inventoryEquipFunc, because out of combat this is the whole point: the
 // server must show the drawn/holstered pose to every viewer and to a mid-join.
 static void serverControlSwapHand(Object* actor, int slot, int hand)
 {
@@ -750,21 +750,21 @@ static void serverControlSwapHand(Object* actor, int slot, int hand)
 
     // The weapon now in that hand (item1 = left, item2 = right), or null = empty hand.
     Object* held = hand == HAND_RIGHT ? critterGetItem2(actor) : critterGetItem1(actor);
-    int newCode = (held != nullptr && itemGetType(held) == ITEM_TYPE_WEAPON)
-        ? weaponGetAnimationCode(held) : 0;
-    int oldCode = (actor->fid & 0xF000) >> 12; // the weapon-animation nibble in the current fid
+    WeaponAnimation newCode = (held != nullptr && itemGetType(held) == ITEM_TYPE_WEAPON)
+        ? weaponGetAnimationCode(held) : WeaponAnimation::None;
+    WeaponAnimation oldCode = FrmId(actor).weaponAnimation(); // the weapon-animation nibble in the current fid
 
     // Authoritative armed stand fid for the new hand, preserving the armor/base body
     // frame and skin nibble (the invunwield armor branch template) — only the
     // weapon-animation nibble changes.
-    int standFid = buildFid(OBJ_TYPE_CRITTER, actor->fid & 0xFFF, ANIM_STAND, newCode, actor->rotation + 1);
-    if (artExists(standFid) && actor->fid != standFid) {
-        objectSetFid(actor, standFid, nullptr);
+    FrmId standFid(actor, ANIM_STAND, newCode, actor->rotation + 1);
+    if (standFid.exist() && actor->fid != standFid.fid()) {
+        objectSetFrmId(actor, standFid, nullptr);
         objectSetFrame(actor, 0, nullptr);
     }
 
     // Record the holster (old weapon) + draw (new weapon) and ship it. `recordedDraw`
-    // mirrors _invenWieldFunc: only an actual put-away/take-out is worth shipping; a
+    // mirrors inventoryEquipFunc: only an actual put-away/take-out is worth shipping; a
     // bare empty-hand→empty-hand toggle records a SetFid the fid delta already covers,
     // so abort rather than ship a redundant one. Inert (recording=false) off-server.
     bool recording = !isoIsDisabled() && presRecordEnabled();
@@ -775,16 +775,16 @@ static void serverControlSwapHand(Object* actor, int slot, int hand)
     if (!isoIsDisabled()) {
         reg_anim_begin(ANIMATION_REQUEST_RESERVED);
     }
-    if (oldCode != 0) {
+    if (oldCode != WeaponAnimation::None) {
         animationRegisterAnimate(actor, ANIM_PUT_AWAY, 0);
         recordedDraw = true;
     }
-    if (newCode != 0) {
+    if (newCode != WeaponAnimation::None) {
         animationRegisterTakeOutWeapon(actor, newCode, -1);
         recordedDraw = true;
     } else {
-        int fid = buildFid(OBJ_TYPE_CRITTER, actor->fid & 0xFFF, ANIM_STAND, 0, actor->rotation + 1);
-        animationRegisterSetFid(actor, fid, -1);
+        FrmId fid(actor, ANIM_STAND, WeaponAnimation::None, actor->rotation + 1);
+        animationRegisterSetFrmId(actor, fid, -1);
     }
     if (!isoIsDisabled()) {
         reg_anim_end();
@@ -816,7 +816,7 @@ static void serverControlSwapHand(Object* actor, int slot, int hand)
 // re-resolution window: the intent is spent here or not at all.
 //
 // AP for the OUTCOME is charged by the vanilla bodies themselves, not here —
-// _check_scenery_ap_cost (3 AP) inside the use/pickup paths, and the 2 AP wrapper
+// checkSceneryUseActionPointCost (3 AP) inside the use/pickup paths, and the 2 AP wrapper
 // for use-item-on. Charging it again at this layer would double-bill.
 bool serverControlRunCombatInteract(Object* actor, int verb, int targetNetId, int arg)
 {
@@ -1062,7 +1062,7 @@ void serverControlAdvancePending()
         }
 
         // The outcome must run AS the acting player: interactionFire reaches
-        // _obj_use_door / actionPickUp / skill use, whose callee trees read gDude
+        // objectUseDoor / actionPickUp / skill use, whose callee trees read gDude
         // for source_obj, PC branches and message voice (Ch 7.2).
         ServerActorScope scope(actor);
 
@@ -2331,7 +2331,7 @@ void serverControlLine(int sessionId, const char* line)
 
     // -- Dialog choice verbs (A2, DIALOG_STREAMING_PLAN) --------------------
     // dsay <index> / dend route the viewer's picked reply through the trust
-    // boundary into the dialog intent queue, which the server-side _gdProcess
+    // boundary into the dialog intent queue, which the server-side gameDialogProcessUI
     // block-and-pump barrier drains (game_dialog.cc). Three gates:
     //   * claimant  — only the controlling client may drive.
     //   * dialog-active — _gdialogActive() is false unless a conversation is
@@ -2356,14 +2356,14 @@ void serverControlLine(int sessionId, const char* line)
         // _gdialogActive() is kept only so the pre-existing engine-TALK path keeps
         // its exact old behaviour. Gating on _gdialogActive() ALONE was a deadlock:
         // a script-driven conversation (gsay_start/gsay_end -> _gdialogGo ->
-        // _gdProcess, no gameDialogEnter) leaves that flag 0, so every dsay/dend
+        // gameDialogProcessUI, no gameDialogEnter) leaves that flag 0, so every dsay/dend
         // was thrown away while the server sat parked in the barrier waiting for
         // one. See the note on gameDialogServerNodeActive() in game_dialog.h.
         if (!_gdialogActive() && !gameDialogServerNodeActive()) {
             // REVERTED (2026-07-21): this branch briefly emitted presenter()->
             // dialogEnd() here to unstick the viewer's waiting-for-response latch.
             // That was WRONG and caused a worse bug — "_gdialogActive() is false"
-            // does NOT mean _gdProcess has returned, so it told the viewer to tear
+            // does NOT mean gameDialogProcessUI has returned, so it told the viewer to tear
             // down while the server was still parked in the dialog barrier. The
             // viewer then stops sending dsay, the barrier never drains, and the
             // world is frozen while mv/rot/invdrop are still accepted by the pump:
@@ -2409,7 +2409,7 @@ void serverControlLine(int sessionId, const char* line)
     // The debug port's vocabulary VERBATIM (command.cc): boffer/btake/bunoffer
     // move `qty` of a pid between an owner and a table, bcommit is the 'M'/Offer
     // button, bdone the 'T'/Talk button, bcancel ESC. They feed the SAME
-    // barter_intent queue inventoryOpenTrade's headless drain already consumes,
+    // barter_intent queue barterProcessUI's headless drain already consumes,
     // so this adds a wire ROUTE to a proven mechanism rather than a mechanism.
     //
     // DRIVE FOLLOWS THE CONVERSATION. Barter is reached by picking a dialog
@@ -2632,7 +2632,7 @@ void serverControlLine(int sessionId, const char* line)
             while (target != nullptr) {
                 if (target->netId > 0
                     && (target->flags & OBJECT_HIDDEN) == 0
-                    && PID_TYPE(target->pid) == OBJ_TYPE_ITEM
+                    && ProtoId(target->pid).objectType() == OBJ_TYPE_ITEM
                     && itemGetType(target) != ITEM_TYPE_CONTAINER) {
                     break;
                 }
@@ -2690,7 +2690,7 @@ void serverControlLine(int sessionId, const char* line)
             }
             // Explosives have their own arm-and-drop semantics (useitem_armexplosive);
             // keep this verb to plain use-on and reject them at the trust boundary.
-            if (explosiveIsExplosive(item->pid)) {
+            if (explosiveIsExplosive(item)) {
                 fprintf(stderr, "f2_server: control useitemon pid=%d rejected (explosive; use arm path)\n", itemPid);
                 serverControlRefuse(sessionId, "Arm the explosive and drop it instead.");
                 return;
@@ -2702,15 +2702,15 @@ void serverControlLine(int sessionId, const char* line)
         if (strcmp(verb, "use") == 0 || strcmp(verb, "usedoor") == 0) {
             // Scenery use (doors/levers/ladders/stairs). `usedoor` keeps the slice-1
             // door-only validation (probe/older-client compat); `use` accepts any
-            // scenery and lets _obj_use route it. Walk-then-act (approach <= 1).
-            if (PID_TYPE(target->pid) != OBJ_TYPE_SCENERY) {
+            // scenery and lets objectUse route it. Walk-then-act (approach <= 1).
+            if (ProtoId(target->pid).objectType() != OBJ_TYPE_SCENERY) {
                 fprintf(stderr, "f2_server: control %s target netId=%d not scenery\n", verb, netId);
                 serverControlRefuse(sessionId, "You can't use that.");
                 return;
             }
             if (strcmp(verb, "usedoor") == 0) {
                 Proto* proto = nullptr;
-                if (protoGetProto(target->pid, &proto) != 0
+                if (protoGetProto(target, &proto) != 0
                     || proto->scenery.type != SCENERY_TYPE_DOOR) {
                     fprintf(stderr, "f2_server: control usedoor target netId=%d not a door\n", netId);
                     serverControlRefuse(sessionId, "That isn't a door.");
@@ -2723,7 +2723,7 @@ void serverControlLine(int sessionId, const char* line)
 
         if (strcmp(verb, "get") == 0) {
             // Ground item only — containers open the (not-yet-streamed) loot modal.
-            if (PID_TYPE(target->pid) != OBJ_TYPE_ITEM || itemGetType(target) == ITEM_TYPE_CONTAINER) {
+            if (ProtoId(target->pid).objectType() != OBJ_TYPE_ITEM || itemGetType(target) == ITEM_TYPE_CONTAINER) {
                 fprintf(stderr, "f2_server: control get target netId=%d not a ground item\n", netId);
                 serverControlRefuse(sessionId, "You can't pick that up.");
                 return;
@@ -2734,8 +2734,8 @@ void serverControlLine(int sessionId, const char* line)
 
         if (strcmp(verb, "look") == 0) {
             // No approach — examine streams the description (EVENT_CONSOLE). Mirror
-            // vanilla's fallback: if _obj_examine has no description to give (-1), fall
-            // back to _obj_look_at (game_mouse.cc LOOK case). Allowed in combat too.
+            // vanilla's fallback: if objectExamine has no description to give (-1), fall
+            // back to objectLookAt (game_mouse.cc LOOK case). Allowed in combat too.
             //
             // ►► EXAMINE IS NON-DESTRUCTIVE. It must NOT supersede a pending approach
             // latch or stop an in-flight walk: in vanilla LOOK only streams a
@@ -2746,8 +2746,8 @@ void serverControlLine(int sessionId, const char* line)
             // reg_anim_clear'd the approach walk before the actor arrived. A latch is
             // dropped only by a real REPLACING action (a new interact / approach / move
             // / push / explicit cancel), never by looking at something.
-            if (_obj_examine(gDude, target) == -1) {
-                _obj_look_at(gDude, target);
+            if (objectExamine(gDude, target) == -1) {
+                objectLookAt(gDude, target);
             }
             fprintf(stderr, "f2_server: control look netId=%d\n", netId);
             return;
@@ -2755,7 +2755,7 @@ void serverControlLine(int sessionId, const char* line)
 
         if (strcmp(verb, "push") == 0) {
             // No approach — actionPush displaces the TARGET, not the actor (vanilla).
-            if (PID_TYPE(target->pid) != OBJ_TYPE_CRITTER) {
+            if (ProtoId(target->pid).objectType() != OBJ_TYPE_CRITTER) {
                 fprintf(stderr, "f2_server: control push target netId=%d not a critter\n", netId);
                 serverControlRefuse(sessionId, "There is nobody there to push.");
                 return;
@@ -2784,9 +2784,9 @@ void serverControlLine(int sessionId, const char* line)
         // (kInteractLoot fires no server outcome); the viewer opens its loot modal on
         // arrival and drives take/put from there. A live critter is steal (separate).
         if (strcmp(verb, "loot") == 0) {
-            bool isContainer = PID_TYPE(target->pid) == OBJ_TYPE_ITEM
+            bool isContainer = ProtoId(target->pid).objectType() == OBJ_TYPE_ITEM
                 && itemGetType(target) == ITEM_TYPE_CONTAINER;
-            bool isCorpse = PID_TYPE(target->pid) == OBJ_TYPE_CRITTER && critterIsDead(target);
+            bool isCorpse = ProtoId(target->pid).objectType() == OBJ_TYPE_CRITTER && critterIsDead(target);
             if (!isContainer && !isCorpse) {
                 fprintf(stderr, "f2_server: control loot target netId=%d not a container/corpse\n", netId);
                 serverControlRefuse(sessionId, "There is nothing there to loot.");
@@ -2811,7 +2811,7 @@ void serverControlLine(int sessionId, const char* line)
         }
         // Walk-then-act (approach < 9). Verb ships; the viewer menu does not wire it
         // until dialog-options streaming (§5).
-        if (PID_TYPE(target->pid) != OBJ_TYPE_CRITTER) {
+        if (ProtoId(target->pid).objectType() != OBJ_TYPE_CRITTER) {
             fprintf(stderr, "f2_server: control talk target netId=%d not a critter\n", netId);
             serverControlRefuse(sessionId, "There is nobody there to talk to.");
             return;
@@ -2894,7 +2894,7 @@ void serverControlLine(int sessionId, const char* line)
             // lives in gInventoryMessageList, a static inside inventory_ui.cc,
             // which is f2_client and not linked into f2_server. Msg 700 is the
             // same refusal from gProtoMessageList — the list the server already
-            // speaks, and the one _check_scenery_ap_cost uses for the identical
+            // speaks, and the one checkSceneryUseActionPointCost uses for the identical
             // refusal on doors and pickups, so the player gets one consistent
             // wording for "not enough AP" across the whole interaction suite.
             MessageListItem messageListItem;
@@ -2958,7 +2958,7 @@ void serverControlLine(int sessionId, const char* line)
         // Greppable sheet-edit trace: scripts/check_sheet.sh matches this prefix.
         fprintf(stderr, "f2_server: control %s slot=%d skill=%d rc=%d value=%d sp=%d\n",
             verb, serverControlSlotForSession(sessionId), arg, rc,
-            skillIsValid(arg) ? skillGetValue(actor, arg) : -1,
+            skillIsValid(arg) ? skillGetValue(actor, static_cast<Skill>(arg)) : -1,
             pcGetStat(PC_STAT_UNSPENT_SKILL_POINTS, actor));
         return;
     }
@@ -3020,7 +3020,7 @@ void serverControlLine(int sessionId, const char* line)
         }
         // Vanilla's own gate, and the same one the pipboy checks before it even offers
         // the rest menu: some maps forbid resting outright.
-        if (!_critter_can_obj_dude_rest()) {
+        if (!critterCanDudeRest()) {
             serverControlRefuse(sessionId, "You cannot rest at this location!");
             return;
         }
@@ -3095,8 +3095,8 @@ void serverControlLine(int sessionId, const char* line)
             return;
         }
 
-        int map = -1;
-        int elevation = -1;
+        Map map = MAP_INVALID;
+        int elevation = ELEVATION_INVALID;
         int tile = -1;
         elevatorResolveDestination(elevator, arg, &map, &elevation, &tile);
         if (tile == -1) {
@@ -3166,7 +3166,7 @@ void serverControlLine(int sessionId, const char* line)
                 serverControlRefuse(sessionId, "It isn't your turn.");
                 return;
             }
-            int hitMode = hand == HAND_LEFT ? HIT_MODE_LEFT_WEAPON_RELOAD : HIT_MODE_RIGHT_WEAPON_RELOAD;
+            HitMode hitMode = hand == HAND_LEFT ? HIT_MODE_LEFT_WEAPON_RELOAD : HIT_MODE_RIGHT_WEAPON_RELOAD;
             int apCost = itemGetActionPointCost(gDude, hitMode, false);
             if (apCost > gDude->data.critter.combat.ap) {
                 fprintf(stderr, "f2_server: control reload dropped (need %d AP, have %d)\n",
@@ -3249,14 +3249,14 @@ void serverControlLine(int sessionId, const char* line)
         }
 
         // invunwield <hand>: 0 = left, 1 = right, 2 = armor. No pid — the slot
-        // identifies the item. _inven_unwield covers the hands (clears the in-hand
+        // identifies the item. inventoryUnequip covers the hands (clears the in-hand
         // flag + puts the weapon away); armor has no engine unwield fn, so mirror
         // the inline unequip the inventory UI does (clear WORN + recompute AC).
         if (strcmp(verb, "invunwield") == 0) {
             int hand = n >= 2 ? arg : -1;
             if (hand == HAND_LEFT || hand == HAND_RIGHT) {
                 Object* held = hand == HAND_LEFT ? critterGetItem1(gDude) : critterGetItem2(gDude);
-                _inven_unwield(gDude, hand);
+                inventoryUnequip(gDude, static_cast<Hand>(hand));
                 // RE-STACK. The wield path peels one unit out of its stack into a slot
                 // of its own (it must — a stack marked in-hand is undroppable), so an
                 // unwield hands the unit back as a SEPARATE slot and the inventory shows
@@ -3285,7 +3285,7 @@ void serverControlLine(int sessionId, const char* line)
                 Object* armor = critterGetArmor(gDude);
                 if (armor != nullptr) {
                     armor->flags &= ~OBJECT_WORN;
-                    _adjust_ac(gDude, armor, nullptr);
+                    adjustCritterStatsOnArmorChange(gDude, armor, nullptr);
                     // Back to the bare body, mirroring the equip side (and vanilla's
                     // own unequip, proto_instance.cc's remove-from-inven armor branch,
                     // which reads the same naked base out of the dude proto). Without
@@ -3293,13 +3293,13 @@ void serverControlLine(int sessionId, const char* line)
                     // you are wearing.
                     Proto* dudeProto;
                     int baseFrmId = 1;
-                    if (protoGetProto(0x1000000, &dudeProto) != -1) {
+                    if (protoGetProto(ProtoId(CritterProtoTypeId::Dude), &dudeProto) != -1) {
                         baseFrmId = dudeProto->fid & 0xFFF;
                     }
-                    int bareFid = buildFid(OBJ_TYPE_CRITTER, baseFrmId, ANIM_STAND,
-                        (gDude->fid & 0xF000) >> 12, gDude->rotation + 1);
-                    if (artExists(bareFid) && gDude->fid != bareFid) {
-                        objectSetFid(gDude, bareFid, nullptr);
+                    FrmId bareFid(static_cast<CritterFrameId>(baseFrmId), ANIM_STAND,
+                        FrmId(gDude).weaponAnimation(), gDude->rotation + 1);
+                    if (bareFid.exist() && gDude->fid != bareFid.fid()) {
+                        objectSetFrmId(gDude, bareFid, nullptr);
                         objectSetFrame(gDude, 0, nullptr);
                     }
                 }
@@ -3376,13 +3376,13 @@ void serverControlLine(int sessionId, const char* line)
             // + presentation back to every viewer, like equip/drop.
             //
             // GUARD: reject explosives. itemUseFromInventory → _obj_use_explosive →
-            // _inven_set_timer → inventoryQuantitySelect(SET_TIMER) is a BLOCKING
+            // inventorySetTimer → inventoryQuantitySelect(SET_TIMER) is a BLOCKING
             // local modal with no headless representation (it would spin inputGetInput
             // on the server). Arming C4/dynamite over the wire is a deferred increment
             // (viewer runs the timer modal locally + sends the seconds → a headless arm
-            // that skips _inven_set_timer). See DIALOG_STREAMING_PLAN's sibling item-use
+            // that skips inventorySetTimer). See DIALOG_STREAMING_PLAN's sibling item-use
             // notes / p5-server-plan item-usage gap.
-            if (explosiveIsExplosive(item->pid)) {
+            if (explosiveIsExplosive(item)) {
                 fprintf(stderr, "f2_server: control useitem pid=%d rejected (explosive timer modal not wired)\n", pid);
                 serverControlRefuse(sessionId, "Set the timer from the inventory to arm that.");
                 return;
@@ -3399,7 +3399,7 @@ void serverControlLine(int sessionId, const char* line)
         if (strcmp(verb, "useitem_armexplosive") == 0) {
             // Sub-action of USE for C4 / dynamite. The plain `useitem` verb rejects
             // explosives because vanilla arming (_obj_use_explosive) opens the blocking
-            // _inven_set_timer dial (inventoryQuantitySelect SET_TIMER) with no headless
+            // inventorySetTimer dial (inventoryQuantitySelect SET_TIMER) with no headless
             // representation. Instead the VIEWER runs that timer dial LOCALLY to pick the
             // countdown and sends the chosen seconds here; the server arms the charge
             // headless via the shared _obj_arm_explosive helper (identical post-modal
@@ -3408,8 +3408,8 @@ void serverControlLine(int sessionId, const char* line)
             // actionExplode's serverLoopActive() branch (already decoupled), and a door /
             // scenery destroyed by the blast streams out as EVENT_DESTROY. The armed
             // charge is normally dropped next to the target via `invdrop` before it blows
-            // (so _queue_do_explosion_ uses the ground tile, not the dude's).
-            if (!explosiveIsExplosive(item->pid)) {
+            // (so explosionProcess uses the ground tile, not the dude's).
+            if (!explosiveIsExplosive(item)) {
                 fprintf(stderr, "f2_server: control useitem_armexplosive pid=%d not an explosive, ignored\n", pid);
                 serverControlRefuse(sessionId, "That isn't an explosive.");
                 return;
@@ -3459,14 +3459,14 @@ void serverControlLine(int sessionId, const char* line)
         }
 
         if (strcmp(verb, "invwield") == 0) {
-            // arg2 = target hand (0/1); ignored for armor (_inven_wield branches on
+            // arg2 = target hand (0/1); ignored for armor (inventoryEquip branches on
             // ITEM_TYPE_ARMOR internally). Default to the right hand.
             int hand = n >= 3 ? arg2 : HAND_RIGHT;
             if (hand != HAND_LEFT && hand != HAND_RIGHT) {
                 hand = HAND_RIGHT;
             }
             // Clear the item's in-hand flags FIRST. A slot→slot move re-wields an item
-            // that already carries its OLD hand flag, and _inven_wield only ADDS the new
+            // that already carries its OLD hand flag, and inventoryEquip only ADDS the new
             // one — so without this the item keeps BOTH IN_LEFT_HAND|IN_RIGHT_HAND, and the
             // viewer's equipmentDetach reconstructs it as a two-slot (two-handed) item,
             // rendering the sprite ghosted across both slots. Vanilla never hits this (its
@@ -3484,17 +3484,17 @@ void serverControlLine(int sessionId, const char* line)
             // an earlier version made one and leaked an object per wield.
             //
             // The stamp before itemAdd is the load-bearing part: _item_identical treats
-            // only an OBJECT_EQUIPPED item as unstackable, and _inven_wield sets that
+            // only an OBJECT_EQUIPPED item as unstackable, and inventoryEquip sets that
             // flag AFTER we add — so an unstamped peel merges straight back into the
             // stack it came from (itemAdd's merge branch keeps ONE object and bumps the
             // quantity), the split silently no-ops, and the whole stack ends up flagged
             // in-hand. itemDropStack then refuses to drop ANY of it (owner-reported:
             // equip one spear of two, and neither can be dropped until you unequip).
-            // Clear the stamp again immediately: _inven_wield owns the real equip flags,
+            // Clear the stamp again immediately: inventoryEquip owns the real equip flags,
             // and leaving WORN set would make its armor branch un-wear the peel itself
             // instead of the armor actually being replaced.
             if (stackQty > 1) {
-                const int splitFlag = itemGetType(item) == ITEM_TYPE_ARMOR
+                const ObjectFlags splitFlag = itemGetType(item) == ITEM_TYPE_ARMOR
                     ? OBJECT_WORN
                     : (hand == HAND_LEFT ? OBJECT_IN_LEFT_HAND : OBJECT_IN_RIGHT_HAND);
                 if (itemRemove(gDude, item, 1) == 0) {
@@ -3506,23 +3506,23 @@ void serverControlLine(int sessionId, const char* line)
                 }
             }
             item->flags &= ~OBJECT_IN_ANY_HAND;
-            // For the DUDE, _inven_wield applies the WORN flag + paperdoll fid but does
+            // For the DUDE, inventoryEquip applies the WORN flag + paperdoll fid but does
             // NOT recompute AC/DR/DT (that lives in the inventory UI, which the viewer
             // skips) — so equip the armor's protection here, mirroring the UI's
-            // _adjust_ac(critter, oldArmor, newArmor). Harmless for non-armor (guarded).
+            // adjustCritterStatsOnArmorChange(critter, oldArmor, newArmor). Harmless for non-armor (guarded).
             Object* oldArmor = critterGetArmor(gDude);
-            _inven_wield(gDude, item, hand);
+            inventoryEquip(gDude, item, static_cast<Hand>(hand));
             // A genuine two-handed weapon occupies BOTH hand slots (the UI represents that
-            // as leftHand==rightHand); _inven_wield only sets one flag, so pair them here.
+            // as leftHand==rightHand); inventoryEquip only sets one flag, so pair them here.
             if (itemGetType(item) == ITEM_TYPE_WEAPON && weaponIsTwoHanded(item)) {
                 item->flags |= (OBJECT_IN_LEFT_HAND | OBJECT_IN_RIGHT_HAND);
             }
             if (itemGetType(item) == ITEM_TYPE_ARMOR) {
-                _adjust_ac(gDude, oldArmor, item);
+                adjustCritterStatsOnArmorChange(gDude, oldArmor, item);
                 // Server-authoritative APPEARANCE, the armor twin of the weapon block
-                // below — and the same root cause. _inven_wield applies the armored
+                // below — and the same root cause. inventoryEquip applies the armored
                 // SKIN (the fid's low 12 bits, its base frm id) through
-                // animationRegisterSetFid, an animation leaf that does not hold on the
+                // animationRegisterSetFrmId, an animation leaf that does not hold on the
                 // dedicated server: measured, gDude's base stayed the premade's 62
                 // across equip, attack and throw while the viewer showed the armored
                 // body it had applied locally.
@@ -3537,36 +3537,36 @@ void serverControlLine(int sessionId, const char* line)
                 // Owner-reported. Fixing it here rather than at the throw keeps ONE
                 // authority for appearance: whatever the server believes it is
                 // wearing, it looks like.
-                int baseFrmId = critterGetStat(gDude, STAT_GENDER) == GENDER_FEMALE
-                    ? armorGetFemaleFid(item)
-                    : armorGetMaleFid(item);
-                if (baseFrmId == -1) {
-                    baseFrmId = 1; // _inven_wield's own fallback
+                CritterFrameId baseFrmId = critterGetStat(gDude, STAT_GENDER) == GENDER_FEMALE
+                    ? armorGetFemaleFrameId(item)
+                    : armorGetMaleFrameId(item);
+                if (baseFrmId == CritterFrameId::Invalid) {
+                    baseFrmId = static_cast<CritterFrameId>(1); // inventoryEquip's own fallback
                 }
                 // Keep the weapon code — equipping armor must not un-draw a held gun.
-                int armoredFid = buildFid(OBJ_TYPE_CRITTER, baseFrmId, ANIM_STAND,
-                    (gDude->fid & 0xF000) >> 12, gDude->rotation + 1);
-                if (artExists(armoredFid) && gDude->fid != armoredFid) {
-                    objectSetFid(gDude, armoredFid, nullptr);
+                FrmId armoredFid(baseFrmId, ANIM_STAND,
+                    FrmId(gDude).weaponAnimation(), gDude->rotation + 1);
+                if (armoredFid.exist() && gDude->fid != armoredFid.fid()) {
+                    objectSetFrmId(gDude, armoredFid, nullptr);
                     objectSetFrame(gDude, 0, nullptr); // stale frame >= new art's count renders nothing
                 }
             }
             // Server-authoritative APPEARANCE: reflect the equipped weapon in gDude's FID.
-            // _invenWieldFunc only updates the world fid via interface-/combat-gated paths
+            // inventoryEquipFunc only updates the world fid via interface-/combat-gated paths
             // (interfaceGetCurrentHand, isInCombat, !isoIsDisabled) that don't hold on the
             // dedicated server out of combat — so a wielded weapon sits in-hand (rhandPid set,
             // the server even attacks WITH it) while gDude's fid keeps weapon-code 0. Result:
             // no fid delta ships → the client renders you unarmed → your first shot is a
             // zero-frame nothing (owner-found: rocket launcher). Recompute the STAND fid with
             // the weapon's animation code; the base (0xFFF) already carries the worn-armor skin
-            // (_inven_wield's armor branch sets it). Weapons only — armor changed the base, not
+            // (inventoryEquip's armor branch sets it). Weapons only — armor changed the base, not
             // the code. Guard on artExists so a base/weapon combo without art is a no-op, not a
             // blank sprite. The in-combat draw path (inventory.cc:469) still owns combat wields.
             if (itemGetType(item) == ITEM_TYPE_WEAPON) {
-                int weaponCode = weaponGetAnimationCode(item);
-                int standFid = buildFid(OBJ_TYPE_CRITTER, gDude->fid & 0xFFF, ANIM_STAND, weaponCode, gDude->rotation + 1);
-                if (artExists(standFid) && gDude->fid != standFid) {
-                    objectSetFid(gDude, standFid, nullptr);
+                WeaponAnimation weaponCode = weaponGetAnimationCode(item);
+                FrmId standFid(gDude, ANIM_STAND, weaponCode, gDude->rotation + 1);
+                if (standFid.exist() && gDude->fid != standFid.fid()) {
+                    objectSetFrmId(gDude, standFid, nullptr);
                     objectSetFrame(gDude, 0, nullptr);
                 }
             }
@@ -3587,9 +3587,9 @@ void serverControlLine(int sessionId, const char* line)
                 qty = stackQty;
             }
             // Dropping WORN armor must also strip its AC bonus (itemDropStack only moves
-            // the object) — same _adjust_ac the invunwield-armor path uses.
+            // the object) — same adjustCritterStatsOnArmorChange the invunwield-armor path uses.
             if (itemGetType(item) == ITEM_TYPE_ARMOR && (item->flags & OBJECT_WORN) != 0) {
-                _adjust_ac(gDude, item, nullptr);
+                adjustCritterStatsOnArmorChange(gDude, item, nullptr);
             }
             itemDropStack(gDude, item, qty);
             fprintf(stderr, "f2_server: control invdrop pid=%d qty=%d\n", pid, qty);
@@ -3644,9 +3644,9 @@ void serverControlLine(int sessionId, const char* line)
             serverControlRefuse(sessionId, "That is no longer there.");
             return;
         }
-        bool isContainer = PID_TYPE(container->pid) == OBJ_TYPE_ITEM
+        bool isContainer = ProtoId(container->pid).objectType() == OBJ_TYPE_ITEM
             && itemGetType(container) == ITEM_TYPE_CONTAINER;
-        bool isCorpse = PID_TYPE(container->pid) == OBJ_TYPE_CRITTER && critterIsDead(container);
+        bool isCorpse = ProtoId(container->pid).objectType() == OBJ_TYPE_CRITTER && critterIsDead(container);
         if (!isContainer && !isCorpse) {
             fprintf(stderr, "f2_server: control %s target netId=%d not a loot container/corpse\n", verb, netId);
             serverControlRefuse(sessionId, "There is nothing there to loot.");

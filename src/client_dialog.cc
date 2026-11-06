@@ -127,9 +127,9 @@ void clientModalWindowsSync()
         // _gdSetupFidget read gGameDialogHeadFid to locate the head art for lipsync
         // and the idle fidget. See client_dialog history for the Arroyo Elder repro.
         gGameDialogSpeaker = speaker;
-        gGameDialogHeadFid = gPendingHeadFid;
+        gGameDialogHeadFrmId = HeadFrmId(FrmId(gPendingHeadFid).frameId<HeadFrameId>(), static_cast<HeadFidget>(gPendingReaction));
         gGameDialogFidget = gPendingReaction;
-        _gdialogInitFromScript(gPendingHeadFid, gPendingReaction);
+        _gdialogInitFromScript(gGameDialogHeadFrmId, static_cast<HeadFidget>(gPendingReaction));
         gClientDialogSessionBuilt = true;
     }
 
@@ -260,7 +260,7 @@ bool clientDialogHandleKey(int keyCode)
     // "Talk" button posts KEY_LOWERCASE_T, but _gdProcess mode-3 branch —
     // which calls inventoryOpenTrade — is skipped on the viewer).
     if (keyCode == KEY_LOWERCASE_T) {
-        _barter_end_to_talk_to();
+        gameDialogEndBarter();
         // gameDialogTicker processes _dialogue_switch_mode=1 next tick:
         // destroys barter window, recreates dialog, unhides reply/options.
         return true;

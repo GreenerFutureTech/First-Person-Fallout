@@ -1,3 +1,28 @@
+#include <vector>
+#include <assert.h>
+#include <algorithm>
+#include <limits>
+#include <vector>
+#include "animation.h"
+#include "animation_defs.h"
+#include "combat.h"
+#include "combat_ai.h"
+#include "critter.h"
+#include "debug.h"
+#include "game.h"
+#include "game_mouse.h"
+#include "item.h"
+#include "map.h"
+#include "map_defs.h"
+#include "party_member.h"
+#include "scripts.h"
+#include "settings.h"
+#include "svga.h"
+#include "worldmap.h"
+#include "presenter.h"
+#include "server_players.h"
+#include "server_loop.h"
+#include "client_net.h" // clientViewerActive — combat-mirror guards (COMBAT_CLIENT_DESIGN.md §5.1)
 #include "object_render.h"
 
 #include <string.h>
@@ -30,29 +55,29 @@ static ObjectListNode** _renderTable = nullptr;
 // 0x519624
 static int _outlineCount = 0;
 // 0x519780
-unsigned char* _wallBlendTable = nullptr;
+Color* _wallBlendTable = nullptr;
 // 0x519784
-static unsigned char* _glassBlendTable = nullptr;
+static Color* _glassBlendTable = nullptr;
 // 0x519788
-static unsigned char* _steamBlendTable = nullptr;
+static Color* _steamBlendTable = nullptr;
 // 0x51978C
-static unsigned char* _energyBlendTable = nullptr;
+static Color* _energyBlendTable = nullptr;
 // 0x519790
-static unsigned char* _redBlendTable = nullptr;
+static Color* _redBlendTable = nullptr;
 // Likely outlined objects on the screen.
 //
 // 0x639C00
-static Object* _outlinedObjects[100];
+static std::vector<Object*> outlinedObjects;
 // 0x660EA0
-static unsigned char _glassGrayTable[256];
+static Color _glassGrayTable[COLOR_COUNT];
 // 0x660FA0
-unsigned char _commonGrayTable[256];
+Color _commonGrayTable[COLOR_COUNT];
 
 static void objectDrawOutline(Object* object, Rect* rect);
 static void _obj_render_object(Object* object, Rect* rect, int light);
 
 // 0x489550
-void _obj_render_pre_roof(Rect* rect, int elevation)
+void _obj_render_pre_roof(Rect* rect, MapElevation elevation)
 {
     if (!gObjectsInitialized) {
         return;
@@ -68,12 +93,12 @@ void _obj_render_pre_roof(Rect* rect, int elevation)
     int minY = updatedRect.top - 240;
     int maxX = updatedRect.right + 320;
     int maxY = updatedRect.bottom + 240;
-    int upperLeftTile = tileFromScreenXY(minX, minY, elevation, true);
+    int upperLeftTile = tileFromScreenXY(minX, minY, true);
     int updateAreaHexWidth = (maxX - minX + 1) / 32;
     int updateAreaHexHeight = (maxY - minY + 1) / 12;
     int parity = gCenterTile & 1;
 
-    _outlineCount = 0;
+    outlinedObjects.clear();
 
     int renderCount = 0;
     for (int i = 0; i < gObjectsUpdateAreaHexSize; i++) {
@@ -84,7 +109,7 @@ void _obj_render_pre_roof(Rect* rect, int elevation)
                 ? gObjectListHeadByTile[tile]
                 : nullptr;
 
-            int lightIntensity;
+            int lightIntensity = ambientIntensity;
             if (objectListNode != nullptr) {
                 // NOTE: Calls `lightGetTileIntensity` twice.
                 lightIntensity = std::max(ambientIntensity, lightGetTileIntensity(elevation, objectListNode->obj->tile));
@@ -96,17 +121,15 @@ void _obj_render_pre_roof(Rect* rect, int elevation)
                 }
 
                 if (elevation == objectListNode->obj->elevation) {
-                    if ((objectListNode->obj->flags & OBJECT_FLAT) == 0) {
+                    if ((objectListNode->obj->flags & OBJECT_FLAT) == OBJECT_NONE) {
                         break;
                     }
 
-                    if ((objectListNode->obj->flags & OBJECT_HIDDEN) == 0) {
+                    if ((objectListNode->obj->flags & OBJECT_HIDDEN) == OBJECT_NONE) {
                         _obj_render_object(objectListNode->obj, &updatedRect, lightIntensity);
 
-                        if ((objectListNode->obj->outline & OUTLINE_TYPE_MASK) != 0) {
-                            if ((objectListNode->obj->outline & OUTLINE_DISABLED) == 0 && _outlineCount < 100) {
-                                _outlinedObjects[_outlineCount++] = objectListNode->obj;
-                            }
+                        if (objectHasVisibleOutline(objectListNode->obj)) {
+                            outlinedObjects.push_back(objectListNode->obj);
                         }
                     }
                 }
@@ -120,8 +143,10 @@ void _obj_render_pre_roof(Rect* rect, int elevation)
         }
     }
 
+    tileRenderEdgeBlackSquares(&updatedRect, elevation, false);
+
     for (int i = 0; i < renderCount; i++) {
-        int lightIntensity;
+        int lightIntensity = ambientIntensity;
 
         ObjectListNode* objectListNode = _renderTable[i];
         if (objectListNode != nullptr) {
@@ -136,13 +161,11 @@ void _obj_render_pre_roof(Rect* rect, int elevation)
             }
 
             if (elevation == objectListNode->obj->elevation) {
-                if ((objectListNode->obj->flags & OBJECT_HIDDEN) == 0) {
+                if ((objectListNode->obj->flags & OBJECT_HIDDEN) == OBJECT_NONE) {
                     _obj_render_object(object, &updatedRect, lightIntensity);
 
-                    if ((objectListNode->obj->outline & OUTLINE_TYPE_MASK) != 0) {
-                        if ((objectListNode->obj->outline & OUTLINE_DISABLED) == 0 && _outlineCount < 100) {
-                            _outlinedObjects[_outlineCount++] = objectListNode->obj;
-                        }
+                    if (objectHasVisibleOutline(objectListNode->obj)) {
+                        outlinedObjects.push_back(objectListNode->obj);
                     }
                 }
             }
@@ -150,10 +173,12 @@ void _obj_render_pre_roof(Rect* rect, int elevation)
             objectListNode = objectListNode->next;
         }
     }
+
+    tileRenderEdgeBlackSquares(&updatedRect, elevation, true);
 }
 
 // 0x4897EC
-void _obj_render_post_roof(Rect* rect, int elevation)
+void _obj_render_post_roof(Rect* rect, MapElevation elevation)
 {
     if (!gObjectsInitialized) {
         return;
@@ -164,8 +189,8 @@ void _obj_render_post_roof(Rect* rect, int elevation)
         return;
     }
 
-    for (int index = 0; index < _outlineCount; index++) {
-        objectDrawOutline(_outlinedObjects[index], &updatedRect);
+    for (Object* object : outlinedObjects) {
+        objectDrawOutline(object, &updatedRect);
     }
 
     textObjectsRenderInRect(&updatedRect);
@@ -173,7 +198,7 @@ void _obj_render_post_roof(Rect* rect, int elevation)
     ObjectListNode* objectListNode = gObjectListHead;
     while (objectListNode != nullptr) {
         Object* object = objectListNode->obj;
-        if ((object->flags & OBJECT_HIDDEN) == 0) {
+        if ((object->flags & OBJECT_HIDDEN) == OBJECT_NONE) {
             _obj_render_object(object, &updatedRect, 0x10000);
         }
         objectListNode = objectListNode->next;
@@ -181,7 +206,7 @@ void _obj_render_post_roof(Rect* rect, int elevation)
 }
 
 // 0x48BDD8
-void _translucent_trans_buf_to_buf(unsigned char* src, int srcWidth, int srcHeight, int srcPitch, unsigned char* dest, int destX, int destY, int destPitch, unsigned char* a9, unsigned char* a10)
+void _translucent_trans_buf_to_buf(unsigned char* src, int srcWidth, int srcHeight, int srcPitch, unsigned char* dest, int destX, int destY, int destPitch, Color* blendTable, Color* colorTable)
 {
     dest += destPitch * destY + destX;
     int srcStep = srcPitch - srcWidth;
@@ -189,9 +214,8 @@ void _translucent_trans_buf_to_buf(unsigned char* src, int srcWidth, int srcHeig
 
     for (int y = 0; y < srcHeight; y++) {
         for (int x = 0; x < srcWidth; x++) {
-            // TODO: Probably wrong.
-            unsigned char v1 = a10[*src];
-            unsigned char* v2 = a9 + (v1 << 8);
+            Color v1 = colorTable[*src];
+            Color* v2 = blendTable + (v1 << 8);
             unsigned char v3 = *dest;
 
             *dest = v2[v3];
@@ -217,8 +241,8 @@ void _dark_trans_buf_to_buf(unsigned char* src, int srcWidth, int srcHeight, int
 
     for (int y = 0; y < srcHeight; y++) {
         for (int x = 0; x < srcWidth; x++) {
-            unsigned char color = *sp;
-            if (color != 0) {
+            Color color = static_cast<Color>(*sp);
+            if (color != COLOR_FIRST) {
                 if (color < 0xE5) {
                     color = intensityColorTable[color][intensityIndex];
                 }
@@ -236,7 +260,7 @@ void _dark_trans_buf_to_buf(unsigned char* src, int srcWidth, int srcHeight, int
 }
 
 // 0x48BF88
-void _dark_translucent_trans_buf_to_buf(unsigned char* src, int srcWidth, int srcHeight, int srcPitch, unsigned char* dest, int destX, int destY, int destPitch, int intensity, unsigned char* a10, unsigned char* a11)
+void _dark_translucent_trans_buf_to_buf(unsigned char* src, int srcWidth, int srcHeight, int srcPitch, unsigned char* dest, int destX, int destY, int destPitch, int intensity, Color* blendTable, Color* colorTable)
 {
     int srcStep = srcPitch - srcWidth;
     int destStep = destPitch - srcWidth;
@@ -249,8 +273,8 @@ void _dark_translucent_trans_buf_to_buf(unsigned char* src, int srcWidth, int sr
             unsigned char srcByte = *src;
             if (srcByte != 0) {
                 unsigned char destByte = *dest;
-                unsigned int index = a11[srcByte] << 8;
-                index = a10[index + destByte];
+                unsigned int index = colorTable[srcByte] << 8;
+                index = blendTable[index + destByte];
                 *dest = intensityColorTable[index][intensityIndex];
             }
 
@@ -328,22 +352,23 @@ void _obj_render_table_exit()
 // 0x48D1E4
 void _obj_blend_table_init()
 {
-    for (int index = 0; index < 256; index++) {
-        int r = (Color2RGB(index) & 0x7C00) >> 10;
-        int g = (Color2RGB(index) & 0x3E0) >> 5;
-        int b = Color2RGB(index) & 0x1F;
-        _glassGrayTable[index] = ((r + 5 * g + 4 * b) / 10) >> 2;
-        _commonGrayTable[index] = ((b + 3 * r + 6 * g) / 10) >> 2;
+    for (int index = COLOR_FIRST; index < COLOR_COUNT; index++) {
+        int rgb = Color2RGB(static_cast<Color>(index & COLOR_LAST));
+        int r = (rgb & 0x7C00) >> 10;
+        int g = (rgb & 0x3E0) >> 5;
+        int b = rgb & 0x1F;
+        _glassGrayTable[index] = static_cast<Color>(((r + 5 * g + 4 * b) / 10) >> 2);
+        _commonGrayTable[index] = static_cast<Color>(((b + 3 * r + 6 * g) / 10) >> 2);
     }
 
-    _glassGrayTable[0] = 0;
-    _commonGrayTable[0] = 0;
+    _glassGrayTable[0] = COLOR_FIRST;
+    _commonGrayTable[0] = COLOR_FIRST;
 
-    _wallBlendTable = _getColorBlendTable(_colorTable[25439]);
-    _glassBlendTable = _getColorBlendTable(_colorTable[10239]);
-    _steamBlendTable = _getColorBlendTable(_colorTable[32767]);
-    _energyBlendTable = _getColorBlendTable(_colorTable[30689]);
-    _redBlendTable = _getColorBlendTable(_colorTable[31744]);
+    _wallBlendTable = _getColorBlendTable(COLOR_PALE_BLUE);
+    _glassBlendTable = _getColorBlendTable(COLOR_CYAN);
+    _steamBlendTable = _getColorBlendTable(COLOR_WHITE);
+    _energyBlendTable = _getColorBlendTable(COLOR_YELLOW_GREEN);
+    _redBlendTable = _getColorBlendTable(COLOR_RED);
 }
 
 // NOTE: Inlined.
@@ -351,18 +376,18 @@ void _obj_blend_table_init()
 // 0x48D2E8
 void _obj_blend_table_exit()
 {
-    _freeColorBlendTable(_colorTable[25439]);
-    _freeColorBlendTable(_colorTable[10239]);
-    _freeColorBlendTable(_colorTable[32767]);
-    _freeColorBlendTable(_colorTable[30689]);
-    _freeColorBlendTable(_colorTable[31744]);
+    _freeColorBlendTable(COLOR_PALE_BLUE);
+    _freeColorBlendTable(COLOR_CYAN);
+    _freeColorBlendTable(COLOR_WHITE);
+    _freeColorBlendTable(COLOR_YELLOW_GREEN);
+    _freeColorBlendTable(COLOR_RED);
 }
 
 // 0x48EABC
 static void objectDrawOutline(Object* object, Rect* rect)
 {
     CacheEntry* cacheEntry;
-    Art* art = artLock(object->fid, &cacheEntry);
+    Art* art = artLock(FrmId(object), &cacheEntry);
     if (art == nullptr) {
         return;
     }
@@ -371,15 +396,12 @@ static void objectDrawOutline(Object* object, Rect* rect)
     int frameHeight = 0;
     artGetSize(art, object->frame, object->rotation, &frameWidth, &frameHeight);
 
-    Rect v49;
-    v49.left = 0;
-    v49.top = 0;
-    v49.right = frameWidth - 1;
+    Rect visibleFrameRect;
+    visibleFrameRect.left = 0;
+    visibleFrameRect.top = 0;
+    visibleFrameRect.right = frameWidth - 1;
 
-    // FIXME: I'm not sure why it ignores frameHeight and makes separate call
-    // to obtain height.
-    int v8 = artGetHeight(art, object->frame, object->rotation);
-    v49.bottom = v8 - 1;
+    visibleFrameRect.bottom = frameHeight - 1;
 
     Rect objectRect;
     if (object->tile == -1) {
@@ -390,7 +412,7 @@ static void objectDrawOutline(Object* object, Rect* rect)
     } else {
         int x;
         int y;
-        tileToScreenXY(object->tile, &x, &y, object->elevation);
+        tileToScreenXY(object->tile, &x, &y);
         x += 16;
         y += 8;
 
@@ -409,233 +431,250 @@ static void objectDrawOutline(Object* object, Rect* rect)
         object->sy = objectRect.top;
     }
 
-    Rect v32;
-    rectCopy(&v32, rect);
+    Rect expandedRect;
+    rectCopy(&expandedRect, rect);
 
-    v32.left--;
-    v32.top--;
-    v32.right++;
-    v32.bottom++;
+    expandedRect.left--;
+    expandedRect.top--;
+    expandedRect.right++;
+    expandedRect.bottom++;
 
-    rectIntersection(&v32, &gObjectsWindowRect, &v32);
+    rectIntersection(&expandedRect, &gObjectsWindowRect, &expandedRect);
 
-    if (rectIntersection(&objectRect, &v32, &objectRect) == 0) {
-        v49.left += objectRect.left - object->sx;
-        v49.top += objectRect.top - object->sy;
-        v49.right = v49.left + (objectRect.right - objectRect.left);
-        v49.bottom = v49.top + (objectRect.bottom - objectRect.top);
+    if (rectIntersection(&objectRect, &expandedRect, &objectRect) == 0) {
+        visibleFrameRect.left += objectRect.left - object->sx;
+        visibleFrameRect.top += objectRect.top - object->sy;
+        visibleFrameRect.right = visibleFrameRect.left + (objectRect.right - objectRect.left);
+        visibleFrameRect.bottom = visibleFrameRect.top + (objectRect.bottom - objectRect.top);
 
         unsigned char* src = artGetFrameData(art, object->frame, object->rotation);
 
+        // TODO: This base pointer is computed from unclipped object coordinates.
+        // Convert the outline scan to integer offsets so partially offscreen
+        // objects do not form out-of-bounds pointers before write-site checks.
         unsigned char* dest = gObjectsWindowBuffer + gObjectsWindowPitch * object->sy + object->sx;
         int destStep = gObjectsWindowPitch - frameWidth;
 
-        unsigned char color;
-        unsigned char* v47 = nullptr;
-        unsigned char* v48 = nullptr;
-        int v53 = object->outline & OUTLINE_PALETTED;
-        int outlineType = object->outline & OUTLINE_TYPE_MASK;
-        int v43;
-        int v44;
+        Color color;
+        Color* grayTable = nullptr;
+        Color* blendTable = nullptr;
+        int isOutlinePalleted = object->outline & OUTLINE_PALETTED;
+        OutlineType outlineType = object->outline & OUTLINE_TYPE_MAX;
+        int animatedColorCount = 0;
+        int animatedColorBandHeight;
 
         switch (outlineType) {
         case OUTLINE_TYPE_HOSTILE:
-            color = 243;
-            v53 = 0;
-            v43 = 5;
-            v44 = frameHeight / 5;
+            color = Color(243);
+            isOutlinePalleted = 0;
+            animatedColorCount = 5;
+            animatedColorBandHeight = frameHeight / 5;
             break;
-        case OUTLINE_TYPE_2:
-            color = _colorTable[31744];
-            v44 = 0;
-            if (v53 != 0) {
-                v47 = _commonGrayTable;
-                v48 = _redBlendTable;
+        case OUTLINE_TYPE_SAME_TEAM:
+            color = COLOR_RED;
+            animatedColorBandHeight = 0;
+            if (isOutlinePalleted != 0) {
+                grayTable = _commonGrayTable;
+                blendTable = _redBlendTable;
             }
             break;
-        case OUTLINE_TYPE_4:
-            color = _colorTable[15855];
-            v44 = 0;
-            if (v53 != 0) {
-                v47 = _commonGrayTable;
-                v48 = _wallBlendTable;
+        case OUTLINE_TYPE_BODY:
+            color = COLOR_GREY_2;
+            animatedColorBandHeight = 0;
+            if (isOutlinePalleted != 0) {
+                grayTable = _commonGrayTable;
+                blendTable = _wallBlendTable;
             }
             break;
         case OUTLINE_TYPE_FRIENDLY:
-            v43 = 4;
-            v44 = frameHeight / 4;
-            color = 229;
-            v53 = 0;
+            animatedColorCount = 4;
+            animatedColorBandHeight = frameHeight / 4;
+            color = Color(229);
+            isOutlinePalleted = 0;
             break;
         case OUTLINE_TYPE_ITEM:
-            v44 = 0;
-            color = _colorTable[30632];
-            if (v53 != 0) {
-                v47 = _commonGrayTable;
-                v48 = _redBlendTable;
+            animatedColorBandHeight = 0;
+            color = COLOR_LIGHT_GOLD_2;
+            if (isOutlinePalleted != 0) {
+                grayTable = _commonGrayTable;
+                blendTable = _redBlendTable;
             }
             break;
         case OUTLINE_TYPE_LOOT_ITEM:
             // Highlight-lootables overlay: loose ground item — yellow (248,248,0).
-            v44 = 0;
+            animatedColorBandHeight = 0;
             color = _colorTable[32736];
-            if (v53 != 0) {
-                v47 = _commonGrayTable;
-                v48 = _redBlendTable;
+            if (isOutlinePalleted != 0) {
+                grayTable = _commonGrayTable;
+                blendTable = _redBlendTable;
             }
             break;
         case OUTLINE_TYPE_LOOT_CORPSE:
             // Highlight-lootables overlay: dead critter — orange (248,128,0).
-            v44 = 0;
+            animatedColorBandHeight = 0;
             color = _colorTable[32256];
-            if (v53 != 0) {
-                v47 = _commonGrayTable;
-                v48 = _redBlendTable;
+            if (isOutlinePalleted != 0) {
+                grayTable = _commonGrayTable;
+                blendTable = _redBlendTable;
             }
             break;
         case OUTLINE_TYPE_LOOT_CONTAINER:
             // Highlight-lootables overlay: container — cyan (0,248,248).
-            v44 = 0;
+            animatedColorBandHeight = 0;
             color = _colorTable[1023];
-            if (v53 != 0) {
-                v47 = _commonGrayTable;
-                v48 = _redBlendTable;
+            if (isOutlinePalleted != 0) {
+                grayTable = _commonGrayTable;
+                blendTable = _redBlendTable;
             }
             break;
         case OUTLINE_TYPE_LOOT_DOOR:
             // Highlight-lootables overlay: door / transition scenery — green (0,248,0).
-            v44 = 0;
+            animatedColorBandHeight = 0;
             color = _colorTable[992];
-            if (v53 != 0) {
-                v47 = _commonGrayTable;
-                v48 = _redBlendTable;
+            if (isOutlinePalleted != 0) {
+                grayTable = _commonGrayTable;
+                blendTable = _redBlendTable;
             }
             break;
-        case OUTLINE_TYPE_32:
-            color = 61;
-            v53 = 0;
-            v43 = 1;
-            v44 = frameHeight;
+        case OUTLINE_TYPE_BLOCKED:
+            color = Color(61);
+            isOutlinePalleted = 0;
+            animatedColorCount = 1;
+            animatedColorBandHeight = frameHeight;
             break;
         default:
-            color = _colorTable[31775];
-            v53 = 0;
-            v44 = 0;
+            color = COLOR_MAGENTA;
+            isOutlinePalleted = 0;
+            animatedColorBandHeight = 0;
             break;
         }
 
-        unsigned char v54 = color;
-        unsigned char* dest14 = dest;
-        unsigned char* src15 = src;
+        Color outlineColor = color;
+        unsigned char* destPtr = dest;
+        unsigned char* srcPtr = src;
         for (int y = 0; y < frameHeight; y++) {
             bool cycle = true;
-            if (v44 != 0) {
-                if (y % v44 == 0) {
-                    v54++;
+            if (animatedColorBandHeight != 0) {
+                if (y % animatedColorBandHeight == 0) {
+                    outlineColor = static_cast<Color>((outlineColor + 1) & COLOR_LAST);
                 }
 
-                if (v54 > v43 + color - 1) {
-                    v54 = color;
+                if (outlineColor > animatedColorCount + color - 1) {
+                    outlineColor = color;
                 }
             }
 
-            int v22 = dest14 - gObjectsWindowBuffer;
+            bool yVisible = y >= visibleFrameRect.top && y <= visibleFrameRect.bottom;
+            Color* outlineBlendTable = isOutlinePalleted != 0
+                ? blendTable + (grayTable[outlineColor] << 8)
+                : nullptr;
             for (int x = 0; x < frameWidth; x++) {
-                v22 = dest14 - gObjectsWindowBuffer;
-                if (*src15 != 0 && cycle) {
-                    if (x >= v49.left && x <= v49.right && y >= v49.top && y <= v49.bottom && v22 > 0 && v22 % gObjectsWindowPitch != 0) {
-                        unsigned char v20;
-                        if (v53 != 0) {
-                            v20 = v48[(v47[v54] << 8) + *(dest14 - 1)];
+                int destOffset = destPtr - gObjectsWindowBuffer;
+                if (*srcPtr != 0 && cycle) {
+                    if (yVisible && x >= visibleFrameRect.left && x <= visibleFrameRect.right && destOffset > 0 && destOffset % gObjectsWindowPitch != 0) {
+                        Color leftOutlineColor;
+                        if (isOutlinePalleted != 0) {
+                            leftOutlineColor = outlineBlendTable[*(destPtr - 1)];
                         } else {
-                            v20 = v54;
+                            leftOutlineColor = outlineColor;
                         }
-                        *(dest14 - 1) = v20;
+                        *(destPtr - 1) = leftOutlineColor;
                     }
                     cycle = false;
-                } else if (*src15 == 0 && !cycle) {
-                    if (x >= v49.left && x <= v49.right && y >= v49.top && y <= v49.bottom) {
-                        int v21;
-                        if (v53 != 0) {
-                            v21 = v48[(v47[v54] << 8) + *dest14];
+                } else if (*srcPtr == 0 && !cycle) {
+                    if (yVisible && x >= visibleFrameRect.left && x <= visibleFrameRect.right) {
+                        Color rightOutlineColor;
+                        if (isOutlinePalleted != 0) {
+                            rightOutlineColor = outlineBlendTable[*destPtr];
                         } else {
-                            v21 = v54;
+                            rightOutlineColor = outlineColor;
                         }
-                        *dest14 = v21 & 0xFF;
+                        *destPtr = rightOutlineColor & COLOR_LAST;
                     }
                     cycle = true;
                 }
-                dest14++;
-                src15++;
+                destPtr++;
+                srcPtr++;
             }
 
-            if (*(src15 - 1) != 0) {
-                if (v22 < gObjectsWindowBufferSize) {
-                    int v23 = frameWidth - 1;
-                    if (v23 >= v49.left && v23 <= v49.right && y >= v49.top && y <= v49.bottom) {
-                        if (v53 != 0) {
-                            *dest14 = v48[(v47[v54] << 8) + *dest14];
+            if (*(srcPtr - 1) != 0) {
+                int rightOutlineDestOffset = destPtr - gObjectsWindowBuffer;
+                if (rightOutlineDestOffset >= 0 && rightOutlineDestOffset < gObjectsWindowBufferSize && rightOutlineDestOffset % gObjectsWindowPitch != 0) {
+                    int rightEdgeX = frameWidth - 1;
+                    if (yVisible && rightEdgeX >= visibleFrameRect.left && rightEdgeX <= visibleFrameRect.right) {
+                        if (isOutlinePalleted != 0) {
+                            *destPtr = outlineBlendTable[*destPtr];
                         } else {
-                            *dest14 = v54;
+                            *destPtr = outlineColor;
                         }
                     }
                 }
             }
 
-            dest14 += destStep;
+            destPtr += destStep;
         }
 
         for (int x = 0; x < frameWidth; x++) {
+            if (x < visibleFrameRect.left || x > visibleFrameRect.right) {
+                continue;
+            }
+
             bool cycle = true;
-            unsigned char v28 = color;
-            unsigned char* dest27 = dest + x;
-            unsigned char* src27 = src + x;
+            Color columnOutlineColor = color;
+            unsigned char* columnDestPtr = dest + x;
+            unsigned char* columnSrcPtr = src + x;
             for (int y = 0; y < frameHeight; y++) {
-                if (v44 != 0) {
-                    if (y % v44 == 0) {
-                        v28++;
+                if (animatedColorBandHeight != 0) {
+                    if (y % animatedColorBandHeight == 0) {
+                        columnOutlineColor = static_cast<Color>((columnOutlineColor + 1) & COLOR_LAST);
                     }
 
-                    if (v28 > color + v43 - 1) {
-                        v28 = color;
+                    if (columnOutlineColor > color + animatedColorCount - 1) {
+                        columnOutlineColor = color;
                     }
                 }
 
-                if (*src27 != 0 && cycle) {
-                    if (x >= v49.left && x <= v49.right && y >= v49.top && y <= v49.bottom) {
-                        unsigned char* v29 = dest27 - gObjectsWindowPitch;
-                        if (v29 >= gObjectsWindowBuffer) {
-                            if (v53) {
-                                *v29 = v48[(v47[v28] << 8) + *v29];
+                bool yVisible = y >= visibleFrameRect.top && y <= visibleFrameRect.bottom;
+                Color* columnOutlineBlendTable = isOutlinePalleted != 0
+                    ? blendTable + (grayTable[columnOutlineColor] << 8)
+                    : nullptr;
+                if (*columnSrcPtr != 0 && cycle) {
+                    if (yVisible) {
+                        unsigned char* aboveDestPtr = columnDestPtr - gObjectsWindowPitch;
+                        if (aboveDestPtr >= gObjectsWindowBuffer) {
+                            if (isOutlinePalleted) {
+                                *aboveDestPtr = columnOutlineBlendTable[*aboveDestPtr];
                             } else {
-                                *v29 = v28;
+                                *aboveDestPtr = columnOutlineColor;
                             }
                         }
                     }
                     cycle = false;
-                } else if (*src27 == 0 && !cycle) {
-                    if (x >= v49.left && x <= v49.right && y >= v49.top && y <= v49.bottom) {
-                        if (v53) {
-                            *dest27 = v48[(v47[v28] << 8) + *dest27];
+                } else if (*columnSrcPtr == 0 && !cycle) {
+                    if (yVisible) {
+                        if (isOutlinePalleted) {
+                            *columnDestPtr = columnOutlineBlendTable[*columnDestPtr];
                         } else {
-                            *dest27 = v28;
+                            *columnDestPtr = columnOutlineColor;
                         }
                     }
                     cycle = true;
                 }
 
-                dest27 += gObjectsWindowPitch;
-                src27 += frameWidth;
+                columnDestPtr += gObjectsWindowPitch;
+                columnSrcPtr += frameWidth;
             }
 
-            if (src27[-frameWidth] != 0) {
-                if (dest27 - gObjectsWindowBuffer < gObjectsWindowBufferSize) {
+            if (columnSrcPtr[-frameWidth] != 0) {
+                int bottomOutlineDestOffset = columnDestPtr - gObjectsWindowBuffer;
+                if (bottomOutlineDestOffset >= 0 && bottomOutlineDestOffset < gObjectsWindowBufferSize) {
                     int y = frameHeight - 1;
-                    if (x >= v49.left && x <= v49.right && y >= v49.top && y <= v49.bottom) {
-                        if (v53) {
-                            *dest27 = v48[(v47[v28] << 8) + *dest27];
+                    if (y >= visibleFrameRect.top && y <= visibleFrameRect.bottom) {
+                        if (isOutlinePalleted) {
+                            Color* columnOutlineBlendTable = blendTable + (grayTable[columnOutlineColor] << 8);
+                            *columnDestPtr = columnOutlineBlendTable[*columnDestPtr];
                         } else {
-                            *dest27 = v28;
+                            *columnDestPtr = columnOutlineColor;
                         }
                     }
                 }
@@ -649,13 +688,14 @@ static void objectDrawOutline(Object* object, Rect* rect)
 // 0x48F1B0
 static void _obj_render_object(Object* object, Rect* rect, int light)
 {
-    int type = FID_TYPE(object->fid);
+    const FrmId frmId = FrmId(object);
+    ObjectType type = frmId.objectType();
     if (artIsObjectTypeHidden(type)) {
         return;
     }
 
     CacheEntry* cacheEntry;
-    Art* art = artLock(object->fid, &cacheEntry);
+    Art* art = artLock(frmId, &cacheEntry);
     if (art == nullptr) {
         return;
     }
@@ -672,7 +712,7 @@ static void _obj_render_object(Object* object, Rect* rect, int light)
     } else {
         int objectScreenX;
         int objectScreenY;
-        tileToScreenXY(object->tile, &objectScreenX, &objectScreenY, object->elevation);
+        tileToScreenXY(object->tile, &objectScreenX, &objectScreenY);
         objectScreenX += 16;
         objectScreenY += 8;
 
@@ -704,7 +744,7 @@ static void _obj_render_object(Object* object, Rect* rect, int light)
     int objectWidth = objectRect.right - objectRect.left + 1;
     int objectHeight = objectRect.bottom - objectRect.top + 1;
 
-    if (type == 6) {
+    if (type == OBJ_TYPE_INTERFACE) {
         blitBufferToBufferTrans(src,
             objectWidth,
             objectHeight,
@@ -715,53 +755,53 @@ static void _obj_render_object(Object* object, Rect* rect, int light)
         return;
     }
 
-    if (type == 2 || type == 3) {
-        if ((gDude->flags & OBJECT_HIDDEN) == 0 && (object->flags & OBJECT_FLAG_0xFC000) == 0) {
+    if (type == OBJ_TYPE_SCENERY || type == OBJ_TYPE_WALL) {
+        if ((gDude->flags & OBJECT_HIDDEN) == OBJECT_NONE && (object->flags & OBJECT_FLAG_0xFC000) == OBJECT_NONE) {
             Proto* proto;
-            protoGetProto(object->pid, &proto);
+            protoGetProto(object, &proto);
 
             bool v17;
-            int extendedFlags = proto->critter.extendedFlags;
-            if ((extendedFlags & 0x8000000) != 0 || (extendedFlags & 0x80000000) != 0) {
-                // TODO: Probably wrong.
+            ProtoExtendedFlags extendedFlags = proto->critter.extendedFlags;
+            if ((extendedFlags & PROTO_EXT_FLAG_HIDDEN) != PROTO_EXT_FLAG_NONE || (extendedFlags & PROTO_EXT_FLAG_WEST_CORNER) != PROTO_EXT_FLAG_NONE) {
+                // TODO: Verify this visibility branch against the original logic.
                 v17 = tileIsInFrontOf(object->tile, gDude->tile);
                 if (!v17
                     || !tileIsToRightOf(object->tile, gDude->tile)
-                    || (object->flags & OBJECT_WALL_TRANS_END) == 0) {
+                    || (object->flags & OBJECT_WALL_TRANS_END) == OBJECT_NONE) {
                     // nothing
                 } else {
                     v17 = false;
                 }
-            } else if ((extendedFlags & 0x10000000) != 0) {
-                // NOTE: Uses bitwise OR, so both functions are evaluated.
+            } else if ((extendedFlags & PROTO_EXT_FLAG_NORTH_CORNER) != PROTO_EXT_FLAG_NONE) {
+                // NOTE: Original code used bitwise OR here; logical OR is clearer.
                 v17 = tileIsInFrontOf(object->tile, gDude->tile)
                     || tileIsToRightOf(gDude->tile, object->tile);
-            } else if ((extendedFlags & 0x20000000) != 0) {
+            } else if ((extendedFlags & PROTO_EXT_FLAG_SOUTH_CORNER) != PROTO_EXT_FLAG_NONE) {
                 v17 = tileIsInFrontOf(object->tile, gDude->tile)
                     && tileIsToRightOf(gDude->tile, object->tile);
             } else {
                 v17 = tileIsToRightOf(gDude->tile, object->tile);
                 if (v17
                     && tileIsInFrontOf(gDude->tile, object->tile)
-                    && (object->flags & OBJECT_WALL_TRANS_END) != 0) {
+                    && (object->flags & OBJECT_WALL_TRANS_END) != OBJECT_NONE) {
                     v17 = 0;
                 }
             }
 
             if (v17) {
                 CacheEntry* eggHandle;
-                Art* egg = artLock(gEgg->fid, &eggHandle);
+                Art* egg = artLock(FrmId(gEgg), &eggHandle);
                 if (egg == nullptr) {
                     return;
                 }
 
                 int eggWidth;
                 int eggHeight;
-                artGetSize(egg, 0, 0, &eggWidth, &eggHeight);
+                artGetSize(egg, 0, ROTATION_NE, &eggWidth, &eggHeight);
 
                 int eggScreenX;
                 int eggScreenY;
-                tileToScreenXY(gEgg->tile, &eggScreenX, &eggScreenY, gEgg->elevation);
+                tileToScreenXY(gEgg->tile, &eggScreenX, &eggScreenY);
                 eggScreenX += 16;
                 eggScreenY += 8;
 
@@ -812,7 +852,7 @@ static void _obj_render_object(Object* object, Rect* rect, int light)
                         }
                     }
 
-                    unsigned char* mask = artGetFrameData(egg, 0, 0);
+                    unsigned char* mask = artGetFrameData(egg);
                     _intensity_mask_buf_to_buf(
                         src + frameWidth * (updatedEggRect.top - objectRect.top) + (updatedEggRect.left - objectRect.left),
                         updatedEggRect.right - updatedEggRect.left + 1,

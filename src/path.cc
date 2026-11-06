@@ -1,3 +1,37 @@
+#include "animation.h"
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <stdio.h>
+#include "animation_defs.h"
+#include "art.h"
+#include "color.h"
+#include "combat_ai.h"
+#include "debug.h"
+#include "display_monitor.h"
+#include "game.h"
+#include "game_mouse.h"
+#include "game_sound.h"
+#include "input.h"
+#include "interface.h"
+#include "item.h"
+#include "kb.h"
+#include "mouse.h"
+#include "obj_types.h"
+#include "party_member.h"
+#include "perk.h"
+#include "random.h"
+#include "scripts.h"
+#include "settings.h"
+#include "stat.h"
+#include "svga.h"
+#include "text_object.h"
+#include "trait.h"
+#include "worldmap.h"
+#include "animation_scheduler.h"
+#include "movement.h"
+#include "presenter.h"
+#include "server_players.h" // playerActorIs — sneak/Silent Running are per-actor
 #include "path.h"
 
 #include <stdlib.h>
@@ -25,7 +59,7 @@ typedef struct PathNode {
     int tile;
     int from;
     // actual type is likely char
-    int rotation;
+    Rotation rotation;
     int estimate;
     int cost;
 } PathNode;
@@ -80,21 +114,21 @@ bool canUseDoor(Object* critter, Object* door)
         }
     }
 
-    if (FID_TYPE(critter->fid) != OBJ_TYPE_CRITTER) {
+    if (FrmId(critter).objectType() != OBJ_TYPE_CRITTER) {
         return false;
     }
 
-    if (FID_TYPE(door->fid) != OBJ_TYPE_SCENERY) {
+    if (FrmId(door).objectType() != OBJ_TYPE_SCENERY) {
         return false;
     }
 
-    int bodyType = critterGetBodyType(critter);
+    BodyType bodyType = critterGetBodyType(critter);
     if (bodyType != BODY_TYPE_BIPED && bodyType != BODY_TYPE_ROBOTIC) {
         return false;
     }
 
     Proto* proto;
-    if (protoGetProto(door->pid, &proto) == -1) {
+    if (protoGetProto(door, &proto) == -1) {
         return false;
     }
 
@@ -114,9 +148,9 @@ bool canUseDoor(Object* critter, Object* door)
 }
 
 // 0x415EE8
-int _make_path(Object* object, int from, int to, unsigned char* rotations, int a5)
+int _make_path(Object* object, int from, int to, unsigned char* rotations, int requireEmptyDest)
 {
-    return pathfinderFindPath(object, from, to, rotations, a5, _obj_blocking_at);
+    return pathfinderFindPath(object, from, to, rotations, requireEmptyDest, _obj_blocking_at);
 }
 
 // A PLAYER-REQUESTED walk: same pathfinder, wide search budget. Use this only where a
@@ -129,18 +163,15 @@ int _make_path_wide(Object* object, int from, int to, unsigned char* rotations, 
 
 // TODO: move pathfinding into another unit
 // 0x415EFC
-int pathfinderFindPath(Object* object, int from, int to, unsigned char* rotations, int a5, PathBuilderCallback* callback)
+int pathfinderFindPath(Object* object, int from, int to, unsigned char* rotations, int requireEmptyDest, PathBuilderCallback* callback)
 {
-    return pathfinderFindPathBudget(object, from, to, rotations, a5, callback, kPathMaxNodes);
+    return pathfinderFindPathBudget(object, from, to, rotations, requireEmptyDest, callback, kPathMaxNodes);
 }
 
-int pathfinderFindPathBudget(Object* object, int from, int to, unsigned char* rotations, int a5, PathBuilderCallback* callback, int maxNodes)
+int pathfinderFindPathBudget(Object* object, int from, int to, unsigned char* rotations, int requireEmptyDest, PathBuilderCallback* callback, int maxNodes)
 {
-    if (maxNodes < 2 || maxNodes > kPathMaxNodesWide) {
-        maxNodes = kPathMaxNodes;
-    }
-
-    if (a5) {
+    if (maxNodes < 2 || maxNodes > kPathMaxNodesWide) maxNodes = kPathMaxNodes;
+    if (requireEmptyDest) {
         if (callback(object, to, object->elevation) != nullptr) {
             return 0;
         }
@@ -148,7 +179,7 @@ int pathfinderFindPathBudget(Object* object, int from, int to, unsigned char* ro
 
     bool isCritter = false;
     int critterType = 0;
-    if (PID_TYPE(object->pid) == OBJ_TYPE_CRITTER) {
+    if (ProtoId(object).objectType() == OBJ_TYPE_CRITTER) {
         isCritter = true;
         critterType = critterGetKillType(object);
     }
@@ -161,7 +192,7 @@ int pathfinderFindPathBudget(Object* object, int from, int to, unsigned char* ro
 
     gOpenPathNodeList[0].tile = from;
     gOpenPathNodeList[0].from = -1;
-    gOpenPathNodeList[0].rotation = 0;
+    gOpenPathNodeList[0].rotation = ROTATION_FIRST;
     gOpenPathNodeList[0].estimate = _tile_idistance(from, to);
     gOpenPathNodeList[0].cost = 0;
 
@@ -171,11 +202,18 @@ int pathfinderFindPathBudget(Object* object, int from, int to, unsigned char* ro
 
     int toScreenX;
     int toScreenY;
-    tileToScreenXY(to, &toScreenX, &toScreenY, object->elevation);
+    tileToScreenXY(to, &toScreenX, &toScreenY);
 
     int closedPathNodeListLength = 0;
     int openPathNodeListLength = 1;
     PathNode temp;
+
+    constexpr std::array<ProtoId, 4> kRadioactiveGooProtoIds = {
+        SceneryProtoTypeId::FirstRadioactiveGoo,
+        SceneryProtoTypeId::SecondRadioactiveGoo,
+        SceneryProtoTypeId::ThirdRadioactiveGoo,
+        SceneryProtoTypeId::LastRadioactiveGoo,
+    };
 
     while (1) {
         int v63 = -1;
@@ -214,11 +252,16 @@ int pathfinderFindPathBudget(Object* object, int from, int to, unsigned char* ro
         closedPathNodeListLength += 1;
 
         if (closedPathNodeListLength == maxNodes) {
+            // Search path node capacity exhausted
             return 0;
         }
 
-        for (int rotation = 0; rotation < ROTATION_COUNT; rotation++) {
+        for (Rotation rotation = ROTATION_FIRST; rotation < ROTATION_COUNT; rotation++) {
             int tile = tileGetTileInDirection(temp.tile, rotation, 1);
+            if (tile < 0 || tile >= HEX_GRID_SIZE) {
+                continue;
+            }
+
             int bit = 1 << (tile & 7);
             if ((gPathfinderProcessedTiles[tile / 8] & bit) != 0) {
                 continue;
@@ -227,7 +270,13 @@ int pathfinderFindPathBudget(Object* object, int from, int to, unsigned char* ro
             if (tile != to) {
                 Object* v24 = callback(object, tile, object->elevation);
                 if (v24 != nullptr) {
-                    if (!canUseDoor(object, v24)) {
+                    // SFALL: Fix pathing to the center tile of multihex
+                    // objects. When the target object blocks an adjacent tile,
+                    // use that adjacent tile as the practical path target.
+                    if (v24->tile == to) {
+                        to = tile;
+                        tileToScreenXY(to, &toScreenX, &toScreenY);
+                    } else if (!canUseDoor(object, v24)) {
                         continue;
                     }
                 }
@@ -238,6 +287,10 @@ int pathfinderFindPathBudget(Object* object, int from, int to, unsigned char* ro
                 if (gOpenPathNodeList[v25].tile == -1) {
                     break;
                 }
+            }
+
+            if (v25 == maxNodes) {
+                return 0;
             }
 
             openPathNodeListLength += 1;
@@ -255,7 +308,7 @@ int pathfinderFindPathBudget(Object* object, int from, int to, unsigned char* ro
 
             int newX;
             int newY;
-            tileToScreenXY(tile, &newX, &newY, object->elevation);
+            tileToScreenXY(tile, &newX, &newY);
 
             v27->estimate = _idist(newX, newY, toScreenX, toScreenY);
             v27->cost = temp.cost + 50;
@@ -267,7 +320,7 @@ int pathfinderFindPathBudget(Object* object, int from, int to, unsigned char* ro
             if (isCritter) {
                 Object* o = objectFindFirstAtLocation(object->elevation, v27->tile);
                 while (o != nullptr) {
-                    if (o->pid >= FIRST_RADIOACTIVE_GOO_PID && o->pid <= LAST_RADIOACTIVE_GOO_PID) {
+                    if (std::find(kRadioactiveGooProtoIds.begin(), kRadioactiveGooProtoIds.end(), ProtoId(o)) != kRadioactiveGooProtoIds.end()) {
                         break;
                     }
                     o = objectFindNextAtLocation();
@@ -291,7 +344,7 @@ int pathfinderFindPathBudget(Object* object, int from, int to, unsigned char* ro
     if (openPathNodeListLength != 0) {
         unsigned char* v39 = rotations;
         int index = 0;
-        for (; index < kPathMaxSteps; index++) {
+        for (; index < 800; index++) {
             if (temp.tile == from) {
                 break;
             }
@@ -355,11 +408,11 @@ static int _tile_idistance(int tile1, int tile2)
 {
     int x1;
     int y1;
-    tileToScreenXY(tile1, &x1, &y1, gElevation);
+    tileToScreenXY(tile1, &x1, &y1);
 
     int x2;
     int y2;
-    tileToScreenXY(tile2, &x2, &y2, gElevation);
+    tileToScreenXY(tile2, &x2, &y2);
 
     return _idist(x1, y1, x2, y2);
 }
@@ -378,7 +431,7 @@ int _make_straight_path_func(Object* obj, int from, int to, StraightPathNode* st
     if (obstaclePtr != nullptr) {
         Object* obstacle = callback(obj, from, obj->elevation);
         if (obstacle != nullptr) {
-            if (obstacle != *obstaclePtr && (a6 != 32 || (obstacle->flags & OBJECT_SHOOT_THRU) == 0)) {
+            if (obstacle != *obstaclePtr && (a6 != 32 || (obstacle->flags & OBJECT_SHOOT_THRU) == OBJECT_NONE)) {
                 *obstaclePtr = obstacle;
                 return 0;
             }
@@ -387,13 +440,13 @@ int _make_straight_path_func(Object* obj, int from, int to, StraightPathNode* st
 
     int fromX;
     int fromY;
-    tileToScreenXY(from, &fromX, &fromY, obj->elevation);
+    tileToScreenXY(from, &fromX, &fromY);
     fromX += 16;
     fromY += 8;
 
     int toX;
     int toY;
-    tileToScreenXY(to, &toX, &toY, obj->elevation);
+    tileToScreenXY(to, &toX, &toY);
     toX += 16;
     toY += 8;
 
@@ -431,7 +484,7 @@ int _make_straight_path_func(Object* obj, int from, int to, StraightPathNode* st
     if (ddx <= ddy) {
         int middle = ddx - ddy / 2;
         while (true) {
-            tile = tileFromScreenXY(tileX, tileY, obj->elevation);
+            tile = tileFromScreenXY(tileX, tileY);
 
             v22 += 1;
             if (v22 == a6) {
@@ -444,7 +497,7 @@ int _make_straight_path_func(Object* obj, int from, int to, StraightPathNode* st
                     pathNode->tile = tile;
                     pathNode->elevation = obj->elevation;
 
-                    tileToScreenXY(tile, &fromX, &fromY, obj->elevation);
+                    tileToScreenXY(tile, &fromX, &fromY);
                     pathNode->x = tileX - fromX - 16;
                     pathNode->y = tileY - fromY - 8;
                 }
@@ -472,7 +525,7 @@ int _make_straight_path_func(Object* obj, int from, int to, StraightPathNode* st
                 if (obstaclePtr != nullptr) {
                     Object* obstacle = callback(obj, tile, obj->elevation);
                     if (obstacle != nullptr) {
-                        if (obstacle != *obstaclePtr && (a6 != 32 || (obstacle->flags & OBJECT_SHOOT_THRU) == 0)) {
+                        if (obstacle != *obstaclePtr && (a6 != 32 || (obstacle->flags & OBJECT_SHOOT_THRU) == OBJECT_NONE)) {
                             *obstaclePtr = obstacle;
                             break;
                         }
@@ -484,7 +537,7 @@ int _make_straight_path_func(Object* obj, int from, int to, StraightPathNode* st
     } else {
         int middle = ddy - ddx / 2;
         while (true) {
-            tile = tileFromScreenXY(tileX, tileY, obj->elevation);
+            tile = tileFromScreenXY(tileX, tileY);
 
             v22 += 1;
             if (v22 == a6) {
@@ -497,7 +550,7 @@ int _make_straight_path_func(Object* obj, int from, int to, StraightPathNode* st
                     pathNode->tile = tile;
                     pathNode->elevation = obj->elevation;
 
-                    tileToScreenXY(tile, &fromX, &fromY, obj->elevation);
+                    tileToScreenXY(tile, &fromX, &fromY);
                     pathNode->x = tileX - fromX - 16;
                     pathNode->y = tileY - fromY - 8;
                 }
@@ -525,7 +578,7 @@ int _make_straight_path_func(Object* obj, int from, int to, StraightPathNode* st
                 if (obstaclePtr != nullptr) {
                     Object* obstacle = callback(obj, tile, obj->elevation);
                     if (obstacle != nullptr) {
-                        if (obstacle != *obstaclePtr && (a6 != 32 || (obstacle->flags & OBJECT_SHOOT_THRU) == 0)) {
+                        if (obstacle != *obstaclePtr && (a6 != 32 || (obstacle->flags & OBJECT_SHOOT_THRU) == OBJECT_NONE)) {
                             *obstaclePtr = obstacle;
                             break;
                         }
@@ -546,7 +599,7 @@ int _make_straight_path_func(Object* obj, int from, int to, StraightPathNode* st
             pathNode->tile = tile;
             pathNode->elevation = obj->elevation;
 
-            tileToScreenXY(tile, &fromX, &fromY, obj->elevation);
+            tileToScreenXY(tile, &fromX, &fromY);
             pathNode->x = tileX - fromX - 16;
             pathNode->y = tileY - fromY - 8;
         }

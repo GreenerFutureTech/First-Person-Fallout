@@ -25,7 +25,7 @@ public:
         wmWorldMap();
     }
 
-    int elevatorSelect(int elevator, int* map, int* elevation, int* tile) override
+    int elevatorSelect(int elevator, Map* map, int* elevation, int* tile) override
     {
         return elevatorSelectLevel(elevator, map, elevation, tile);
     }
@@ -43,7 +43,12 @@ public:
     void endgame() override
     {
         endgamePlaySlideshow();
-        endgamePlayMovie();
+        if (endgameShouldPlayMovieAfterSlideshow()) endgamePlayMovie();
+    }
+
+    void endgameSlideshow() override
+    {
+        endgamePlaySlideshow();
     }
 
     void looting(Object* looter, Object* target) override

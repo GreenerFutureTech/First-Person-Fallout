@@ -1,3 +1,28 @@
+#include <SDL.h>
+#include <lodepng.h>
+#include "audio_engine.h"
+#include "color.h"
+#include "debug.h"
+#include "delay.h"
+#include "dinput.h"
+#include "draw.h"
+#include "game.h"
+#include "kb.h"
+#include "mouse.h"
+#include "movie.h"
+#include "sfall_kb_helpers.h"
+#include "sfall_script_hooks.h"
+#include "svga.h"
+#include "text_font.h"
+#include "tile.h"
+#include "touch.h"
+#include "win32.h"
+#include "window_manager.h"
+#include <stdio.h>
+#include "client_net.h"
+#include "dbox.h" // TEMP [wmenc]: dialogBoxTraceActiveTag — name the ESC producer
+#include "game_movie.h"
+#include "input_replay.h"
 // Timing + ticker infrastructure (P5-C Step 1, [[p5-server-plan]]).
 //
 // Moved verbatim out of the SDL-coupled f2_client input.cc into f2_core so the

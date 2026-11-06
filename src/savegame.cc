@@ -1,3 +1,30 @@
+#include "server_players.h"
+#include "art.h"
+#include "ce_save_game.h"
+#include "color.h"
+#include "config.h"
+#include "cycle.h"
+#include "dbox.h"
+#include "delay.h"
+#include "draw.h"
+#include "geometry.h"
+#include "input.h"
+#include "kb.h"
+#include "mainmenu.h"
+#include "mouse.h"
+#include "palette.h"
+#include "sfall_callbacks.h"
+#include "sfall_ext.h"
+#include "string_utils.h"
+#include "svga.h"
+#include "text_font.h"
+#include "window_manager.h"
+#include "word_wrap.h"
+#if defined(__EMSCRIPTEN__)
+#include <emscripten.h>
+#endif
+#include "loot_highlight.h"
+#include "sfall_config.h"
 #include "savegame.h"
 
 #include <assert.h>
@@ -148,6 +175,8 @@ static int _slot_cursor = 0;
 static int _map_backup_count = -1;
 static bool _automap_db_flag = false;
 static bool _loadingGame = false;
+static int _loadingMapId = -1;
+int mapIdBeingLoaded() { return _loadingMapId; }
 // kSaveSlotSpace, not 10: indices 10.. (directories SLOT11..) are the
 // dedicated-server AUTOSAVE ROTATION window (server_admin.cc). They sit past
 // everything the vanilla client's save/load screens enumerate (SLOT01..10),
@@ -247,7 +276,7 @@ int lsgPerformSaveGame()
     long pos = fileTell(_flptr);
     if (lsgSaveHeaderInSlot(_flptr, _slot_cursor) == -1) {
         debugPrint("\nLOADSAVE: ** Error writing save game header! **\n");
-        debugPrint("LOADSAVE: Save file header size written: %d bytes.\n", fileTell(_flptr) - pos);
+        debugPrint("LOADSAVE: Save file header size written: %ld bytes.\n", fileTell(_flptr) - pos);
         fileClose(_flptr);
         _RestoreSave();
         snprintf(_gmpath, sizeof(_gmpath), "%s\\%s%.2d\\", "SAVEGAME", "SLOT", _slot_cursor + 1);
@@ -271,7 +300,7 @@ int lsgPerformSaveGame()
             return -1;
         }
 
-        debugPrint("LOADSAVE: Save function #%d data size written: %d bytes.\n", index, fileTell(_flptr) - pos);
+        debugPrint("LOADSAVE: Save function #%d data size written: %ld bytes.\n", index, fileTell(_flptr) - pos);
     }
 
     debugPrint("LOADSAVE: Total save data written: %ld bytes.\n", fileTell(_flptr));
@@ -299,70 +328,28 @@ int lsgPerformSaveGame()
 
     _flptr = fileOpen(_gmpath, "wb");
     if (_flptr != nullptr) {
-        do {
-            if (!sfall_gl_vars_save(_flptr)) {
-                debugPrint("LOADSAVE (SFALL): ** Error saving global vars **\n");
-                break;
-            }
-
-            // TODO: For now fill remaining sections with zeros to that Sfall
-            // can successfully read our global vars and skip the rest.
-
-            int nextObjectId = 0;
-            if (fileWrite(&nextObjectId, sizeof(nextObjectId), 1, _flptr) != 1) {
-                debugPrint("LOADSAVE (SFALL): ** Error saving next object id **\n");
-                break;
-            }
-
-            int addedYears = 0;
-            if (fileWrite(&addedYears, sizeof(addedYears), 1, _flptr) != 1) {
-                debugPrint("LOADSAVE (SFALL): ** Error saving added years **\n");
-                break;
-            }
-
-            int fakeTraitsCount = 0;
-            if (fileWrite(&fakeTraitsCount, sizeof(fakeTraitsCount), 1, _flptr) != 1) {
-                debugPrint("LOADSAVE (SFALL): ** Error saving fake traits **\n");
-                break;
-            }
-
-            int fakePerksCount = 0;
-            if (fileWrite(&fakePerksCount, sizeof(fakePerksCount), 1, _flptr) != 1) {
-                debugPrint("LOADSAVE (SFALL): ** Error saving fake perks **\n");
-                break;
-            }
-
-            int fakeSelectablePerksCount = 0;
-            if (fileWrite(&fakeSelectablePerksCount, sizeof(fakeSelectablePerksCount), 1, _flptr) != 1) {
-                debugPrint("LOADSAVE (SFALL): ** Error saving fake selectable perks **\n");
-                break;
-            }
-
-            int arraysCountOld = 0;
-            if (fileWrite(&arraysCountOld, sizeof(arraysCountOld), 1, _flptr) != 1) {
-                debugPrint("LOADSAVE (SFALL): ** Error saving arrays (old fmt) **\n");
-                break;
-            }
-
-            int arraysCountNew = 0;
-            if (fileWrite(&arraysCountNew, sizeof(arraysCountNew), 1, _flptr) != 1) {
-                debugPrint("LOADSAVE (SFALL): ** Error saving arrays (new fmt) **\n");
-                break;
-            }
-
-            int drugPidsCount = 0;
-            if (fileWrite(&drugPidsCount, sizeof(drugPidsCount), 1, _flptr) != 1) {
-                debugPrint("LOADSAVE (SFALL): ** Error saving drug pids **\n");
-                break;
-            }
-        } while (0);
-
+        bool saved = sfallSaveGameData(_flptr);
         fileClose(_flptr);
+        if (!saved) {
+            return -1;
+        }
+    }
+
+    char ceSavePath[COMPAT_MAX_PATH];
+    snprintf(ceSavePath, sizeof(ceSavePath), "%s\\SAVEGAME\\SLOT%.2d\\ce.sav", _patches, _slot_cursor + 1);
+    if (!ceSaveGameData(ceSavePath)) {
+        debugPrint("LOADSAVE (CE): ** Error saving %s **\n", ceSavePath);
+        _RestoreSave();
+        backgroundSoundResume();
+        return -1;
     }
 
     snprintf(_gmpath, sizeof(_gmpath), "%s\\%s%.2d\\", "SAVEGAME", "SLOT", _slot_cursor + 1);
     MapDirErase(_gmpath, "BAK");
 
+#if defined(__EMSCRIPTEN__)
+    do_save_idbfs_loadsave();
+#endif
     // The "game saved" notification is raised by the caller: it reads the
     // slot-picker screen's message list, which a headless writer never loads.
 
@@ -380,6 +367,11 @@ bool _isLoadingGame()
 // 0x47DC68
 int lsgLoadGameInSlot(int slot)
 {
+    if (slot < 0 || slot >= kSaveSlotSpace) {
+        return -1;
+    }
+    assert(slot == _slot_cursor);
+
     _loadingGame = true;
 
     if (isInCombat()) {
@@ -388,11 +380,11 @@ int lsgLoadGameInSlot(int slot)
         gameMouseSetCursor(MOUSE_CURSOR_WAIT_PLANET);
     }
 
+    // SFALL: Call "before start" event
+    sfallOnBeforeGameStart();
+
     snprintf(_gmpath, sizeof(_gmpath), "%s\\%s%.2d\\", "SAVEGAME", "SLOT", _slot_cursor + 1);
     strcat(_gmpath, "SAVE.DAT");
-
-    LoadSaveSlotData* ptr = &(_LSData[slot]);
-    debugPrint("\nLOADSAVE: Load name: %s\n", ptr->description);
 
     _flptr = fileOpen(_gmpath, "rb");
     if (_flptr == nullptr) {
@@ -415,7 +407,11 @@ int lsgLoadGameInSlot(int slot)
         return -1;
     }
 
-    debugPrint("LOADSAVE: Load file header size read: %d bytes.\n", fileTell(_flptr) - pos);
+    LoadSaveSlotData* ptr = &(_LSData[slot]);
+    _loadingMapId = _LSData[slot].map;
+    debugPrint("\nLOADSAVE: Load name: %s\n", ptr->description);
+
+    debugPrint("LOADSAVE: Load file header size read: %ld bytes.\n", fileTell(_flptr) - pos);
 
     for (int index = 0; index < LOAD_SAVE_HANDLER_COUNT; index += 1) {
         long pos = fileTell(_flptr);
@@ -425,15 +421,18 @@ int lsgLoadGameInSlot(int slot)
             fprintf(stderr, "LOADSAVE: slot %d FAILED in load handler #%d at byte %ld of '%s'\n",
                 slot + 1, index, pos, _gmpath);
             int v12 = fileTell(_flptr);
-            debugPrint("LOADSAVE: Load function #%d data size read: %d bytes.\n", index, fileTell(_flptr) - pos);
+            debugPrint("LOADSAVE: Load function #%d data size read: %ld bytes.\n", index, fileTell(_flptr) - pos);
             fileClose(_flptr);
             gameReset();
             _loadingGame = false;
+            _loadingMapId = -1;
             return -1;
         }
 
-        debugPrint("LOADSAVE: Load function #%d data size read: %d bytes.\n", index, fileTell(_flptr) - pos);
+        debugPrint("LOADSAVE: Load function #%d data size read: %ld bytes.\n", index, fileTell(_flptr) - pos);
     }
+
+    _loadingMapId = -1;
 
     debugPrint("LOADSAVE: Total load data read: %ld bytes.\n", fileTell(_flptr));
 
@@ -460,17 +459,16 @@ int lsgLoadGameInSlot(int slot)
 
     _flptr = fileOpen(_gmpath, "rb");
     if (_flptr != nullptr) {
-        do {
-            if (!sfall_gl_vars_load(_flptr)) {
-                debugPrint("LOADSAVE (SFALL): ** Error loading global vars **\n");
-                break;
-            }
-
-            // TODO: For now silently ignore remaining sections.
-        } while (0);
-
+        bool loaded = sfallLoadGameData(_flptr);
         fileClose(_flptr);
+        if (!loaded) {
+            return -1;
+        }
     }
+
+    char ceSavePath[COMPAT_MAX_PATH];
+    snprintf(ceSavePath, sizeof(ceSavePath), "%s\\SAVEGAME\\SLOT%.2d\\ce.sav", _patches, _slot_cursor + 1);
+    ceLoadGameData(ceSavePath);
 
     snprintf(_str, sizeof(_str), "%s\\", "MAPS");
     MapDirErase(_str, "BAK");
@@ -483,6 +481,9 @@ int lsgLoadGameInSlot(int slot)
 
     // SFALL: Start global scripts.
     sfall_gl_scr_exec_start_proc();
+    // SFALL: Call "after start" event
+    sfallOnAfterGameStarted();
+    gGameLoaded = true;
 
     return 0;
 }
@@ -495,7 +496,7 @@ int lsgSaveHeaderInSlot(File* stream, int slot)
     LoadSaveSlotData* ptr = &(_LSData[slot]);
     strncpy(ptr->signature, LOAD_SAVE_SIGNATURE, 24);
 
-    if (fileWrite(ptr->signature, 1, 24, stream) == -1) {
+    if (fileWrite(ptr->signature, 1, 24, stream) != 24) {
         return -1;
     }
 
@@ -565,12 +566,12 @@ int lsgSaveHeaderInSlot(File* stream, int slot)
     }
 
     ptr->elevation = gElevation;
-    if (fileWriteInt16(stream, ptr->elevation) == -1) {
+    if (fileWriteInt16Enum<MapElevation>(stream, ptr->elevation) == -1) {
         return -1;
     }
 
     ptr->map = mapGetCurrentMap();
-    if (fileWriteInt16(stream, ptr->map) == -1) {
+    if (fileWriteInt16Enum<Map>(stream, ptr->map) == -1) {
         return -1;
     }
 
@@ -680,11 +681,11 @@ int lsgLoadHeaderInSlot(File* stream, int slot)
         return -1;
     }
 
-    if (fileReadInt16(stream, &(ptr->elevation)) == -1) {
+    if (fileReadInt16Enum<MapElevation>(stream, &(ptr->elevation)) == -1) {
         return -1;
     }
 
-    if (fileReadInt16(stream, &(ptr->map)) == -1) {
+    if (fileReadInt16Enum<Map>(stream, &(ptr->map)) == -1) {
         return -1;
     }
 
@@ -747,17 +748,17 @@ static int _GameMap2Slot(File* stream)
     }
 
     for (int index = 1; index < gPartyMemberDescriptionsLength; index += 1) {
-        int pid = gPartyMemberPids[index];
-        if (pid == -2) {
+        const ProtoId protoId = gPartyMemberProtoIds[index];
+        if (!protoId.valid()) {
             continue;
         }
 
         char path[COMPAT_MAX_PATH];
-        if (_proto_list_str(pid, path) != 0) {
+        if (_proto_list_str(protoId, path) != 0) {
             continue;
         }
 
-        const char* critterItemPath = (pid >> 24) == OBJ_TYPE_CRITTER
+        const char* critterItemPath = protoId.objectType() == OBJ_TYPE_CRITTER
             ? PROTO_DIR_NAME "\\" CRITTERS_DIR_NAME
             : PROTO_DIR_NAME "\\" ITEMS_DIR_NAME;
         snprintf(_str0, sizeof(_str0), "%s\\%s\\%s", _patches, critterItemPath, path);
@@ -770,7 +771,7 @@ static int _GameMap2Slot(File* stream)
     snprintf(_str0, sizeof(_str0), "%s\\*.%s", "MAPS", "SAV");
 
     char** fileNameList;
-    int fileNameListLength = fileNameListInit(_str0, &fileNameList, 0, 0);
+    int fileNameListLength = fileNameListInit(_str0, &fileNameList);
     if (fileNameListLength == -1) {
         return -1;
     }
@@ -799,7 +800,7 @@ static int _GameMap2Slot(File* stream)
 
     for (int index = 0; index < fileNameListLength; index += 1) {
         char* string = fileNameList[index];
-        if (fileWrite(string, strlen(string) + 1, 1, stream) == -1) {
+        if (fileWrite(string, strlen(string) + 1, 1, stream) != 1) {
             fileNameListFree(&fileNameList, 0);
             return -1;
         }
@@ -887,11 +888,11 @@ static int _SlotMap2Game(File* stream)
     compat_remove(_str0);
 
     for (int index = 1; index < gPartyMemberDescriptionsLength; index += 1) {
-        int pid = gPartyMemberPids[index];
-        if (pid != -2) {
+        const ProtoId protoId = gPartyMemberProtoIds[index];
+        if (protoId.valid()) {
             char protoPath[COMPAT_MAX_PATH];
-            if (_proto_list_str(pid, protoPath) == 0) {
-                const char* basePath = PID_TYPE(pid) == OBJ_TYPE_CRITTER
+            if (_proto_list_str(protoId, protoPath) == 0) {
+                const char* basePath = protoId.objectType() == OBJ_TYPE_CRITTER
                     ? PROTO_DIR_NAME "\\" CRITTERS_DIR_NAME
                     : PROTO_DIR_NAME "\\" ITEMS_DIR_NAME;
                 snprintf(_str0, sizeof(_str0), "%s\\%s\\%s", _patches, basePath, protoPath);
@@ -1072,7 +1073,7 @@ int MapDirErase(const char* relativePath, const char* extension)
     snprintf(path, sizeof(path), "%s*.%s", relativePath, extension);
 
     char** fileList;
-    int fileListLength = fileNameListInit(path, &fileList, 0, 0);
+    int fileListLength = fileNameListInit(path, &fileList);
     while (--fileListLength >= 0) {
         snprintf(path, sizeof(path), "%s\\%s%s", _patches, relativePath, fileList[fileListLength]);
         compat_remove(path);
@@ -1106,7 +1107,7 @@ static int _SaveBackup()
     snprintf(_str0, sizeof(_str0), "%s*.%s", _gmpath, "SAV");
 
     char** fileList;
-    int fileListLength = fileNameListInit(_str0, &fileList, 0, 0);
+    int fileListLength = fileNameListInit(_str0, &fileList);
     if (fileListLength == -1) {
         return -1;
     }
@@ -1175,7 +1176,7 @@ static int _RestoreSave()
     snprintf(_str0, sizeof(_str0), "%s*.%s", _gmpath, "BAK");
 
     char** fileList;
-    int fileListLength = fileNameListInit(_str0, &fileList, 0, 0);
+    int fileListLength = fileNameListInit(_str0, &fileList);
     if (fileListLength == -1) {
         return -1;
     }
@@ -1257,7 +1258,7 @@ int savegameEraseSlot()
     snprintf(_str0, sizeof(_str0), "%s*.%s", _gmpath, "SAV");
 
     char** fileList;
-    int fileListLength = fileNameListInit(_str0, &fileList, 0, 0);
+    int fileListLength = fileNameListInit(_str0, &fileList);
     if (fileListLength == -1) {
         return -1;
     }

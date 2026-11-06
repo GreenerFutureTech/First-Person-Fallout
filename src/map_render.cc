@@ -1,3 +1,43 @@
+#include <assert.h>
+#include <stdio.h>
+#include <vector>
+#include "animation.h"
+#include "automap.h"
+#include "character_editor.h"
+#include "color.h"
+#include "combat.h"
+#include "content_config.h"
+#include "critter.h"
+#include "game.h"
+#include "game_movie.h"
+#include "game_sound.h"
+#include "item.h"
+#include "light.h"
+#include "loadsave.h"
+#include "map_defs.h"
+#include "map_edge.h"
+#include "memory.h"
+#include "party_member.h"
+#include "proto.h"
+#include "proto_instance.h"
+#include "queue.h"
+#include "random.h"
+#include "script_sound.h"
+#include "scripts.h"
+#include "settings.h"
+#include "sfall_callbacks.h"
+#include "text_object.h"
+#include "tile_hires_stencil.h"
+#include "window_manager_private.h"
+#include "worldmap.h"
+#include "platform_compat.h"
+#include "palette.h"
+#include "pipboy.h"
+#include "presenter.h"
+#include "player_sheet.h"
+#include "script_request_handler.h"
+#include "server_loop.h"
+#include "server_players.h"
 #include "map_render.h"
 
 #include <string.h>
@@ -51,7 +91,7 @@ int isoInit()
     // NOTE: Uninline.
     square_init();
 
-    gIsoWindow = windowCreate(0, 0, screenGetWidth(), screenGetVisibleHeight(), 256, 10);
+    gIsoWindow = windowCreate(0, 0, screenGetWidth(), screenGetVisibleHeight(), static_cast<ColorWithFlags>(256), 10);
     if (gIsoWindow == -1) {
         debugPrint("win_add failed in iso_init\n");
         return -1;
@@ -92,8 +132,12 @@ int isoInit()
     colorCycleInit();
     debugPrint(">cycle_init\t\t");
 
-    tileScrollBlockingEnable();
-    tileScrollLimitingEnable();
+    if (!settings.ui.ignore_map_edges) {
+        tileScrollBlockingEnable();
+    }
+    if (!settings.ui.ignore_scroll_limit) {
+        tileScrollLimitingEnable();
+    }
 
     if (interfaceInit() != 0) {
         debugPrint("intface_init failed in iso_init\n");
@@ -108,7 +152,7 @@ int isoInit()
     mapMakeMapsDirectory();
 
     // NOTE: Uninline.
-    mapSetEnteringLocation(-1, -1, -1);
+    mapSetEnteringLocation(ELEVATION_INVALID, -1, ROTATION_INVALID);
 
     return 0;
 }
@@ -145,11 +189,11 @@ int mapScroll(int dx, int dy)
 
     int centerScreenX;
     int centerScreenY;
-    tileToScreenXY(gCenterTile, &centerScreenX, &centerScreenY, gElevation);
+    tileToScreenXY(gCenterTile, &centerScreenX, &centerScreenY);
     centerScreenX += screenDx + 16;
     centerScreenY += screenDy + 8;
 
-    int newCenterTile = tileFromScreenXY(centerScreenX, centerScreenY, gElevation);
+    int newCenterTile = tileFromScreenXY(centerScreenX, centerScreenY);
     if (newCenterTile == -1) {
         return -1;
     }
@@ -236,23 +280,38 @@ static void isoWindowRefreshRect(Rect* rect)
 // 0x483EE4
 void isoWindowRefreshRectGame(Rect* rect)
 {
+    if (tileFirstPersonPreviewIsEnabled()) {
+        tileFirstPersonPreviewRefresh();
+        return;
+    }
+
     Rect rectToUpdate;
     if (rectIntersection(rect, &gIsoWindowRect, &rectToUpdate) == -1) {
         return;
     }
 
-    // CE: Clear dirty rect to prevent most of the visual artifacts near map
-    // edges.
+    Rect visArea;
+    bool hasVisArea = mapEdgeComputeVisibleArea(gElevation, &visArea);
+
+    // HRP rect_inside_bound_scroll_clip: always clear srcRect, then clip to mapVisibleArea.
     bufferFill(gIsoWindowBuffer + rectToUpdate.top * rectGetWidth(&gIsoWindowRect) + rectToUpdate.left,
         rectGetWidth(&rectToUpdate),
         rectGetHeight(&rectToUpdate),
         rectGetWidth(&gIsoWindowRect),
-        0);
+        COLOR_FIRST);
+
+    if (hasVisArea && rectIntersection(&rectToUpdate, &visArea, &rectToUpdate) == -1) {
+        return;
+    }
 
     tileRenderFloorsInRect(&rectToUpdate, gElevation);
     _obj_render_pre_roof(&rectToUpdate, gElevation);
     tileRenderRoofsInRect(&rectToUpdate, gElevation);
     _obj_render_post_roof(&rectToUpdate, gElevation);
+
+    if (!hasVisArea) {
+        tile_hires_stencil_draw(&rectToUpdate, gIsoWindowBuffer, rectGetWidth(&gIsoWindowRect), rectGetHeight(&gIsoWindowRect));
+    }
 }
 
 // 0x483F44
@@ -263,17 +322,31 @@ void isoWindowRefreshRectMapper(Rect* rect)
         return;
     }
 
+    Rect visArea;
+    bool hasVisArea = mapEdgeComputeVisibleArea(gElevation, &visArea);
+
+    // HRP rect_inside_bound_scroll_clip: always clear srcRect, then clip to mapVisibleArea.
     bufferFill(gIsoWindowBuffer + rectToUpdate.top * rectGetWidth(&gIsoWindowRect) + rectToUpdate.left,
         rectGetWidth(&rectToUpdate),
         rectGetHeight(&rectToUpdate),
         rectGetWidth(&gIsoWindowRect),
-        0);
+        COLOR_FIRST);
+
+    if (hasVisArea && rectIntersection(&rectToUpdate, &visArea, &rectToUpdate) == -1) {
+        return;
+    }
 
     tileRenderFloorsInRect(&rectToUpdate, gElevation);
     _grid_render(&rectToUpdate, gElevation);
     _obj_render_pre_roof(&rectToUpdate, gElevation);
     tileRenderRoofsInRect(&rectToUpdate, gElevation);
     _obj_render_post_roof(&rectToUpdate, gElevation);
+
+    if (!hasVisArea) {
+        tile_hires_stencil_draw(&rectToUpdate, gIsoWindowBuffer, rectGetWidth(&gIsoWindowRect), rectGetHeight(&gIsoWindowRect));
+    }
+
+    tileMapperOverlayRender(gIsoWindowBuffer, rectGetWidth(&gIsoWindowRect), gElevation, &rectToUpdate);
 }
 
 } // namespace fallout

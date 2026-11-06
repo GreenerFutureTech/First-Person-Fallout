@@ -1,3 +1,39 @@
+#include <stdio.h>
+#include "actions.h"
+#include "animation_defs.h"
+#include "color.h"
+#include "combat_ai.h"
+#include "content_config.h"
+#include "db.h"
+#include "display_monitor.h"
+#include "draw.h"
+#include "elevator.h"
+#include "game_sound.h"
+#include "interface.h"
+#include "kb.h"
+#include "loadsave.h"
+#include "memory.h"
+#include "party_member.h"
+#include "pipboy.h"
+#include "platform_compat.h"
+#include "queue.h"
+#include "random.h"
+#include "scripts.h"
+#include "sfall_callbacks.h"
+#include "sfall_config.h"
+#include "sfall_global_scripts.h"
+#include "sfall_script_hooks.h"
+#include "skill.h"
+#include "svga.h"
+#include "text_font.h"
+#include "trait.h"
+#include "window_manager.h"
+#include <stdlib.h>
+#include "client_net.h" // clientViewerActive — combat-attack commit fork (§3.b)
+#include "inventory.h" // inventoryUnequipFunc — a destroyed weapon leaves the sprite too
+#include "msg_channel.h" // kMsgChannelReward — XP payout is addressed to its earner
+#include "proto_instance.h" // objectDrop / objectDestroy — crit-failure weapon outcomes
+#include "sim_clock.h"
 #include "combat.h"
 
 #include <limits.h>
@@ -58,8 +94,16 @@
 
 namespace fallout {
 
+static void combatAppendText(char* dest, size_t size, const char* text)
+{
+    size_t length = strlen(dest);
+    if (length < size) {
+        snprintf(dest + length, size - length, "%s", text);
+    }
+}
+
 static void combatCopyDamageAmountDescription(char* dest, size_t size, Object* critter, int damage);
-static void combatAddDamageFlagsDescription(char* dest, int flags, Object* critter);
+static void combatAddDamageFlagsDescription(char* dest, size_t size, Dam flags, Object* critter);
 
 // 0x500B50
 static char _a_1[] = ".";
@@ -98,7 +142,7 @@ void _combat_turn_run()
 // fires from the hand they chose; the other hand is the fallback. The active-hand
 // DEFAULT is HAND_RIGHT, so this stays right-hand-first — byte-identical to the old
 // item2-then-item1 order — for any actor that never swapped.
-static int serverDudeHitMode()
+static HitMode serverDudeHitMode()
 {
     int hand = serverActorActiveHand(playerActorSlotOf(gDude));
     Object* primary = hand == HAND_RIGHT ? critterGetItem2(gDude) : critterGetItem1(gDude);
@@ -129,11 +173,11 @@ static int serverDudeHitMode()
 // vanilla does for _combat_attack_this(door).
 static bool serverAttackTargetIsDoor(Object* obj)
 {
-    if (obj == nullptr || PID_TYPE(obj->pid) != OBJ_TYPE_SCENERY) {
+    if (obj == nullptr || ProtoId(obj).objectType() != OBJ_TYPE_SCENERY) {
         return false;
     }
     Proto* proto;
-    if (protoGetProto(obj->pid, &proto) == -1 || proto == nullptr) {
+    if (protoGetProto(ProtoId(obj), &proto) == -1 || proto == nullptr) {
         return false;
     }
     return proto->scenery.type == SCENERY_TYPE_DOOR;
@@ -148,7 +192,7 @@ static Object* serverResolveTarget(int arg)
         // hit the wrong critter. netId is the wire's unique handle (§3.f item 1).
         while (obj != nullptr) {
             if (obj->netId == arg
-                && (PID_TYPE(obj->pid) == OBJ_TYPE_CRITTER || serverAttackTargetIsDoor(obj))) {
+                && (ProtoId(obj).objectType() == OBJ_TYPE_CRITTER || serverAttackTargetIsDoor(obj))) {
                 return obj;
             }
             obj = objectFindNext();
@@ -162,7 +206,7 @@ static Object* serverResolveTarget(int arg)
     int bestEnemyDistance = INT_MAX;
     while (obj != nullptr) {
         if (obj != gDude
-            && PID_TYPE(obj->pid) == OBJ_TYPE_CRITTER
+            && ProtoId(obj).objectType() == OBJ_TYPE_CRITTER
             && obj->elevation == gDude->elevation
             && critterIsActive(obj)
             && !critterIsDead(obj)
@@ -319,9 +363,9 @@ CombatPumpOutcome combatServerPumpIntents(int actorSlot)
         // bar can't report a weapon) falls back to the current-weapon default. The
         // server re-validates either way via _combat_check_bad_shot below, so a
         // bogus mode is rejected rather than trusted.
-        int hitMode = intent.hitMode == COMBAT_INTENT_HITMODE_AUTO
+        HitMode hitMode = intent.hitMode == COMBAT_INTENT_HITMODE_AUTO
             ? serverDudeHitMode()
-            : intent.hitMode;
+            : static_cast<HitMode>(intent.hitMode);
         // An aimed intent costs +1 AP; pass the aiming flag so the bad-shot
         // check validates the aimed AP cost, and the hit location so
         // _combat_attack applies the called shot (it derives `aiming`, the AP
@@ -356,7 +400,9 @@ CombatPumpOutcome combatServerPumpIntents(int actorSlot)
         // whatever the stack held — printing garbage through %s past the buffer.
         char denyDetail[192] = "";
         int badShot = COMBAT_BAD_SHOT_OK;
-        if (target == nullptr) {
+        if (!hitModeIsValid(hitMode) || !hitLocationIsValid(intent.hitLocation)) {
+            denyReason = "invalid attack mode or hit location";
+        } else if (target == nullptr) {
             // ►► THREE DIFFERENT BUGS USED TO PRINT THIS ONE SENTENCE, and only one of
             // them is what it says. "not a critter or door" assumed the netId resolved
             // and was the wrong KIND of thing — but the same branch is taken when the
@@ -376,7 +422,7 @@ CombatPumpOutcome combatServerPumpIntents(int actorSlot)
                 denyReason = "that is not a critter or a door";
                 snprintf(denyDetail, sizeof(denyDetail),
                     "netId=%d resolves to pid=0x%08x type=%d name='%s' tile=%d elev=%d — WRONG KIND",
-                    intent.arg, any->pid, PID_TYPE(any->pid),
+                    intent.arg, any->pid, ProtoId(any).objectType(),
                     objectGetName(any) != nullptr ? objectGetName(any) : "?",
                     any->tile, any->elevation);
             } else {
@@ -390,7 +436,7 @@ CombatPumpOutcome combatServerPumpIntents(int actorSlot)
         } else if ((badShot = _combat_check_bad_shot(actor, target, hitMode, aiming))
             != COMBAT_BAD_SHOT_OK) {
             denyReason = combatBadShotReason(badShot);
-        } else if (_combat_attack(actor, target, hitMode, intent.hitLocation) != 0) {
+        } else if (_combat_attack(actor, target, hitMode, static_cast<HitLocation>(intent.hitLocation)) != 0) {
             denyReason = combatBadShotReason(-1); // generic "could not be performed"
         }
         if (denyReason != nullptr) {
@@ -472,7 +518,7 @@ void _combat_display(Attack* attack)
         int strengthRequired = weaponGetMinStrengthRequired(weapon);
 
         if (perkGetRank(attack->attacker, PERK_WEAPON_HANDLING) != 0) {
-            strengthRequired -= 3;
+            strengthRequired -= perkGetWeaponHandlingBonus();
         }
 
         if (weapon != nullptr) {
@@ -487,7 +533,7 @@ void _combat_display(Attack* attack)
     }
 
     Object* mainCritter;
-    if ((attack->attackerFlags & DAM_HIT) != 0) {
+    if ((attack->attackerFlags & DAM_HIT) != DAM_NONE) {
         mainCritter = attack->defender;
     } else {
         mainCritter = attack->attacker;
@@ -495,8 +541,7 @@ void _combat_display(Attack* attack)
 
     char* mainCritterName = _a_1;
 
-    char you[20];
-    you[0] = '\0';
+    char you[20] = {};
     if (critterGetStat(gDude, STAT_GENDER) == GENDER_MALE) {
         // You (male)
         messageListItem.num = 506;
@@ -506,7 +551,7 @@ void _combat_display(Attack* attack)
     }
 
     if (messageListGetItem(&gCombatMessageList, &messageListItem)) {
-        strcpy(you, messageListItem.text);
+        snprintf(you, sizeof(you), "%s", messageListItem.text);
     }
 
     int baseMessageId;
@@ -526,13 +571,13 @@ void _combat_display(Attack* attack)
         }
     }
 
-    char text[280];
+    char text[280] = {};
     if (attack->defender != nullptr
-        && attack->oops != nullptr
-        && attack->defender != attack->oops
-        && (attack->attackerFlags & DAM_HIT) != 0) {
-        if (FID_TYPE(attack->defender->fid) == OBJ_TYPE_CRITTER) {
-            if (attack->oops == gDude) {
+        && attack->intendedTarget != nullptr
+        && attack->defender != attack->intendedTarget
+        && (attack->attackerFlags & DAM_HIT) != DAM_NONE) {
+        if (FrmId(attack->defender).objectType() == OBJ_TYPE_CRITTER) {
+            if (attack->intendedTarget == gDude) {
                 // 608 (male) - Oops! %s was hit instead of you!
                 // 708 (female) - Oops! %s was hit instead of you!
                 messageListItem.num = baseMessageId + 8;
@@ -542,7 +587,7 @@ void _combat_display(Attack* attack)
             } else {
                 // 509 (male) - Oops! %s were hit instead of %s!
                 // 559 (female) - Oops! %s were hit instead of %s!
-                const char* name = objectGetName(attack->oops);
+                const char* name = objectGetName(attack->intendedTarget);
                 messageListItem.num = baseMessageId + 9;
                 if (messageListGetItem(&gCombatMessageList, &messageListItem)) {
                     snprintf(text, sizeof(text), messageListItem.text, mainCritterName, name);
@@ -577,12 +622,12 @@ void _combat_display(Attack* attack)
             }
         }
 
-        strcat(text, ".");
+        combatAppendText(text, sizeof(text), ".");
 
         presenter()->consoleNarration(text);
     }
 
-    if ((attack->attackerFlags & DAM_HIT) != 0) {
+    if ((attack->attackerFlags & DAM_HIT) != DAM_NONE) {
         Object* v21 = attack->defender;
         // Narrate the hit unless the target was ALREADY a corpse before this attack.
         // The live `results & DAM_DEAD` is the pre-attack state here (display runs
@@ -595,9 +640,9 @@ void _combat_display(Attack* attack)
                 || (attack->defenderFlags & DAM_DEAD) != 0)) {
             text[0] = '\0';
 
-            if (FID_TYPE(v21->fid) == OBJ_TYPE_CRITTER) {
+            if (FrmId(v21).objectType() == OBJ_TYPE_CRITTER) {
                 if (attack->defenderHitLocation == HIT_LOCATION_TORSO) {
-                    if ((attack->attackerFlags & DAM_CRITICAL) != 0) {
+                    if ((attack->attackerFlags & DAM_CRITICAL) != DAM_NONE) {
                         switch (attack->defenderDamage) {
                         case 0:
                             // 528 - %s were critically hit for no damage
@@ -626,7 +671,7 @@ void _combat_display(Attack* attack)
                 } else {
                     const char* hitLocationName = hitLocationGetName(v21, attack->defenderHitLocation);
                     if (hitLocationName != nullptr) {
-                        if ((attack->attackerFlags & DAM_CRITICAL) != 0) {
+                        if ((attack->attackerFlags & DAM_CRITICAL) != DAM_NONE) {
                             switch (attack->defenderDamage) {
                             case 0:
                                 // 525 - %s were critically hit in %s for no damage
@@ -668,14 +713,14 @@ void _combat_display(Attack* attack)
                     }
                 }
 
-                if (settings.preferences.combat_messages && (attack->attackerFlags & DAM_CRITICAL) != 0 && attack->criticalMessageId != -1) {
+                if (settings.preferences.combat_messages && (attack->attackerFlags & DAM_CRITICAL) != DAM_NONE && attack->criticalMessageId != -1) {
                     messageListItem.num = attack->criticalMessageId;
                     if (messageListGetItem(&gCombatMessageList, &messageListItem)) {
-                        strcat(text, messageListItem.text);
+                        combatAppendText(text, sizeof(text), messageListItem.text);
                     }
 
-                    if ((attack->defenderFlags & DAM_DEAD) != 0) {
-                        strcat(text, ".");
+                    if ((attack->defenderFlags & DAM_DEAD) != DAM_NONE) {
+                        combatAppendText(text, sizeof(text), ".");
                         presenter()->consoleNarration(text);
 
                         if (attack->defender == gDude) {
@@ -701,10 +746,10 @@ void _combat_display(Attack* attack)
                         }
                     }
                 } else {
-                    combatAddDamageFlagsDescription(text, attack->defenderFlags, attack->defender);
+                    combatAddDamageFlagsDescription(text, sizeof(text), attack->defenderFlags, attack->defender);
                 }
 
-                strcat(text, ".");
+                combatAppendText(text, sizeof(text), ".");
 
                 // F2_TRACE_DAMAGE=1 — what the NARRATION believes, alongside what the calc
                 // produced ([dmg] TOTAL= in combat.cc). Damage has now been verified correct at
@@ -758,18 +803,18 @@ void _combat_display(Attack* attack)
                 }
             }
 
-            combatAddDamageFlagsDescription(text, attack->attackerFlags, attack->attacker);
+            combatAddDamageFlagsDescription(text, sizeof(text), attack->attackerFlags, attack->attacker);
 
-            strcat(text, ".");
+            combatAppendText(text, sizeof(text), ".");
 
             presenter()->consoleNarration(text);
         }
 
-        if ((attack->attackerFlags & DAM_HIT) != 0 || (attack->attackerFlags & DAM_CRITICAL) == 0) {
+        if ((attack->attackerFlags & DAM_HIT) != DAM_NONE || (attack->attackerFlags & DAM_CRITICAL) == DAM_NONE) {
             if (attack->attackerDamage > 0) {
                 combatCopyDamageAmountDescription(text, sizeof(text), attack->attacker, attack->attackerDamage);
-                combatAddDamageFlagsDescription(text, attack->attackerFlags, attack->attacker);
-                strcat(text, ".");
+                combatAddDamageFlagsDescription(text, sizeof(text), attack->attackerFlags, attack->attacker);
+                combatAppendText(text, sizeof(text), ".");
                 presenter()->consoleNarration(text);
             }
         }
@@ -793,8 +838,8 @@ void _combat_display(Attack* attack)
         if ((critter->data.critter.combat.results & DAM_DEAD) == 0
                 || (attack->extrasFlags[index] & DAM_DEAD) != 0) {
             combatCopyDamageAmountDescription(text, sizeof(text), critter, attack->extrasDamage[index]);
-            combatAddDamageFlagsDescription(text, attack->extrasFlags[index], critter);
-            strcat(text, ".");
+            combatAddDamageFlagsDescription(text, sizeof(text), attack->extrasFlags[index], critter);
+            combatAppendText(text, sizeof(text), ".");
 
             presenter()->consoleNarration(text);
         }
@@ -949,7 +994,7 @@ static void combatCopyDamageAmountDescription(char* dest, size_t size, Object* c
         // 506 - You
         messageListItem.num = messageId + 6;
         if (messageListGetItem(&gCombatMessageList, &messageListItem)) {
-            strcpy(text, messageListItem.text);
+            snprintf(text, sizeof(text), "%s", messageListItem.text);
         }
 
         name = text;
@@ -989,7 +1034,7 @@ static void combatCopyDamageAmountDescription(char* dest, size_t size, Object* c
 }
 
 // 0x425BA4
-static void combatAddDamageFlagsDescription(char* dest, int flags, Object* critter)
+static void combatAddDamageFlagsDescription(char* dest, size_t size, Dam flags, Object* critter)
 {
     MessageListItem messageListItem;
 
@@ -1008,21 +1053,21 @@ static void combatAddDamageFlagsDescription(char* dest, int flags, Object* critt
         }
     }
 
-    if (flags == 0) {
+    if (flags == DAM_NONE) {
         return;
     }
 
-    if ((flags & DAM_DEAD) != 0) {
+    if ((flags & DAM_DEAD) != DAM_NONE) {
         // " and "
         messageListItem.num = 108;
         if (messageListGetItem(&gCombatMessageList, &messageListItem)) {
-            strcat(dest, messageListItem.text);
+            combatAppendText(dest, size, messageListItem.text);
         }
 
         // were killed
         messageListItem.num = num + 7;
         if (messageListGetItem(&gCombatMessageList, &messageListItem)) {
-            strcat(dest, messageListItem.text);
+            combatAppendText(dest, size, messageListItem.text);
         }
 
         return;
@@ -1032,7 +1077,7 @@ static void combatAddDamageFlagsDescription(char* dest, int flags, Object* critt
     int flagsListLength = 0;
     int flagsList[32];
     for (int index = 0; index < 32; index++) {
-        if (bit != DAM_CRITICAL && bit != DAM_HIT && (bit & flags) != 0) {
+        if (bit != DAM_CRITICAL && bit != DAM_HIT && (bit & flags) != DAM_NONE) {
             flagsList[flagsListLength++] = index;
         }
         bit <<= 1;
@@ -1040,32 +1085,32 @@ static void combatAddDamageFlagsDescription(char* dest, int flags, Object* critt
 
     if (flagsListLength != 0) {
         for (int index = 0; index < flagsListLength - 1; index++) {
-            strcat(dest, ", ");
+            combatAppendText(dest, size, ", ");
 
             messageListItem.num = num + flagsList[index];
             if (messageListGetItem(&gCombatMessageList, &messageListItem)) {
-                strcat(dest, messageListItem.text);
+                combatAppendText(dest, size, messageListItem.text);
             }
         }
 
         // " and "
         messageListItem.num = 108;
         if (messageListGetItem(&gCombatMessageList, &messageListItem)) {
-            strcat(dest, messageListItem.text);
+            combatAppendText(dest, size, messageListItem.text);
         }
 
         messageListItem.num = num + flagsList[flagsListLength - 1];
         if (messageListGetItem(&gCombatMessageList, &messageListItem)) {
-            strcat(dest, messageListItem.text);
+            combatAppendText(dest, size, messageListItem.text);
         }
     }
 }
 
 // 0x42612C
-char* hitLocationGetName(Object* critter, int hitLocation)
+char* hitLocationGetName(Object* critter, HitLocation hitLocation)
 {
     MessageListItem messageListItem;
-    messageListItem.num = 1000 + 10 * _art_alias_num(critter->fid & 0xFFF) + hitLocation;
+    messageListItem.num = 1000 + 10 * static_cast<int>(_art_alias_num(FrmId(critter).frameId<CritterFrameId>())) + hitLocation;
     if (messageListGetItem(&gCombatMessageList, &messageListItem)) {
         return messageListItem.text;
     }
@@ -1100,7 +1145,7 @@ void _combat_outline_on()
         int critterListLength = objectListCreate(-1, gElevation, OBJ_TYPE_CRITTER, &critterList);
         for (int index = 0; index < critterListLength; index++) {
             Object* critter = critterList[index];
-            if (critter != gDude && (critter->data.critter.combat.results & DAM_DEAD) == 0) {
+            if (critter != gDude && (critter->data.critter.combat.results & DAM_DEAD) == DAM_NONE) {
                 _combat_update_critter_outline_for_los(critter, 1);
             }
         }
@@ -1127,12 +1172,12 @@ void _combat_outline_off()
     int v5;
     Object** v9;
 
-    if (gCombatState & 1) {
+    if (isInCombat()) {
         for (i = 0; i < _list_total; i++) {
             objectDisableOutline(_combat_list[i], nullptr);
         }
     } else {
-        v5 = objectListCreate(-1, gElevation, 1, &v9);
+        v5 = objectListCreate(-1, gElevation, OBJ_TYPE_CRITTER, &v9);
         for (i = 0; i < v5; i++) {
             objectDisableOutline(v9[i], nullptr);
             objectClearOutline(v9[i], nullptr);
@@ -1146,7 +1191,7 @@ void _combat_outline_off()
 }
 
 // 0x426218
-int calledShotSelectHitLocation(Object* critter, int* hitLocation, int hitMode)
+int calledShotSelectHitLocation(Object* critter, HitLocation* hitLocation, HitMode hitMode)
 {
     if (serverLoopActive()) {
         // The server drives the dude via the intent queue, which passes an

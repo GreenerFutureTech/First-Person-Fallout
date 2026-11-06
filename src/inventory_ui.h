@@ -2,6 +2,7 @@
 #define FALLOUT_INVENTORY_UI_H_
 
 #include "obj_types.h"
+#include "proto_types.h"
 
 namespace fallout {
 
@@ -25,7 +26,7 @@ namespace fallout {
 
 // Dude whose inventory is currently open, and its cached armor fid marker.
 extern Object* _inven_dude;
-extern int _inven_pid;
+extern ProtoId inventoryProtoId;
 
 // Equipped-slot caches populated by the inventory UI and read back by core
 // critterGet* while the window is open.

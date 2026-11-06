@@ -1,3 +1,23 @@
+#include <ctype.h>
+#include "art.h"
+#include "cycle.h"
+#include "dbox.h"
+#include "delay.h"
+#include "draw.h"
+#include "game_mouse.h"
+#include "game_sound.h"
+#include "geometry.h"
+#include "input.h"
+#include "interface.h"
+#include "kb.h"
+#include "map.h"
+#include "pipboy.h"
+#include "scripts.h"
+#include "settings.h"
+#include "svga.h"
+#include "touch.h"
+#include "window_manager.h"
+#include "worldmap.h"
 #include "elevator.h"
 
 #include <stdio.h>
@@ -13,7 +33,7 @@
 #include "map.h" // gMapHeader / mapSetTransition
 #include "object.h"
 #include "proto_types.h" // PROTO_ID_* — the three elevator-door scenery pids
-#include "proto_instance.h" // _obj_attempt_placement
+#include "proto_instance.h" // objectAttemptPlacement
 #include "server_players.h" // playerActorAt/Count/Online — the party rides together
 #include "sfall_config.h"
 #include "tile.h" // tileDistanceBetween
@@ -40,7 +60,7 @@ namespace fallout {
 #define ELEVATORS_MAX 50
 
 typedef struct ElevatorDescription {
-    int map;
+    Map map;
     int elevation;
     int tile;
 } ElevatorDescription;
@@ -78,148 +98,148 @@ static int gElevatorLevels[ELEVATORS_MAX] = {
 // 0x43EA7C
 static ElevatorDescription gElevatorDescriptions[ELEVATORS_MAX][ELEVATOR_LEVEL_MAX] = {
     {
-        { 14, 0, 18940 },
-        { 14, 1, 18936 },
-        { 15, 0, 21340 },
-        { 15, 1, 21340 },
+        { MAP_KLAMATH_GRAZE, ELEVATION_FIRST, 18940 },
+        { MAP_KLAMATH_GRAZE, ELEVATION_SECOND, 18936 },
+        { MAP_VAULTCITY_COURTYARD, ELEVATION_FIRST, 21340 },
+        { MAP_VAULTCITY_COURTYARD, ELEVATION_SECOND, 21340 },
     },
     {
-        { 13, 0, 20502 },
-        { 14, 0, 14912 },
-        { 0, 0, -1 },
-        { 0, 0, -1 },
+        { MAP_KLAMATH_TRAPCAVES, ELEVATION_FIRST, 20502 },
+        { MAP_KLAMATH_GRAZE, ELEVATION_FIRST, 14912 },
+        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
+        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
     },
     {
-        { 33, 0, 12498 },
-        { 33, 1, 20094 },
-        { 34, 0, 17312 },
-        { 0, 0, -1 },
+        { MAP_GECKO_JUNKYARD, ELEVATION_FIRST, 12498 },
+        { MAP_GECKO_JUNKYARD, ELEVATION_SECOND, 20094 },
+        { MAP_GECKO_ACCESS_TUNNELS, ELEVATION_FIRST, 17312 },
+        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
     },
     {
-        { 34, 0, 16140 },
-        { 34, 1, 16140 },
-        { 0, 0, -1 },
-        { 0, 0, -1 },
+        { MAP_GECKO_ACCESS_TUNNELS, ELEVATION_FIRST, 16140 },
+        { MAP_GECKO_ACCESS_TUNNELS, ELEVATION_SECOND, 16140 },
+        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
+        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
     },
     {
-        { 49, 0, 14920 },
-        { 49, 1, 15120 },
-        { 50, 0, 12944 },
-        { 0, 0, -1 },
+        { MAP_MILITARY_BASE_12, ELEVATION_FIRST, 14920 },
+        { MAP_MILITARY_BASE_12, ELEVATION_SECOND, 15120 },
+        { MAP_MILITARY_BASE_34, ELEVATION_FIRST, 12944 },
+        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
     },
     {
-        { 50, 0, 24520 },
-        { 50, 1, 25316 },
-        { 0, 0, -1 },
-        { 0, 0, -1 },
+        { MAP_MILITARY_BASE_34, ELEVATION_FIRST, 24520 },
+        { MAP_MILITARY_BASE_34, ELEVATION_SECOND, 25316 },
+        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
+        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
     },
     {
-        { 42, 0, 22526 },
-        { 42, 1, 22526 },
-        { 42, 2, 22526 },
-        { 0, 0, -1 },
+        { MAP_NCR_DOWNTOWN, ELEVATION_FIRST, 22526 },
+        { MAP_NCR_DOWNTOWN, ELEVATION_SECOND, 22526 },
+        { MAP_NCR_DOWNTOWN, ELEVATION_THIRD, 22526 },
+        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
     },
     {
-        { 42, 2, 14086 },
-        { 43, 0, 14086 },
-        { 43, 2, 14086 },
-        { 0, 0, -1 },
+        { MAP_NCR_DOWNTOWN, ELEVATION_THIRD, 14086 },
+        { MAP_NCR_COUNCIL_1, ELEVATION_FIRST, 14086 },
+        { MAP_NCR_COUNCIL_1, ELEVATION_THIRD, 14086 },
+        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
     },
     {
-        { 40, 0, 14104 },
-        { 40, 1, 22504 },
-        { 40, 2, 17312 },
-        { 0, 0, -1 },
+        { MAP_VAULT_13, ELEVATION_FIRST, 14104 },
+        { MAP_VAULT_13, ELEVATION_SECOND, 22504 },
+        { MAP_VAULT_13, ELEVATION_THIRD, 17312 },
+        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
     },
     {
-        { 9, 0, 13704 },
-        { 9, 1, 23302 },
-        { 9, 2, 17308 },
-        { 0, 0, -1 },
+        { MAP_KLAMATH_1, ELEVATION_FIRST, 13704 },
+        { MAP_KLAMATH_1, ELEVATION_SECOND, 23302 },
+        { MAP_KLAMATH_1, ELEVATION_THIRD, 17308 },
+        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
     },
     {
-        { 28, 0, 19300 },
-        { 28, 1, 19300 },
-        { 28, 2, 20110 },
-        { 0, 0, -1 },
+        { MAP_SIERRA_123, ELEVATION_FIRST, 19300 },
+        { MAP_SIERRA_123, ELEVATION_SECOND, 19300 },
+        { MAP_SIERRA_123, ELEVATION_THIRD, 20110 },
+        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
     },
     {
-        { 28, 2, 20118 },
-        { 29, 0, 21710 },
-        { 0, 0, -1 },
-        { 0, 0, -1 },
+        { MAP_SIERRA_123, ELEVATION_THIRD, 20118 },
+        { MAP_SIERRA_4, ELEVATION_FIRST, 21710 },
+        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
+        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
     },
     {
-        { 28, 0, 20122 },
-        { 28, 1, 20124 },
-        { 28, 2, 20940 },
-        { 29, 0, 22540 },
+        { MAP_SIERRA_123, ELEVATION_FIRST, 20122 },
+        { MAP_SIERRA_123, ELEVATION_SECOND, 20124 },
+        { MAP_SIERRA_123, ELEVATION_THIRD, 20940 },
+        { MAP_SIERRA_4, ELEVATION_FIRST, 22540 },
     },
     {
-        { 12, 1, 16052 },
-        { 12, 2, 14480 },
-        { 0, 0, -1 },
-        { 0, 0, -1 },
+        { MAP_KLAMATH_TOXICCAVES, ELEVATION_SECOND, 16052 },
+        { MAP_KLAMATH_TOXICCAVES, ELEVATION_THIRD, 14480 },
+        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
+        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
     },
     {
-        { 6, 0, 14104 },
-        { 6, 1, 22504 },
-        { 6, 2, 17312 },
-        { 0, 0, -1 },
+        { MAP_DEN_ENTRANCE, ELEVATION_FIRST, 14104 },
+        { MAP_DEN_ENTRANCE, ELEVATION_SECOND, 22504 },
+        { MAP_DEN_ENTRANCE, ELEVATION_THIRD, 17312 },
+        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
     },
     {
-        { 30, 0, 14104 },
-        { 30, 1, 22504 },
-        { 30, 2, 17312 },
-        { 0, 0, -1 },
+        { MAP_VAULT_CITY_VAULT, ELEVATION_FIRST, 14104 },
+        { MAP_VAULT_CITY_VAULT, ELEVATION_SECOND, 22504 },
+        { MAP_VAULT_CITY_VAULT, ELEVATION_THIRD, 17312 },
+        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
     },
     {
-        { 36, 0, 13704 },
-        { 36, 1, 23302 },
-        { 36, 2, 17308 },
-        { 0, 0, -1 },
+        { MAP_VAULT_15, ELEVATION_FIRST, 13704 },
+        { MAP_VAULT_15, ELEVATION_SECOND, 23302 },
+        { MAP_VAULT_15, ELEVATION_THIRD, 17308 },
+        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
     },
     {
-        { 39, 0, 17285 },
-        { 36, 0, 19472 },
-        { 0, 0, -1 },
-        { 0, 0, -1 },
+        { MAP_VAULT_15_EAST_ENTRANCE, ELEVATION_FIRST, 17285 },
+        { MAP_VAULT_15, ELEVATION_FIRST, 19472 },
+        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
+        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
     },
     {
-        { 109, 2, 10701 },
-        { 109, 1, 10705 },
-        { 0, 0, -1 },
-        { 0, 0, -1 },
+        { MAP_NAVARRO_ENTRANCE, ELEVATION_THIRD, 10701 },
+        { MAP_NAVARRO_ENTRANCE, ELEVATION_SECOND, 10705 },
+        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
+        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
     },
     {
-        { 109, 2, 14697 },
-        { 109, 1, 15099 },
-        { 0, 0, -1 },
-        { 0, 0, -1 },
+        { MAP_NAVARRO_ENTRANCE, ELEVATION_THIRD, 14697 },
+        { MAP_NAVARRO_ENTRANCE, ELEVATION_SECOND, 15099 },
+        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
+        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
     },
     {
-        { 109, 2, 23877 },
-        { 109, 1, 25481 },
-        { 0, 0, -1 },
-        { 0, 0, -1 },
+        { MAP_NAVARRO_ENTRANCE, ELEVATION_THIRD, 23877 },
+        { MAP_NAVARRO_ENTRANCE, ELEVATION_SECOND, 25481 },
+        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
+        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
     },
     {
-        { 109, 2, 26130 },
-        { 109, 1, 24721 },
-        { 0, 0, -1 },
-        { 0, 0, -1 },
+        { MAP_NAVARRO_ENTRANCE, ELEVATION_THIRD, 26130 },
+        { MAP_NAVARRO_ENTRANCE, ELEVATION_SECOND, 24721 },
+        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
+        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
     },
     {
-        { 137, 0, 23953 },
-        { 148, 1, 16526 },
-        { 0, 0, -1 },
-        { 0, 0, -1 },
+        { MAP_SAN_FRAN_CHINATOWN, ELEVATION_FIRST, 23953 },
+        { MAP_SHI_TEMPLE, ELEVATION_SECOND, 16526 },
+        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
+        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
     },
     {
-        { 62, 0, 13901 },
-        { 63, 1, 17923 },
-        { 0, 0, -1 },
-        { 0, 0, -1 },
+        { MAP_REDDING_WANAMINGO_ENT, ELEVATION_FIRST, 13901 },
+        { MAP_REDDING_WANAMINGO_12, ELEVATION_SECOND, 17923 },
+        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
+        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
     },
 };
 
@@ -240,6 +260,7 @@ int elevatorLevelCount(int elevator)
 // Sierra Army Depot / Military Base remap math.
 int elevatorResolveStartLevel(int elevator, int map, int elevation)
 {
+    if (elevatorLevelCount(elevator) < 2) return 0;
     const ElevatorDescription* elevatorDescription = gElevatorDescriptions[elevator];
 
     int index;
@@ -250,7 +271,7 @@ int elevatorResolveStartLevel(int elevator, int map, int elevation)
     }
 
     if (index < ELEVATOR_LEVEL_MAX) {
-        if (elevatorDescription[elevation + index].tile != -1) {
+        if (elevation + index >= 0 && elevation + index < ELEVATOR_LEVEL_MAX && elevatorDescription[elevation + index].tile != -1) {
             elevation += index;
         }
     }
@@ -273,13 +294,17 @@ int elevatorResolveStartLevel(int elevator, int map, int elevation)
         elevation -= 3;
     }
 
-    return elevation;
+    return std::clamp(elevation, 0, elevatorLevelCount(elevator) - 1);
 }
 
 // Ledger H-57: resolve a chosen elevator level into its {map, elevation,
 // tile} destination from the elevator table.
-void elevatorResolveDestination(int elevator, int level, int* mapPtr, int* elevationPtr, int* tilePtr)
+void elevatorResolveDestination(int elevator, int level, Map* mapPtr, int* elevationPtr, int* tilePtr)
 {
+    if (elevator < 0 || elevator >= ELEVATORS_MAX || level < 0 || level >= elevatorLevelCount(elevator)) {
+        *tilePtr = -1;
+        return;
+    }
     const ElevatorDescription* description = &(gElevatorDescriptions[elevator][level]);
     *mapPtr = description->map;
     *elevationPtr = description->elevation;
@@ -317,7 +342,7 @@ void elevatorsDataInit()
 
             for (int level = 0; level < ELEVATOR_LEVEL_MAX; level++) {
                 snprintf(key, sizeof(key), "ID%d", level + 1);
-                configGetInt(&elevatorsConfig, sectionKey, key, &(gElevatorDescriptions[index][level].map));
+                configGetEnum<Map>(&elevatorsConfig, sectionKey, key, &(gElevatorDescriptions[index][level].map));
 
                 snprintf(key, sizeof(key), "Elevation%d", level + 1);
                 configGetInt(&elevatorsConfig, sectionKey, key, &(gElevatorDescriptions[index][level].elevation));
@@ -353,8 +378,8 @@ static Object* elevatorFindDoors(Object* rider)
     Object* doors = objectFindFirstAtElevation(rider->elevation);
     while (doors != nullptr) {
         int pid = doors->pid;
-        if (PID_TYPE(pid) == OBJ_TYPE_SCENERY
-            && (pid == PROTO_ID_0x2000099 || pid == PROTO_ID_0x20001A5 || pid == PROTO_ID_0x20001D6)
+        if (ProtoId(pid).objectType() == OBJ_TYPE_SCENERY
+            && (pid == 0x2000099 || pid == 0x20001A5 || pid == 0x20001D6)
             && tileDistanceBetween(doors->tile, rider->tile) <= 4) {
             break;
         }
@@ -391,7 +416,7 @@ static void elevatorCloseDoors(Object* doors)
 //
 // The vanilla animated gauge is deliberately NOT reproduced: the ride is instant, on
 // the owner's call ("ease on the animated stuff; just make it a map transition").
-void elevatorRideApply(Object* rider, int map, int elevation, int tile)
+void elevatorRideApply(Object* rider, int map, int elevation, int tile, bool closeDoorsBeforeMapTransition)
 {
     if (rider == nullptr) {
         return;
@@ -401,12 +426,12 @@ void elevatorRideApply(Object* rider, int map, int elevation, int tile)
         // Another map: close the doors behind, then let the ordinary transition
         // machinery carry everyone. Placement of the other players is mapLoad's
         // business (it re-plants player actors beside the host), not ours.
-        elevatorCloseDoors(elevatorFindDoors(rider));
+        if (closeDoorsBeforeMapTransition) elevatorCloseDoors(elevatorFindDoors(rider));
 
         MapTransition transition;
         memset(&transition, 0, sizeof(transition));
-        transition.map = map;
-        transition.elevation = elevation;
+        transition.map = static_cast<Map>(map);
+        transition.elevation = static_cast<MapElevation>(elevation);
         transition.tile = tile;
         transition.rotation = ROTATION_SE;
         mapSetTransitionForActor(&transition, rider);
@@ -419,10 +444,10 @@ void elevatorRideApply(Object* rider, int map, int elevation, int tile)
 
     reg_anim_clear(rider);
     objectSetRotation(rider, ROTATION_SE, nullptr);
-    _obj_attempt_placement(rider, tile, elevation, 0);
+    objectAttemptPlacement(rider, tile, static_cast<MapElevation>(elevation), 0);
 
     // Everyone else who is online and not the rider, onto free tiles beside it. A
-    // radius of 1 lets _obj_attempt_placement itself spread them if the free-tile
+    // radius of 1 lets objectAttemptPlacement itself spread them if the free-tile
     // search comes up empty; co-locating is better than stranding a player on a
     // floor the party has left (map.cc's own rule for reattach).
     for (int slot = 0; slot < playerActorCount(); slot++) {
@@ -434,12 +459,23 @@ void elevatorRideApply(Object* rider, int map, int elevation, int tile)
         int near = playerActorFindFreeTileNear(tile, elevation);
         reg_anim_clear(actor);
         objectSetRotation(actor, ROTATION_SE, nullptr);
-        _obj_attempt_placement(actor, near != -1 ? near : tile, elevation, 1);
+        objectAttemptPlacement(actor, near != -1 ? near : tile, static_cast<MapElevation>(elevation), 1);
     }
 
     if (doors != nullptr) {
         elevatorCloseDoors(doors);
     }
+}
+
+int elevatorEscapeLevel(int elevator, int map)
+{
+    const ElevatorDescription* exitLevels = gElevatorDescriptions[elevator];
+    for (int index = 0; index < ELEVATOR_LEVEL_MAX; index++) {
+        if (exitLevels[index].map == map && exitLevels[index].elevation == gElevation) {
+            return index;
+        }
+    }
+    return -1;
 }
 
 } // namespace fallout

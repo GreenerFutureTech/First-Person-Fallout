@@ -1,3 +1,27 @@
+#include <array>
+#include <assert.h>
+#include <stdio.h>
+#include <string>
+#include "color.h"
+#include "content_config.h"
+#include "cycle.h"
+#include "debug.h"
+#include "game.h"
+#include "game_mouse.h"
+#include "game_sound.h"
+#include "input.h"
+#include "mouse.h"
+#include "movie.h"
+#include "movie_effect.h"
+#include "palette.h"
+#include "platform_compat.h"
+#include "settings.h"
+#include "svga.h"
+#include "text_font.h"
+#include "touch.h"
+#include "window_manager.h"
+#include "audio_engine.h" // audioEngineResume — a movie needs a running audio device even if unfocused
+#include "server_loop.h"
 #include <string.h>
 
 #include "db.h"
@@ -67,7 +91,7 @@ void gameMoviesResetSeen()
 // Ledger H-30 (extracted from gameMoviePlay): the seen flag is savegame state
 // queried by scripts (gameMovieIsSeen opcode) — marking it is sim authority,
 // not a playback side effect.
-void gameMovieMarkSeen(int movie)
+void gameMovieMarkSeen(GameMovie movie)
 {
     // Wire-driven on the viewer (onMoviePlay / the movie verb), so the index crosses
     // a trust boundary — a bad value is an OOB WRITE into gGameMoviesSeen. Vanilla
@@ -79,11 +103,12 @@ void gameMovieMarkSeen(int movie)
 }
 
 // 0x44EB04
-bool gameMovieIsSeen(int movie)
+bool gameMovieIsSeen(GameMovie movie)
 {
-    if (movie < 0 || movie >= MOVIE_COUNT) {
+    if (!gameMovieIsValid(movie)) {
         return false;
     }
+
     return gGameMoviesSeen[movie] == 1;
 }
 

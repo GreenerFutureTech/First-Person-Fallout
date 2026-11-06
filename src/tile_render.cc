@@ -1,3 +1,31 @@
+#include <assert.h>
+#include <math.h>
+#include <array>
+#include <limits>
+#include <stack>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+#include "animation.h"
+#include "billboard_clip_bands.h"
+#include "combat.h"
+#include "critter.h"
+#include "debug.h"
+#include "first_person_sky.h"
+#include "game_mouse.h"
+#include "input.h"
+#include "map_edge.h"
+#include "mouse.h"
+#include "party_member.h"
+#include "platform_compat.h"
+#include "proto.h"
+#include "settings.h"
+#include "svga.h"
+#include "tile_hires_stencil.h"
+#include "text_object.h"
+#include "window_manager.h"
+#include <stdlib.h>
+#include "config.h"
 #include "tile_render.h"
 
 #include <string.h>
@@ -50,9 +78,9 @@ typedef struct UpsideDownTriangle {
     int field_8;
 } UpsideDownTriangle;
 
-static void tileRenderRoof(int fid, int x, int y, Rect* rect, int light);
-static void _draw_grid(int tile, int elevation, Rect* rect);
-static void tileRenderFloor(int fid, int x, int y, Rect* rect);
+static void tileRenderRoof(const TileFrmId& frmId, int x, int y, Rect* rect, int light);
+static void _draw_grid(int tile, MapElevation elevation, Rect* rect);
+void tileRenderFloor(const TileFrmId& frmId, int x, int y, Rect* rect);
 
 // 0x51D99C
 static RightsideUpTableEntry _rightside_up_table[13] = {
@@ -124,7 +152,7 @@ static UpsideDownTriangle _upside_down_triangles[5] = {
 static int _intensity_map[3280];
 
 // 0x4B12C0
-void tileWindowRefreshRect(Rect* rect, int elevation)
+void tileWindowRefreshRect(Rect* rect, MapElevation elevation)
 {
     if (gTileEnabled) {
         if (elevation == gElevation) {
@@ -142,7 +170,7 @@ void tileWindowRefresh()
 }
 
 // 0x4B1554
-void tileRefreshMapper(Rect* rect, int elevation)
+void tileRefreshMapper(Rect* rect, MapElevation elevation)
 {
     Rect rectToUpdate;
 
@@ -150,46 +178,93 @@ void tileRefreshMapper(Rect* rect, int elevation)
         return;
     }
 
-    bufferFill(gTileWindowBuffer + gTileWindowPitch * rectToUpdate.top + rectToUpdate.left,
-        rectToUpdate.right - rectToUpdate.left + 1,
-        rectToUpdate.bottom - rectToUpdate.top + 1,
-        gTileWindowPitch,
-        0);
+    Rect visArea;
+    bool hasVisArea = mapEdgeComputeVisibleArea(elevation, &visArea);
 
-    tileRenderFloorsInRect(&rectToUpdate, elevation);
-    _grid_render(&rectToUpdate, elevation);
-    _obj_render_pre_roof(&rectToUpdate, elevation);
-    tileRenderRoofsInRect(&rectToUpdate, elevation);
-    _obj_render_post_roof(&rectToUpdate, elevation);
-    gTileWindowRefreshProc(&rectToUpdate);
+    Rect renderRect = rectToUpdate;
+    bool didClear = checkRectNeedsClear(&rectToUpdate, hasVisArea, &visArea);
+
+    // HRP EdgeClipping: when clipped, clear only if CheckRect; otherwise always clear.
+    if (didClear) {
+        bufferFill(gTileWindowBuffer + gTileWindowPitch * rectToUpdate.top + rectToUpdate.left,
+            rectGetWidth(&rectToUpdate),
+            rectGetHeight(&rectToUpdate),
+            gTileWindowPitch,
+            COLOR_FIRST);
+    }
+
+    if (hasVisArea && rectIntersection(&renderRect, &visArea, &renderRect) == -1) {
+        if (didClear) {
+            gTileWindowRefreshProc(&rectToUpdate);
+        }
+        return;
+    }
+
+    tileRenderFloorsInRect(&renderRect, elevation);
+    _grid_render(&renderRect, elevation);
+    _obj_render_pre_roof(&renderRect, elevation);
+    tileRenderRoofsInRect(&renderRect, elevation);
+    _obj_render_post_roof(&renderRect, elevation);
+
+    if (!hasVisArea) {
+        tile_hires_stencil_draw(&renderRect, gTileWindowBuffer, gTileWindowWidth, gTileWindowHeight);
+    }
+
+    tileMapperOverlayRender(gTileWindowBuffer, gTileWindowPitch, elevation, &renderRect);
+
+    gTileWindowRefreshProc(didClear ? &rectToUpdate : &renderRect);
 }
 
 // 0x4B15E8
-void tileRefreshGame(Rect* rect, int elevation)
+void tileRefreshGame(Rect* rect, MapElevation elevation)
 {
+    if (tileFirstPersonPreviewIsEnabled()) {
+        tileFirstPersonPreviewRequestRefresh();
+        return;
+    }
+
     Rect rectToUpdate;
 
     if (rectIntersection(rect, &gTileWindowRect, &rectToUpdate) == -1) {
         return;
     }
 
-    // CE: Clear dirty rect to prevent most of the visual artifacts near map
-    // edges.
-    bufferFill(gTileWindowBuffer + rectToUpdate.top * gTileWindowPitch + rectToUpdate.left,
-        rectGetWidth(&rectToUpdate),
-        rectGetHeight(&rectToUpdate),
-        gTileWindowPitch,
-        0);
+    Rect visArea;
+    bool hasVisArea = mapEdgeComputeVisibleArea(elevation, &visArea);
 
-    tileRenderFloorsInRect(&rectToUpdate, elevation);
-    _obj_render_pre_roof(&rectToUpdate, elevation);
-    tileRenderRoofsInRect(&rectToUpdate, elevation);
-    _obj_render_post_roof(&rectToUpdate, elevation);
-    gTileWindowRefreshProc(&rectToUpdate);
+    Rect renderRect = rectToUpdate;
+    bool didClear = checkRectNeedsClear(&rectToUpdate, hasVisArea, &visArea);
+
+    // HRP EdgeClipping: when clipped, clear only if CheckRect; otherwise always clear.
+    if (didClear) {
+        bufferFill(gTileWindowBuffer + rectToUpdate.top * gTileWindowPitch + rectToUpdate.left,
+            rectGetWidth(&rectToUpdate),
+            rectGetHeight(&rectToUpdate),
+            gTileWindowPitch,
+            COLOR_FIRST);
+    }
+
+    if (hasVisArea && rectIntersection(&renderRect, &visArea, &renderRect) == -1) {
+        if (didClear) {
+            gTileWindowRefreshProc(&rectToUpdate);
+        }
+        return;
+    }
+
+    tileRenderFloorsInRect(&renderRect, elevation);
+    _obj_render_pre_roof(&renderRect, elevation);
+    tileRenderRoofsInRect(&renderRect, elevation);
+    _obj_render_post_roof(&renderRect, elevation);
+
+    if (!hasVisArea) {
+        tile_hires_stencil_draw(&renderRect, gTileWindowBuffer, gTileWindowWidth, gTileWindowHeight);
+    }
+
+    gTileWindowRefreshProc(didClear ? &rectToUpdate : &renderRect);
 }
 
 // 0x4B20E8
-void tileRenderRoofsInRect(Rect* rect, int elevation)
+void tileRenderRoofsInRect(Rect* rect, MapElevation elevation)
 {
     if (!gTileRoofIsVisible) {
         return;
@@ -230,15 +305,18 @@ void tileRenderRoofsInRect(Rect* rect, int elevation)
     for (int y = minY; y <= maxY; y++) {
         for (int x = minX; x <= maxX; x++) {
             int squareTile = baseSquareTile + x;
-            int frmId = gTileSquares[elevation]->field_0[squareTile];
-            frmId >>= 16;
-            if ((((frmId & 0xF000) >> 12) & 0x01) == 0) {
-                int fid = buildFid(OBJ_TYPE_TILE, frmId & 0xFFF, 0, 0, 0);
-                if (fid != buildFid(OBJ_TYPE_TILE, 1, 0, 0, 0)) {
+            const RoofTileFrmId roofTileFrmId = RoofTileFrmId(gTileSquares[elevation]->tileFid[squareTile]);
+
+            if ((roofTileFrmId.flags() & TileFlags::TemporarilyHidden) == TileFlags::None) {
+                TileFrameId frameId = roofTileFrmId.frameId<TileFrameId>();
+                if (frameId == TileFrameId::Invalid) {
+                    frameId = TileFrameId::Last;
+                }
+                if (frameId != TileFrameId::Grid) {
                     int screenX;
                     int screenY;
                     squareTileToRoofScreenXY(squareTile, &screenX, &screenY, elevation);
-                    tileRenderRoof(fid, screenX, screenY, rect, light);
+                    tileRenderRoof(frameId, screenX, screenY, rect, light);
                 }
             }
         }
@@ -247,16 +325,16 @@ void tileRenderRoofsInRect(Rect* rect, int elevation)
 }
 
 // 0x4B24E0
-static void tileRenderRoof(int fid, int x, int y, Rect* rect, int light)
+static void tileRenderRoof(const TileFrmId& frmId, int x, int y, Rect* rect, int light)
 {
     CacheEntry* tileFrmHandle;
-    Art* tileFrm = artLock(fid, &tileFrmHandle);
+    Art* tileFrm = artLock(frmId, &tileFrmHandle);
     if (tileFrm == nullptr) {
         return;
     }
 
-    int tileWidth = artGetWidth(tileFrm, 0, 0);
-    int tileHeight = artGetHeight(tileFrm, 0, 0);
+    int tileWidth = artGetWidth(tileFrm);
+    int tileHeight = artGetHeight(tileFrm);
 
     Rect tileRect;
     tileRect.left = x;
@@ -265,18 +343,18 @@ static void tileRenderRoof(int fid, int x, int y, Rect* rect, int light)
     tileRect.bottom = y + tileHeight - 1;
 
     if (rectIntersection(&tileRect, rect, &tileRect) == 0) {
-        unsigned char* tileFrmBuffer = artGetFrameData(tileFrm, 0, 0);
+        unsigned char* tileFrmBuffer = artGetFrameData(tileFrm);
         tileFrmBuffer += tileWidth * (tileRect.top - y) + (tileRect.left - x);
 
         CacheEntry* eggFrmHandle;
-        Art* eggFrm = artLock(gEgg->fid, &eggFrmHandle);
+        Art* eggFrm = artLock(FrmId(gEgg), &eggFrmHandle);
         if (eggFrm != nullptr) {
-            int eggWidth = artGetWidth(eggFrm, 0, 0);
-            int eggHeight = artGetHeight(eggFrm, 0, 0);
+            int eggWidth = artGetWidth(eggFrm);
+            int eggHeight = artGetHeight(eggFrm);
 
             int eggScreenX;
             int eggScreenY;
-            tileToScreenXY(gEgg->tile, &eggScreenX, &eggScreenY, gEgg->elevation);
+            tileToScreenXY(gEgg->tile, &eggScreenX, &eggScreenY);
 
             eggScreenX += 16;
             eggScreenY += 8;
@@ -335,7 +413,7 @@ static void tileRenderRoof(int fid, int x, int y, Rect* rect, int light)
                     }
                 }
 
-                unsigned char* eggBuf = artGetFrameData(eggFrm, 0, 0);
+                unsigned char* eggBuf = artGetFrameData(eggFrm);
                 _intensity_mask_buf_to_buf(tileFrmBuffer + tileWidth * (intersectedRect.top - tileRect.top) + (intersectedRect.left - tileRect.left),
                     intersectedRect.right - intersectedRect.left + 1,
                     intersectedRect.bottom - intersectedRect.top + 1,
@@ -357,7 +435,7 @@ static void tileRenderRoof(int fid, int x, int y, Rect* rect, int light)
 }
 
 // 0x4B2944
-void tileRenderFloorsInRect(Rect* rect, int elevation)
+void tileRenderFloorsInRect(Rect* rect, MapElevation elevation)
 {
     int minY;
     int maxX;
@@ -393,13 +471,16 @@ void tileRenderFloorsInRect(Rect* rect, int elevation)
     for (int y = minY; y <= maxY; y++) {
         for (int x = minX; x <= maxX; x++) {
             int squareTile = baseSquareTile + x;
-            int frmId = gTileSquares[elevation]->field_0[squareTile];
-            if ((((frmId & 0xF000) >> 12) & 0x01) == 0) {
+            const FloorTileFrmId floorTileFrmId = FloorTileFrmId(gTileSquares[elevation]->tileFid[squareTile]);
+            if ((floorTileFrmId.flags() & TileFlags::TemporarilyHidden) == TileFlags::None) {
                 int tileScreenX;
                 int tileScreenY;
                 squareTileToScreenXY(squareTile, &tileScreenX, &tileScreenY, elevation);
-                int fid = buildFid(OBJ_TYPE_TILE, frmId & 0xFFF, 0, 0, 0);
-                tileRenderFloor(fid, tileScreenX, tileScreenY, rect);
+                TileFrameId frameId = floorTileFrmId.frameId<TileFrameId>();
+                if (frameId == TileFrameId::Invalid) {
+                    frameId = TileFrameId::Last;
+                }
+                tileRenderFloor(frameId, tileScreenX, tileScreenY, rect);
             }
         }
         baseSquareTile += gSquareGridWidth;
@@ -407,7 +488,7 @@ void tileRenderFloorsInRect(Rect* rect, int elevation)
 }
 
 // 0x4B2E98
-void _grid_render(Rect* rect, int elevation)
+void _grid_render(Rect* rect, MapElevation elevation)
 {
     if (!gTileGridIsVisible) {
         return;
@@ -415,14 +496,14 @@ void _grid_render(Rect* rect, int elevation)
 
     for (int y = rect->top - 12; y < rect->bottom + 12; y += 6) {
         for (int x = rect->left - 32; x < rect->right + 32; x += 16) {
-            int tile = tileFromScreenXY(x, y, elevation);
+            int tile = tileFromScreenXY(x, y);
             _draw_grid(tile, elevation, rect);
         }
     }
 }
 
 // 0x4B2F4C
-static void _draw_grid(int tile, int elevation, Rect* rect)
+static void _draw_grid(int tile, MapElevation elevation, Rect* rect)
 {
     if (tile == -1) {
         return;
@@ -430,7 +511,7 @@ static void _draw_grid(int tile, int elevation, Rect* rect)
 
     int x;
     int y;
-    tileToScreenXY(tile, &x, &y, elevation);
+    tileToScreenXY(tile, &x, &y);
 
     Rect r;
     r.left = x;
@@ -475,19 +556,19 @@ static void _draw_grid(int tile, int elevation, Rect* rect)
 }
 
 // 0x4B30C4
-static void tileRenderFloor(int fid, int x, int y, Rect* rect)
+void tileRenderFloor(const TileFrmId& frmId, int x, int y, Rect* rect)
 {
-    if (artIsObjectTypeHidden(FID_TYPE(fid)) != 0) {
+    if (artIsObjectTypeHidden(frmId.objectType()) != 0) {
         return;
     }
 
     CacheEntry* cacheEntry;
-    Art* art = artLock(fid, &cacheEntry);
+    Art* art = artLock(frmId, &cacheEntry);
     if (art == nullptr) {
         return;
     }
 
-    int elev = gElevation;
+    MapElevation elev = gElevation;
     int left = rect->left;
     int top = rect->top;
     int width = rect->right - rect->left + 1;
@@ -521,8 +602,8 @@ static void tileRenderFloor(int fid, int x, int y, Rect* rect)
 
     if (x >= gTileWindowWidth || x > rect->right || y >= gTileWindowHeight || y > rect->bottom) goto out;
 
-    frameWidth = artGetWidth(art, 0, 0);
-    frameHeight = artGetHeight(art, 0, 0);
+    frameWidth = artGetWidth(art);
+    frameHeight = artGetHeight(art);
 
     if (left < x) {
         v79 = 0;
@@ -552,7 +633,7 @@ static void tileRenderFloor(int fid, int x, int y, Rect* rect)
 
     if (v77 <= 0 || v76 <= 0) goto out;
 
-    tile = tileFromScreenXY(savedX, savedY + 13, gElevation);
+    tile = tileFromScreenXY(savedX, savedY + 13);
     if (tile != -1) {
         int parity = tile & 1;
         int ambientIntensity = lightGetAmbientIntensity();
@@ -571,7 +652,7 @@ static void tileRenderFloor(int fid, int x, int y, Rect* rect)
         }
 
         if (v23 == 9) {
-            unsigned char* buf = artGetFrameData(art, 0, 0);
+            unsigned char* buf = artGetFrameData(art);
             _dark_trans_buf_to_buf(buf + frameWidth * v78 + v79, v77, v76, frameWidth, gTileWindowBuffer, x, y, gTileWindowPitch, _verticies[0].intensity);
             goto out;
         }
@@ -685,7 +766,7 @@ static void tileRenderFloor(int fid, int x, int y, Rect* rect)
         }
 
         unsigned char* v66 = gTileWindowBuffer + gTileWindowPitch * y + x;
-        unsigned char* v67 = artGetFrameData(art, 0, 0) + frameWidth * v78 + v79;
+        unsigned char* v67 = artGetFrameData(art) + frameWidth * v78 + v79;
         int* v68 = &(_intensity_map[160 + 80 * v78]) + v79;
         int v86 = frameWidth - v77;
         int v85 = gTileWindowPitch - v77;

@@ -51,7 +51,7 @@ namespace fallout {
 // nn in 01..10, and the header carries a 30-char description — which is exactly
 // the "numbered slot with an optional mnemonic label" the operator wants, so
 // nothing new is invented here.
-static constexpr int kSlotCount = 10;
+static constexpr int kSlotCount = kManualSaveSlotCount;
 
 // SLOT11.. — the AUTOSAVE ROTATION WINDOW (indices 10..10+kAutosaveKeep-1).
 // Deliberately past everything the vanilla client's save/load screens can reach,
@@ -76,7 +76,7 @@ static constexpr int kSlotCount = 10;
 // to the next slot in sequence after savegameEraseSlot() needs no renames at all.
 // The cost is that the newest autosave is not always slot 11, which is exactly why
 // the slot is named in the announcement and in the server log.
-static constexpr int kAutosaveSlot = 10;
+static constexpr int kAutosaveSlot = kServerAutosaveFirstSlot;
 static constexpr int kAutosaveKeep = kSaveSlotSpace - kAutosaveSlot;
 static constexpr int kAdminSlotCount = kSaveSlotSpace;
 

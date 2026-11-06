@@ -1,3 +1,25 @@
+#include <lodepng.h>
+#include <assert.h>
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "animation_defs.h"
+#include "art_defs.h"
+#include "content_config.h"
+#include "datafile.h"
+#include "debug.h"
+#include "game.h"
+#include "memory.h"
+#include "proto.h"
+#include "settings.h"
+#include <algorithm>
+#include <memory>
+#include <unordered_map>
+#include <vector>
+#include "animation.h"
+#include "object.h"
+#include "sfall_config.h"
 #include "art.h"
 
 #include "draw.h"
@@ -11,7 +33,7 @@
 namespace fallout {
 
 // 0x418FFC
-void artRender(int fid, unsigned char* dest, int width, int height, int pitch)
+void artRender(const FrmId& frmId, unsigned char* dest, int width, int height, int pitch)
 {
     // NOTE: Original code is different. For unknown reason it directly calls
     // many art functions, for example instead of [artLock] it calls lower level
@@ -20,15 +42,15 @@ void artRender(int fid, unsigned char* dest, int width, int height, int pitch)
     // not. I've replaced these calls with higher level functions where
     // appropriate.
 
-    CacheEntry* handle;
-    Art* frm = artLock(fid, &handle);
-    if (frm == nullptr) {
+    FrmImage frmImage;
+
+    if (!frmImage.lock(frmId)) {
         return;
     }
 
-    unsigned char* frameData = artGetFrameData(frm, 0, 0);
-    int frameWidth = artGetWidth(frm, 0, 0);
-    int frameHeight = artGetHeight(frm, 0, 0);
+    unsigned char* frameData = frmImage.getData();
+    int frameWidth = frmImage.getWidth();
+    int frameHeight = frmImage.getHeight();
 
     int remainingWidth = width - frameWidth;
     int remainingHeight = height - frameHeight;
@@ -61,7 +83,7 @@ void artRender(int fid, unsigned char* dest, int width, int height, int pitch)
             pitch);
     }
 
-    artUnlock(handle);
+    frmImage.unlock();
 }
 
 } // namespace fallout

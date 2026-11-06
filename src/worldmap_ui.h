@@ -63,7 +63,8 @@ void wmFadeReset();
 // OUTWARD (UI -> core): core functions the UI calls by name.
 // Defined in worldmap.cc.
 // ---------------------------------------------------------------------------
-int wmMatchWorldPosToArea(int x, int y, int* areaIdxPtr);
+int wmMatchWorldPosToArea(int x, int y, City* areaIdxPtr);
+int wmAreaFindFirstValidMap(Map* mapIdxPtr, MapElevation* elevationPtr, int* tilePtr, Rotation* rotationPtr);
 int wmAreaFindFirstValidMap(int* mapIdxPtr);
 // Resolve a town-map ENTRANCE INDEX (chosen on a viewer) to a map, server-side, and set
 // the arrival spot. Refuses an out-of-range or undiscovered entrance. See the body.

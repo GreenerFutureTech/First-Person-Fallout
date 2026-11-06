@@ -53,7 +53,7 @@ static int gBarterResult = -1;  // applied result, consumed once by the trade lo
 static Object* barterCreateTable()
 {
     Object* table = nullptr;
-    if (objectCreateWithFidPid(&table, -1, PROTO_ID_JESSE_CONTAINER) == -1) {
+    if (objectCreateWithFrmIdProtoId(&table, FrmId::Empty(), ItemProtoTypeId::JesseContainer) == -1) {
         return nullptr;
     }
     table->flags |= OBJECT_HIDDEN;
@@ -89,7 +89,7 @@ static void barterFillTable(Object* table, const int* pids, const int* qtys, int
             continue;
         }
         Object* item = nullptr;
-        if (objectCreateWithFidPid(&item, -1, pids[i]) == -1) {
+        if (objectCreateWithFrmIdProtoId(&item, FrmId::Empty(), ProtoId(pids[i])) == -1) {
             continue;
         }
         // A freshly created item is on the ground conceptually; itemAdd moves it

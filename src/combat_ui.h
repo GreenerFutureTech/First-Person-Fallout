@@ -2,6 +2,7 @@
 #define FALLOUT_COMBAT_UI_H_
 
 #include "message.h"
+#include "combat_defs.h"
 #include "obj_types.h"
 
 namespace fallout {
@@ -37,6 +38,7 @@ namespace fallout {
 
 // Combat state owned and written by core combat.cc; the moved UI only reads it.
 extern int _combat_turn_running;
+extern int _combat_end_due_to_load;
 extern MessageList gCombatMessageList;
 extern int _list_total;
 extern Object** _combat_list;
@@ -46,19 +48,19 @@ extern Object** _combat_list;
 // authoritative; they delegate the interactive tail to the combat*Client helpers
 // below (combat_ui.cc, f2_client).
 int _combat_input();
-int calledShotSelectHitLocation(Object* critter, int* hitLocation, int hitMode);
+int calledShotSelectHitLocation(Object* critter, HitLocation* hitLocation, HitMode hitMode);
 
 // Client-interactive tails invoked by the core combat drivers in combat_drain.cc
 // when !serverLoopActive(). Bodies live in combat_ui.cc (f2_client); f2_server
 // stubs them (never reached — the server always drives the headless branch).
 void combatTurnRunClient();
 int combatInputClient();
-int calledShotSelectHitLocationClient(Object* critter, int* hitLocation, int hitMode);
+int calledShotSelectHitLocationClient(Object* critter, HitLocation* hitLocation, HitMode hitMode);
 
 // Attack-description hit-location name lookup. Lives in combat_drain.cc (f2_core,
 // SDL-free) alongside _combat_display; still called by the called-shot chrome in
 // combat_ui.cc.
-char* hitLocationGetName(Object* critter, int hitLocation);
+char* hitLocationGetName(Object* critter, HitLocation hitLocation);
 
 // Core sim functions invoked by the moved UI. Definitions stay in combat.cc.
 void combatAttemptEnd();

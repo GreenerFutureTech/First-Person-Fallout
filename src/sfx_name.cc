@@ -1,3 +1,28 @@
+#include <vector>
+#include "animation_defs.h"
+#include "art_defs.h"
+#include "audio.h"
+#include "audio_channels.h"
+#include "content_config.h"
+#include "debug.h"
+#include "game_config.h"
+#include "input.h"
+#include "map.h"
+#include "memory.h"
+#include "movie.h"
+#include "pointer_registry.h"
+#include "queue.h"
+#include "random.h"
+#include "script_sound.h"
+#include "settings.h"
+#include "sound_effects_cache.h"
+#include "stat.h"
+#include "svga.h"
+#include "window_manager.h"
+#include "worldmap.h"
+#include "xfile.h"
+#include <stdlib.h> // getenv — F2_NO_MUSIC
+#include "audio_file.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -61,38 +86,42 @@ static char _sfx_file_name[13];
 
 // sfx_build_char_name
 // 0x451604
-char* sfxBuildCharName(Object* a1, int anim, int extra)
+char* sfxBuildCharName(Object* a1, AnimationType anim, CharacterSoundEffect soundEffect)
 {
-    char v7[13];
-    char v8;
-    char v9;
+    char artName[ART_NAME_SIZE];
+    char weaponCode;
+    char animationCode;
 
-    if (artCopyFileName(FID_TYPE(a1->fid), a1->fid & 0xFFF, v7) == -1) {
+    const FrmId frmId = FrmId(a1);
+    if (artCopyFileName(frmId, artName) == -1) {
         return nullptr;
     }
 
+    // weapon animation and character sound effect is being mishmashed together within code
+    WeaponAnimation weaponAnimation = weaponAnimationIsValid(static_cast<int>(soundEffect)) ? static_cast<WeaponAnimation>(soundEffect) : WeaponAnimation::None;
+
     if (anim == ANIM_TAKE_OUT) {
-        if (_art_get_code(anim, extra, &v8, &v9) == -1) {
+        if (_art_get_code(anim, weaponAnimation, &weaponCode, &animationCode) == -1) {
             return nullptr;
         }
     } else {
-        if (_art_get_code(anim, (a1->fid & 0xF000) >> 12, &v8, &v9) == -1) {
+        if (_art_get_code(anim, frmId.weaponAnimation(), &weaponCode, &animationCode) == -1) {
             return nullptr;
         }
     }
 
     // TODO: Check.
     if (anim == ANIM_FALL_FRONT || anim == ANIM_FALL_BACK) {
-        if (extra == CHARACTER_SOUND_EFFECT_PASS_OUT) {
-            v8 = 'Y';
-        } else if (extra == CHARACTER_SOUND_EFFECT_DIE) {
-            v8 = 'Z';
+        if (soundEffect == CharacterSoundEffect::PassOut) {
+            weaponCode = 'Y';
+        } else if (soundEffect == CharacterSoundEffect::Die) {
+            weaponCode = 'Z';
         }
-    } else if ((anim == ANIM_THROW_PUNCH || anim == ANIM_KICK_LEG) && extra == CHARACTER_SOUND_EFFECT_CONTACT) {
-        v8 = 'Z';
+    } else if ((anim == ANIM_THROW_PUNCH || anim == ANIM_KICK_LEG) && soundEffect == CharacterSoundEffect::Contact) {
+        weaponCode = 'Z';
     }
 
-    snprintf(_sfx_file_name, sizeof(_sfx_file_name), "%s%c%c", v7, v8, v9);
+    snprintf(_sfx_file_name, sizeof(_sfx_file_name), "%s%c%c", artName, weaponCode, animationCode);
     compat_strupr(_sfx_file_name);
     return _sfx_file_name;
 }
@@ -117,7 +146,7 @@ char* gameSoundBuildInterfaceName(const char* a1)
 
 // sfx_build_weapon_name
 // 0x451760
-char* sfxBuildWeaponName(int effectType, Object* weapon, int hitMode, Object* target)
+char* sfxBuildWeaponName(int effectType, Object* weapon, HitMode hitMode, Object* target)
 {
     int soundVariant;
     char weaponSoundCode;
@@ -141,29 +170,28 @@ char* sfxBuildWeaponName(int effectType, Object* weapon, int hitMode, Object* ta
         soundVariant = 1;
     }
 
-    int damageType = weaponGetDamageType(nullptr, weapon);
+    DamageType damageType = weaponGetDamageType(nullptr, weapon);
 
     // SFALL
     if (effectTypeCode != 'H' || target == nullptr || damageType == explosionGetDamageType() || damageType == DAMAGE_TYPE_PLASMA || damageType == DAMAGE_TYPE_EMP) {
         materialCode = 'X';
     } else {
-        const int type = FID_TYPE(target->fid);
-        int material;
-        switch (type) {
+        MaterialType material;
+        switch (FrmId(target).objectType()) {
         case OBJ_TYPE_ITEM:
-            protoGetProto(target->pid, &proto);
+            protoGetProto(target, &proto);
             material = proto->item.material;
             break;
         case OBJ_TYPE_SCENERY:
-            protoGetProto(target->pid, &proto);
-            material = proto->scenery.field_2C;
+            protoGetProto(target, &proto);
+            material = proto->scenery.material;
             break;
         case OBJ_TYPE_WALL:
-            protoGetProto(target->pid, &proto);
+            protoGetProto(target, &proto);
             material = proto->wall.material;
             break;
         default:
-            material = -1;
+            material = MATERIAL_TYPE_INVALID;
             break;
         }
 
@@ -209,19 +237,19 @@ char* sfxBuildSceneryName(int actionType, int action, const char* name)
 // 0x4518D
 char* sfxBuildOpenName(Object* object, int action)
 {
-    if (FID_TYPE(object->fid) == OBJ_TYPE_SCENERY) {
+    if (FrmId(object).objectType() == OBJ_TYPE_SCENERY) {
         char scenerySoundId;
         Proto* proto;
-        if (protoGetProto(object->pid, &proto) != -1) {
-            scenerySoundId = proto->scenery.field_34;
+        if (protoGetProto(object, &proto) != -1) {
+            scenerySoundId = proto->scenery.soundId;
         } else {
             scenerySoundId = 'A';
         }
         snprintf(_sfx_file_name, sizeof(_sfx_file_name), "S%cDOORS%c", _snd_lookup_scenery_action[action], scenerySoundId);
     } else {
         Proto* proto;
-        protoGetProto(object->pid, &proto);
-        snprintf(_sfx_file_name, sizeof(_sfx_file_name), "I%cCNTNR%c", _snd_lookup_scenery_action[action], proto->item.field_80);
+        protoGetProto(object, &proto);
+        snprintf(_sfx_file_name, sizeof(_sfx_file_name), "I%cCNTNR%c", _snd_lookup_scenery_action[action], proto->item.soundId);
     }
     compat_strupr(_sfx_file_name);
     return _sfx_file_name;

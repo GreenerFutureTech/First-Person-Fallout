@@ -60,7 +60,7 @@ void probeApplyAggro(int aggroCount)
     std::vector<Object*> critters;
     Object* candidate = objectFindFirst();
     while (candidate != nullptr) {
-        if (PID_TYPE(candidate->pid) == OBJ_TYPE_CRITTER
+        if (ProtoId(candidate->pid).objectType() == OBJ_TYPE_CRITTER
             && candidate != gDude
             && !critterIsDead(candidate)) {
             critters.push_back(candidate);
@@ -80,7 +80,7 @@ void probeApplyAggro(int aggroCount)
         if (hostiles >= aggroCount) {
             break;
         }
-        _critter_set_who_hit_me(critter, gDude);
+        critterSetWhoHitMe(critter, gDude);
         // Same flag _caiSetupTeamCombat uses: guarantees the critter
         // joins combat even if its script sets a fleeing maneuver.
         critter->data.critter.combat.maneuver |= CRITTER_MANEUVER_ENGAGING;
@@ -109,7 +109,7 @@ static Object* commandNearestCritter()
     Object* best = nullptr;
     int bestDistance = INT_MAX;
     for (Object* c = objectFindFirst(); c != nullptr; c = objectFindNext()) {
-        if (PID_TYPE(c->pid) == OBJ_TYPE_CRITTER && c != gDude
+        if (ProtoId(c->pid).objectType() == OBJ_TYPE_CRITTER && c != gDude
             && c->elevation == gDude->elevation) {
             int distance = objectGetDistanceBetween(gDude, c);
             if (distance < bestDistance) {
@@ -150,20 +150,20 @@ void commandDispatch(const Command& command)
         critterAdjustPoison(gDude, command.arg);
     } else if (strcmp(command.name, "drug") == 0) {
         Object* item = nullptr;
-        if (objectCreateWithPid(&item, command.arg) == 0 && item != nullptr) {
-            if (_item_d_take_drug(gDude, item) == 1) {
-                _obj_destroy(item);
+        if (objectCreateWithProtoId(&item, ProtoId(command.arg)) == 0 && item != nullptr) {
+            if (drugItemTakeDrug(gDude, item) == 1) {
+                objectDestroy(item);
             }
         }
     } else if (strcmp(command.name, "hurt") == 0) {
         critterAdjustHitPoints(gDude, -command.arg);
     } else if (strcmp(command.name, "useskill") == 0) {
-        skillUse(gDude, gDude, command.arg, 0);
+        skillUse(gDude, gDude, static_cast<Skill>(command.arg), 0);
     } else if (strcmp(command.name, "useskillon") == 0) {
         // Use skill `arg` on the nearest wounded living critter
         // (excluding the dude) on the dude's elevation via
         // actionUseSkill — exercising the serverLoopActive() decouple
-        // in actionUseSkill that applies the outcome (_obj_use_skill_on
+        // in actionUseSkill that applies the outcome (objectUseSkillOn
         // -> skillUse) directly instead of via a reg_anim callback.
         // Prefer a wounded target so first-aid/doctor have HP to heal.
         Object* best = nullptr;
@@ -171,7 +171,7 @@ void commandDispatch(const Command& command)
         Object* candidate = objectFindFirst();
         while (candidate != nullptr) {
             if (candidate != gDude
-                && PID_TYPE(candidate->pid) == OBJ_TYPE_CRITTER
+                && ProtoId(candidate->pid).objectType() == OBJ_TYPE_CRITTER
                 && candidate->elevation == gDude->elevation
                 && (candidate->flags & (OBJECT_HIDDEN | OBJECT_NO_BLOCK)) == 0
                 && (candidate->data.critter.combat.results & DAM_DEAD) == 0
@@ -188,9 +188,9 @@ void commandDispatch(const Command& command)
             debugPrint("headless-probe: useskillon skill=%d id=%d pid=0x%08X hp_before=%d/%d dist=%d\n",
                 command.arg, best->id, best->pid,
                 critterGetHitPoints(best), critterGetStat(best, STAT_MAXIMUM_HIT_POINTS), bestDistance);
-            actionUseSkill(gDude, best, command.arg);
+            actionUseSkill(gDude, best, static_cast<Skill>(command.arg));
             debugPrint("headless-probe: useskillon post hp=%d uses=%d\n",
-                critterGetHitPoints(best), skillGetUsesToday(command.arg));
+                critterGetHitPoints(best), skillGetUsesToday(static_cast<Skill>(command.arg)));
         } else {
             debugPrint("headless-probe: no wounded critter found for useskillon\n");
         }
@@ -200,7 +200,7 @@ void commandDispatch(const Command& command)
         // verb). arg2 == -1 (unspecified) means one.
         int count = command.arg2 > 0 ? command.arg2 : 1;
         Object* item = nullptr;
-        if (objectCreateWithPid(&item, command.arg) == 0 && item != nullptr) {
+        if (objectCreateWithProtoId(&item, ProtoId(command.arg)) == 0 && item != nullptr) {
             _obj_disconnect(item, nullptr);
             itemAdd(gDude, item, count);
         }
@@ -232,9 +232,9 @@ void commandDispatch(const Command& command)
         } else if (strcmp(command.name, "reload") == 0) {
             // Self-contained: give a fresh pack of the weapon's
             // default ammo type, then load it.
-            int ammoPid = weaponGetAmmoTypePid(item);
+            ProtoId ammoPid = weaponGetAmmoTypeProtoId(item);
             Object* ammoPack = nullptr;
-            if (ammoPid != -1 && objectCreateWithPid(&ammoPack, ammoPid) == 0 && ammoPack != nullptr) {
+            if (ammoPid.pid() != -1 && objectCreateWithProtoId(&ammoPack, ammoPid) == 0 && ammoPack != nullptr) {
                 _obj_disconnect(ammoPack, nullptr);
                 itemAdd(gDude, ammoPack, 1);
                 weaponLoadAmmo(gDude, item, ammoPack, 1, true, nullptr);
@@ -339,19 +339,19 @@ void commandDispatch(const Command& command)
         // via the tag4/mutate actions).
         int perksBackup[PERK_COUNT];
         for (int perk = 0; perk < PERK_COUNT; perk++) {
-            perksBackup[perk] = perkGetRank(gDude, perk);
+            perksBackup[perk] = perkGetRank(gDude, static_cast<Perk>(perk));
         }
         int pendingChoice;
-        int rc = perkChoiceApply(gDude, command.arg, perksBackup, &pendingChoice);
+        int rc = perkChoiceApply(gDude, static_cast<Perk>(command.arg), perksBackup, &pendingChoice);
         debugPrint("headless-probe: perk %d rc=%d pending=%d hp=%d sp=%d\n",
             command.arg, rc, pendingChoice,
             critterGetHitPoints(gDude), pcGetStat(PC_STAT_UNSPENT_SKILL_POINTS));
     } else if (strcmp(command.name, "tag4") == 0) {
         // H-48: commit skill arg as the Tag! perk's 4th tag
         // skill, against the current tagged set.
-        int taggedSkills[NUM_TAGGED_SKILLS];
+        Skill taggedSkills[NUM_TAGGED_SKILLS];
         skillsGetTagged(taggedSkills, NUM_TAGGED_SKILLS);
-        skillsTagPerkApply(taggedSkills, command.arg);
+        skillsTagPerkApply(taggedSkills, static_cast<Skill>(command.arg));
         debugPrint("headless-probe: tag4 %d\n", command.arg);
     } else if (strcmp(command.name, "mutate") == 0) {
         // H-47: drive the extracted Mutate! trait swap like the
@@ -359,7 +359,7 @@ void commandDispatch(const Command& command)
         // (2 minus leading empty slots), lose the slot-0 trait
         // (as the first-listed line-0 pick) when one is selected,
         // then gain trait arg and commit via traitsSetSelected.
-        int traits[TRAITS_MAX_SELECTED_COUNT];
+        Trait traits[TRAITS_MAX_SELECTED_COUNT];
         traitsGetSelected(&traits[0], &traits[1]);
 
         int remaining = TRAITS_MAX_SELECTED_COUNT - 1;
@@ -376,7 +376,7 @@ void commandDispatch(const Command& command)
         if (traitCount >= 1) {
             traitsMutateDrop(traits, traitCount, 0, traits[0]);
         }
-        traitsMutateGain(traits, traitCount, command.arg);
+        traitsMutateGain(traits, traitCount, static_cast<Trait>(command.arg));
         debugPrint("headless-probe: mutate %d -> traits %d %d\n",
             command.arg, traits[0], traits[1]);
     } else if (strcmp(command.name, "lootall") == 0 || strcmp(command.name, "stealall") == 0) {
@@ -391,11 +391,11 @@ void commandDispatch(const Command& command)
         while (candidate != nullptr) {
             bool suitable;
             if (isSteal) {
-                suitable = PID_TYPE(candidate->pid) == OBJ_TYPE_CRITTER
+                suitable = ProtoId(candidate->pid).objectType() == OBJ_TYPE_CRITTER
                     && candidate != gDude
                     && candidate->elevation == gDude->elevation;
             } else {
-                suitable = PID_TYPE(candidate->pid) == OBJ_TYPE_ITEM
+                suitable = ProtoId(candidate->pid).objectType() == OBJ_TYPE_ITEM
                     && itemGetType(candidate) == ITEM_TYPE_CONTAINER
                     && candidate->elevation == gDude->elevation;
             }
@@ -480,7 +480,7 @@ void commandDispatch(const Command& command)
                 break;
             }
         }
-        int areaIdx;
+        City areaIdx;
         wmGetPartyWorldPos(&wmX, &wmY);
         wmGetPartyCurArea(&areaIdx);
         debugPrint("headless-probe: wmtravel steps=%d heals=%d pos=%d,%d area=%d encounter=%d gas=%d time=%u\n",
@@ -494,9 +494,9 @@ void commandDispatch(const Command& command)
         // decoder (until-hour wall-clock math + the until-healed
         // kinds, whose two-pass 24h/3h chunking now runs inside the
         // real pipboyRest). The probe owns the H-42
-        // _critter_can_obj_dude_rest gate the pipboy checks before
+        // critterCanDudeRest gate the pipboy checks before
         // offering the rest menu.
-        if (!_critter_can_obj_dude_rest()) {
+        if (!critterCanDudeRest()) {
             debugPrint("headless-probe: cannot rest here\n");
         } else {
             // Session start: the pipboy resets the heal-cadence
@@ -527,10 +527,10 @@ void commandDispatch(const Command& command)
         int bestDistance = INT_MAX;
         Object* candidate = objectFindFirst();
         while (candidate != nullptr) {
-            if (PID_TYPE(candidate->pid) == OBJ_TYPE_SCENERY
+            if (ProtoId(candidate->pid).objectType() == OBJ_TYPE_SCENERY
                 && candidate->elevation == gDude->elevation) {
                 Proto* proto;
-                if (protoGetProto(candidate->pid, &proto) == 0
+                if (protoGetProto(candidate, &proto) == 0
                     && proto->scenery.type == SCENERY_TYPE_DOOR) {
                     int distance = objectGetDistanceBetween(gDude, candidate);
                     if (distance < bestDistance) {
@@ -543,7 +543,7 @@ void commandDispatch(const Command& command)
         }
         if (best != nullptr) {
             debugPrint("headless-probe: using door id=%d dist=%d\n", best->id, bestDistance);
-            _obj_use_door(gDude, best);
+            objectUseDoor(gDude, best);
         } else {
             debugPrint("headless-probe: no door found\n");
         }
@@ -555,7 +555,7 @@ void commandDispatch(const Command& command)
         int bestDistance = INT_MAX;
         Object* candidate = objectFindFirst();
         while (candidate != nullptr) {
-            if (PID_TYPE(candidate->pid) == OBJ_TYPE_ITEM
+            if (ProtoId(candidate->pid).objectType() == OBJ_TYPE_ITEM
                 && candidate->elevation == gDude->elevation
                 && itemGetType(candidate) != ITEM_TYPE_CONTAINER) {
                 int distance = objectGetDistanceBetween(gDude, candidate);
@@ -582,10 +582,10 @@ void commandDispatch(const Command& command)
         int bestDistance = INT_MAX;
         Object* candidate = objectFindFirst();
         while (candidate != nullptr) {
-            if (PID_TYPE(candidate->pid) == OBJ_TYPE_SCENERY
+            if (ProtoId(candidate->pid).objectType() == OBJ_TYPE_SCENERY
                 && candidate->elevation == gDude->elevation) {
                 Proto* proto;
-                if (protoGetProto(candidate->pid, &proto) == 0
+                if (protoGetProto(candidate, &proto) == 0
                     && (proto->scenery.type == SCENERY_TYPE_LADDER_UP
                         || proto->scenery.type == SCENERY_TYPE_LADDER_DOWN
                         || proto->scenery.type == SCENERY_TYPE_STAIRS)) {
@@ -620,7 +620,7 @@ void commandDispatch(const Command& command)
         Object* candidate = objectFindFirst();
         while (candidate != nullptr) {
             if (candidate != gDude
-                && PID_TYPE(candidate->pid) == OBJ_TYPE_CRITTER
+                && ProtoId(candidate->pid).objectType() == OBJ_TYPE_CRITTER
                 && candidate->elevation == gDude->elevation
                 && actionCheckPush(gDude, candidate)) {
                 int distance = objectGetDistanceBetween(gDude, candidate);
@@ -656,7 +656,7 @@ void commandDispatch(const Command& command)
         Object* candidate = objectFindFirst();
         while (candidate != nullptr) {
             if (candidate != gDude
-                && PID_TYPE(candidate->pid) == OBJ_TYPE_CRITTER
+                && ProtoId(candidate->pid).objectType() == OBJ_TYPE_CRITTER
                 && candidate->sid != -1
                 && candidate->scriptIndex == command.arg) {
                 int distance = objectGetDistanceBetween(gDude, candidate);
@@ -676,7 +676,7 @@ void commandDispatch(const Command& command)
         }
     } else if (strcmp(command.name, "dsay") == 0) {
         // Queue a dialog reply-option selection (0-based index) for
-        // the server _gdProcess driver to apply when the next dtalk
+        // the server gameDialogProcessUI driver to apply when the next dtalk
         // conversation runs. Push these before the dtalk verb.
         dialogIntentPush(DIALOG_INTENT_SELECT, command.arg);
         debugPrint("headless-probe: dsay select option %d\n", command.arg);
@@ -687,7 +687,7 @@ void commandDispatch(const Command& command)
         debugPrint("headless-probe: dend\n");
     } else if (strcmp(command.name, "boffer") == 0) {
         // Queue "put arg (a proto id) from the dude onto the player
-        // offer table". Drained by the server inventoryOpenTrade
+        // offer table". Drained by the server barterProcessUI
         // branch when a dialog option's proc opens barter. arg2
         // (parsed into command.arg2, defaulting to a full stack) is
         // the quantity; boffer:PID or boffer:PID:QTY.
@@ -727,7 +727,7 @@ void commandDispatch(const Command& command)
         Object* candidate = objectFindFirst();
         while (candidate != nullptr) {
             if (candidate != gDude
-                && PID_TYPE(candidate->pid) == OBJ_TYPE_CRITTER
+                && ProtoId(candidate->pid).objectType() == OBJ_TYPE_CRITTER
                 && candidate->elevation == gDude->elevation
                 && (candidate->flags & (OBJECT_HIDDEN | OBJECT_NO_BLOCK)) == 0
                 && critterIsActive(candidate)) {
@@ -852,7 +852,7 @@ void commandDispatch(const Command& command)
         // record/replay weapon-draw path). Default (arg2=-1) keeps the animate=false probe.
         bool wieldAnimate = (command.arg2 == 1);
         if (weapon != nullptr) {
-            int rc = _invenWieldFunc(gDude, weapon, command.arg, wieldAnimate);
+            int rc = inventoryEquipFunc(gDude, weapon, static_cast<Hand>(command.arg), wieldAnimate);
             debugPrint("headless-probe: wield pid=0x%X hand=%d animate=%d rc=%d\n",
                 weapon->pid, command.arg, wieldAnimate, rc);
         } else {
@@ -869,7 +869,7 @@ void commandDispatch(const Command& command)
         Object* candidate = objectFindFirst();
         while (candidate != nullptr) {
             if (candidate != gDude
-                && PID_TYPE(candidate->pid) == OBJ_TYPE_CRITTER
+                && ProtoId(candidate->pid).objectType() == OBJ_TYPE_CRITTER
                 && candidate->elevation == gDude->elevation
                 && (candidate->flags & (OBJECT_HIDDEN | OBJECT_NO_BLOCK)) == 0
                 && (candidate->data.critter.combat.results & DAM_DEAD) == 0) {
@@ -884,7 +884,7 @@ void commandDispatch(const Command& command)
         if (best != nullptr) {
             debugPrint("headless-probe: cdamage id=%d pid=0x%08X amount=%d hp_before=%d\n",
                 best->id, best->pid, command.arg, critterGetHitPoints(best));
-            actionDamage(best->tile, best->elevation, command.arg, command.arg, 0, true, false);
+            actionDamage(best->tile, best->elevation, command.arg, command.arg, DAMAGE_TYPE_NORMAL, true, false);
             debugPrint("headless-probe: cdamage post hp=%d dead=%d\n",
                 critterGetHitPoints(best),
                 (best->data.critter.combat.results & DAM_DEAD) != 0);
@@ -903,7 +903,7 @@ void commandDispatch(const Command& command)
         Object* candidate = objectFindFirst();
         while (candidate != nullptr) {
             if (candidate != gDude
-                && PID_TYPE(candidate->pid) == OBJ_TYPE_CRITTER
+                && ProtoId(candidate->pid).objectType() == OBJ_TYPE_CRITTER
                 && candidate->elevation == gDude->elevation
                 && (candidate->flags & (OBJECT_HIDDEN | OBJECT_NO_BLOCK)) == 0
                 && (candidate->data.critter.combat.results & DAM_DEAD) == 0) {
@@ -965,8 +965,8 @@ void commandDispatch(const Command& command)
         // default entering location. arg2 unspecified (-1) => elevation 0.
         MapTransition transition;
         memset(&transition, 0, sizeof(transition));
-        transition.map = command.arg;
-        transition.elevation = command.arg2 > 0 ? command.arg2 : 0;
+        transition.map = static_cast<Map>(command.arg);
+        transition.elevation = static_cast<MapElevation>(command.arg2 > 0 ? command.arg2 : 0);
         transition.tile = -1;
         transition.rotation = ROTATION_SE;
         debugPrint("headless-probe: entermap %d elev=%d\n",
@@ -974,15 +974,15 @@ void commandDispatch(const Command& command)
         mapSetTransition(&transition);
     } else if (strcmp(command.name, "setgvar") == 0) {
         // TEST HOOK (issue #10 check): set global var `arg` to `arg2`.
-        gameSetGlobalVar(command.arg, command.arg2);
-        fprintf(stderr, "f2_server: setgvar %d=%d\n", command.arg, gameGetGlobalVar(command.arg));
+        gameSetGlobalVar(static_cast<GameGlobalVar>(command.arg), command.arg2);
+        fprintf(stderr, "f2_server: setgvar %d=%d\n", command.arg, gameGetGlobalVar(static_cast<GameGlobalVar>(command.arg)));
     } else if (strcmp(command.name, "entermapas") == 0) {
         // TEST HOOK (issue #10 check): like entermap, but INITIATED by player slot
         // `arg` (map = arg2) — the real exit-grid path for a non-host player.
         Object* actor = playerActorAt(command.arg);
         MapTransition transition;
         memset(&transition, 0, sizeof(transition));
-        transition.map = command.arg2;
+        transition.map = static_cast<Map>(command.arg2);
         transition.tile = -1;
         transition.rotation = ROTATION_SE;
         fprintf(stderr, "f2_server: entermapas slot=%d map=%d actor=%d\n",
@@ -1016,7 +1016,7 @@ void commandDispatch(const Command& command)
         }
     } else if (strcmp(command.name, "usetile") == 0) {
         // TEST HOOK: `use` the object standing on `tile` (the vanilla USE verb —
-        // runs the object's USE script through _obj_use). Scenery only, like the
+        // runs the object's USE script through objectUse). Scenery only, like the
         // real path. Added for the Modoc outhouse repro (miToilet).
         Object* target = nullptr;
         int bestDistance = INT_MAX;
@@ -1024,7 +1024,7 @@ void commandDispatch(const Command& command)
             if (candidate->tile != command.arg || candidate->elevation != gDude->elevation) {
                 continue;
             }
-            if (FID_TYPE(candidate->fid) != OBJ_TYPE_SCENERY) {
+            if (FrmId(candidate->fid).objectType() != OBJ_TYPE_SCENERY) {
                 continue;
             }
             int distance = objectGetDistanceBetween(gDude, candidate);
@@ -1041,7 +1041,7 @@ void commandDispatch(const Command& command)
         } else {
             fprintf(stderr, "f2_server: usetile %d — using netId=%d pid=0x%X frame=%d\n",
                 command.arg, target->netId, target->pid, target->frame);
-            _obj_use(gDude, target);
+            objectUse(gDude, target);
             fprintf(stderr, "f2_server: usetile %d — after use frame=%d\n", command.arg, target->frame);
         }
     } else if (strcmp(command.name, "explodetile") == 0) {
@@ -1079,7 +1079,7 @@ void commandDispatch(const Command& command)
             itemAdd(gDude, armor, 1);
             armor->flags &= ~OBJECT_WORN;
         }
-        int rc = armor != nullptr ? _inven_wield(gDude, armor, HAND_RIGHT) : -1;
+        int rc = armor != nullptr ? inventoryEquip(gDude, armor, HAND_RIGHT) : -1;
         fprintf(stderr, "f2_server: wear pid=%d rc=%d ac=%d\n",
             command.arg, rc, critterGetStat(gDude, STAT_ARMOR_CLASS));
         for (int index = 0; index < inventory->length; index++) {
@@ -1095,7 +1095,7 @@ void commandDispatch(const Command& command)
         Object* container = nullptr;
         int bestDistance = INT_MAX;
         for (Object* candidate = objectFindFirst(); candidate != nullptr; candidate = objectFindNext()) {
-            if (candidate->elevation != gDude->elevation || PID_TYPE(candidate->pid) != OBJ_TYPE_ITEM
+            if (candidate->elevation != gDude->elevation || ProtoId(candidate->pid).objectType() != OBJ_TYPE_ITEM
                 || itemGetType(candidate) != ITEM_TYPE_CONTAINER) {
                 continue;
             }
@@ -1121,7 +1121,7 @@ void commandDispatch(const Command& command)
         Object* target = nullptr;
         for (Object* candidate = objectFindFirst(); candidate != nullptr; candidate = objectFindNext()) {
             Script* script;
-            if (PID_TYPE(candidate->pid) == OBJ_TYPE_ITEM && candidate->sid != -1
+            if (ProtoId(candidate->pid).objectType() == OBJ_TYPE_ITEM && candidate->sid != -1
                 && scriptGetScript(candidate->sid, &script) != -1 && script->index == command.arg) {
                 target = candidate;
                 break;
@@ -1137,7 +1137,7 @@ void commandDispatch(const Command& command)
             target->frame = 0;
             bool granted = serverLootOpen(gDude, target);
             CacheEntry* frameCache = nullptr;
-            Art* frameArt = artLock(target->fid, &frameCache);
+            Art* frameArt = artLock(target, &frameCache);
             int frameCount = frameArt != nullptr ? artGetFrameCount(frameArt) : -1;
             if (frameArt != nullptr) {
                 artUnlock(frameCache);
@@ -1150,7 +1150,7 @@ void commandDispatch(const Command& command)
         // TEST HOOK (repro harness): perform the kInteractLoot OUTCOME on the
         // container standing on `tile`, addressed by TILE rather than netId so a
         // harness does not have to decode the baseline. Mirrors the server-side
-        // loot interaction body: `_obj_use_container` (which runs USE and toggles
+        // loot interaction body: `objectUseContainer` (which runs USE and toggles
         // the open frame) + the addressed lootGrant that makes the viewer open
         // its loot modal. Used to reproduce scripted container behaviour (the
         // Modoc toilet's `load_map`) with a real viewer, headlessly.
@@ -1160,7 +1160,7 @@ void commandDispatch(const Command& command)
             if (candidate->tile != command.arg || candidate->elevation != gDude->elevation) {
                 continue;
             }
-            if (PID_TYPE(candidate->pid) != OBJ_TYPE_ITEM || itemGetType(candidate) != ITEM_TYPE_CONTAINER) {
+            if (ProtoId(candidate->pid).objectType() != OBJ_TYPE_ITEM || itemGetType(candidate) != ITEM_TYPE_CONTAINER) {
                 continue;
             }
             int distance = objectGetDistanceBetween(gDude, candidate);
@@ -1176,7 +1176,7 @@ void commandDispatch(const Command& command)
                 command.arg, target->netId, bestDistance);
         } else {
             CacheEntry* frameCache = nullptr;
-            Art* frameArt = artLock(target->fid, &frameCache);
+            Art* frameArt = artLock(target, &frameCache);
             int frameCount = frameArt != nullptr ? artGetFrameCount(frameArt) : -1;
             if (frameArt != nullptr) {
                 artUnlock(frameCache);

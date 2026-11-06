@@ -1,3 +1,32 @@
+#include <stdio.h>
+#include "animation_defs.h"
+#include "combat_ai.h"
+#include "content_config.h"
+#include "db.h"
+#include "elevator.h"
+#include "loadsave.h"
+#include "map.h"
+#include "memory.h"
+#include "party_member.h"
+#include "pipboy.h"
+#include "platform_compat.h"
+#include "proto.h"
+#include "queue.h"
+#include "random.h"
+#include "sfall_callbacks.h"
+#include "sfall_config.h"
+#include "sfall_script_hooks.h"
+#include "skill.h"
+#include "trait.h"
+#include <stdlib.h>
+#include "client_net.h" // clientViewerActive — combat-attack commit fork (§3.b)
+#include "inventory.h" // inventoryUnequipFunc — a destroyed weapon leaves the sprite too
+#include "msg_channel.h" // kMsgChannelReward — XP payout is addressed to its earner
+#include "pres_record.h"
+#include "proto_instance.h" // objectDrop / objectDestroy — crit-failure weapon outcomes
+#include "server_players.h"
+#include "sim_clock.h"
+#include "msg_channel.h"
 #include "combat_ui.h"
 
 #include <limits.h>
@@ -63,7 +92,7 @@ namespace fallout {
 static void _print_tohit(unsigned char* dest, int dest_pitch, int a3);
 static void _draw_loc_off(int a1, int a2);
 static void _draw_loc_on_(int a1, int a2);
-static void _draw_loc_(int eventCode, int color);
+static void _draw_loc_(int eventCode, Color color);
 
 // 0x51802C
 static const int _call_ty[4] = {
@@ -74,7 +103,7 @@ static const int _call_ty[4] = {
 };
 
 // 0x51803C
-static const int _hit_loc_left[4] = {
+static const HitLocation _hit_loc_left[4] = {
     HIT_LOCATION_HEAD,
     HIT_LOCATION_EYES,
     HIT_LOCATION_RIGHT_ARM,
@@ -82,7 +111,7 @@ static const int _hit_loc_left[4] = {
 };
 
 // 0x51804C
-static const int _hit_loc_right[4] = {
+static const HitLocation _hit_loc_right[4] = {
     HIT_LOCATION_TORSO,
     HIT_LOCATION_GROIN,
     HIT_LOCATION_LEFT_ARM,
@@ -105,7 +134,15 @@ void combatTurnRunClient()
     while (_combat_turn_running > 0) {
         sharedFpsLimiter.mark();
 
-        _process_bk();
+        // NPC turns do not enter _combat_input, so continue polling only the
+        // first-person camera controls while their animations are playing.
+        // Other events are intentionally discarded: the player cannot act
+        // until COMBAT_STATE_PLAYER_TURN is set again.
+        gameHandleFirstPersonPreviewInput(inputGetInput());
+
+        if (tileFirstPersonPreviewIsEnabled()) {
+            tileFirstPersonPreviewRequestRefresh();
+        }
 
         renderPresent();
         sharedFpsLimiter.throttle();
@@ -118,10 +155,24 @@ void combatTurnRunClient()
 // is established by the core _combat_input before this is invoked.
 int combatInputClient()
 {
-    while ((gCombatState & COMBAT_STATE_0x02) != 0) {
+    ScopedGameMode gm(GameMode::kPlayerTurn);
+
+    while ((gCombatState & COMBAT_STATE_PLAYER_TURN) != 0) {
         sharedFpsLimiter.mark();
 
-        if (combatPlayerTurnShouldBreak()) {
+        if ((gCombatState & COMBAT_STATE_EXIT_REQUESTED) != 0) {
+            break;
+        }
+
+        if ((gDude->data.critter.combat.results & (DAM_KNOCKED_OUT | DAM_DEAD | DAM_LOSE_TURN)) != 0) {
+            break;
+        }
+
+        if (_game_user_wants_to_quit != GAME_QUIT_REQUEST_NONE) {
+            break;
+        }
+
+        if (_combat_end_due_to_load != 0) {
             break;
         }
 
@@ -135,7 +186,7 @@ int combatInputClient()
             _combat_turn_run();
         }
 
-        if (combatPlayerTurnOutOfAp()) {
+        if (gDude->data.critter.combat.ap <= 0 && _combat_free_move <= 0) {
             break;
         }
 
@@ -150,11 +201,32 @@ int combatInputClient()
             gameHandleKey(keyCode, true);
         }
 
+        if (tileFirstPersonPreviewIsEnabled()) {
+            tileFirstPersonPreviewProcessPendingMove();
+            tileFirstPersonPreviewRequestRefresh();
+        }
+
         renderPresent();
         sharedFpsLimiter.throttle();
     }
 
-    return combatPlayerTurnResolve();
+    GameQuitRequest gameQuitRequest = _game_user_wants_to_quit;
+    if (_game_user_wants_to_quit == GAME_QUIT_REQUEST_END_COMBAT) {
+        _game_user_wants_to_quit = GAME_QUIT_REQUEST_NONE;
+    }
+
+    if ((gCombatState & COMBAT_STATE_EXIT_REQUESTED) != 0) {
+        gCombatState &= ~COMBAT_STATE_EXIT_REQUESTED;
+        return -1;
+    }
+
+    if (_game_user_wants_to_quit != GAME_QUIT_REQUEST_NONE || gameQuitRequest != GAME_QUIT_REQUEST_NONE || _combat_end_due_to_load != 0) {
+        return -1;
+    }
+
+    _scripts_check_state_in_combat();
+
+    return 0;
 }
 
 // Render two digits.
@@ -163,8 +235,7 @@ int combatInputClient()
 static void _print_tohit(unsigned char* dest, int destPitch, int accuracy)
 {
     FrmImage numbersFrmImage;
-    int numbersFid = buildFid(OBJ_TYPE_INTERFACE, 82, 0, 0, 0);
-    if (!numbersFrmImage.lock(numbersFid)) {
+    if (!numbersFrmImage.lock(InterfaceFrameId::HitPointsNumbers)) {
         return;
     }
 
@@ -179,27 +250,27 @@ static void _print_tohit(unsigned char* dest, int destPitch, int accuracy)
 
 static void _draw_loc_off(int a1, int a2)
 {
-    _draw_loc_(a2, _colorTable[992]);
+    _draw_loc_(a2, COLOR_GREEN);
 }
 
 // 0x4261C0
 static void _draw_loc_on_(int a1, int a2)
 {
-    _draw_loc_(a2, _colorTable[31744]);
+    _draw_loc_(a2, COLOR_RED);
 }
 
 // 0x4261CC
-static void _draw_loc_(int eventCode, int color)
+static void _draw_loc_(int eventCode, Color color)
 {
-    color |= 0x3000000;
+    ColorWithFlags colorWithFlags = color | (DRAW_TEXT_FLAG_REFRESH | DRAW_TEXT_FLAG_NO_BG);
 
     if (eventCode >= 4) {
         char* name = hitLocationGetName(gCalledShotCritter, _hit_loc_right[eventCode - 4]);
         int width = fontGetStringWidth(name);
-        windowDrawText(gCalledShotWindow, name, 0, 431 - width, _call_ty[eventCode - 4] - 86, color);
+        windowDrawText(gCalledShotWindow, name, 0, 431 - width, _call_ty[eventCode - 4] - 86, colorWithFlags);
     } else {
         char* name = hitLocationGetName(gCalledShotCritter, _hit_loc_left[eventCode]);
-        windowDrawText(gCalledShotWindow, name, 0, 74, _call_ty[eventCode] - 86, color);
+        windowDrawText(gCalledShotWindow, name, 0, 74, _call_ty[eventCode] - 86, colorWithFlags);
     }
 }
 
@@ -209,15 +280,16 @@ static void _draw_loc_(int eventCode, int color)
 // reaches this.
 //
 // 0x426218
-int calledShotSelectHitLocationClient(Object* critter, int* hitLocation, int hitMode)
+int calledShotSelectHitLocationClient(Object* critter, HitLocation* hitLocation, HitMode hitMode)
 {
     *hitLocation = HIT_LOCATION_TORSO;
 
     if (critter == nullptr) {
+        *hitLocation = HIT_LOCATION_HEAD;
         return 0;
     }
 
-    if (PID_TYPE(critter->pid) != OBJ_TYPE_CRITTER) {
+    if (ProtoId(critter).objectType() != OBJ_TYPE_CRITTER) {
         return 0;
     }
 
@@ -234,7 +306,7 @@ int calledShotSelectHitLocationClient(Object* critter, int* hitLocation, int hit
         calledShotWindowY,
         CALLED_SHOT_WINDOW_WIDTH,
         CALLED_SHOT_WINDOW_HEIGHT,
-        _colorTable[0],
+        COLOR_BLACK,
         WINDOW_MODAL);
     if (gCalledShotWindow == -1) {
         return -1;
@@ -243,8 +315,7 @@ int calledShotSelectHitLocationClient(Object* critter, int* hitLocation, int hit
     unsigned char* windowBuffer = windowGetBuffer(gCalledShotWindow);
 
     FrmImage backgroundFrm;
-    int backgroundFid = buildFid(OBJ_TYPE_INTERFACE, 118, 0, 0, 0);
-    if (!backgroundFrm.lock(backgroundFid)) {
+    if (!backgroundFrm.lock(InterfaceFrameId::CalledShotWindow)) {
         windowDestroy(gCalledShotWindow);
         return -1;
     }
@@ -257,8 +328,8 @@ int calledShotSelectHitLocationClient(Object* critter, int* hitLocation, int hit
         CALLED_SHOT_WINDOW_WIDTH);
 
     FrmImage critterFrm;
-    int critterFid = buildFid(OBJ_TYPE_CRITTER, critter->fid & 0xFFF, ANIM_CALLED_SHOT_PIC, 0, 0);
-    if (critterFrm.lock(critterFid)) {
+    const FrmId critterFrmId = FrmId(critter, ANIM_CALLED_SHOT_PIC, WeaponAnimation::None, ROTATION_NE);
+    if (critterFrm.lock(critterFrmId)) {
         blitBufferToBuffer(critterFrm.getData(),
             170,
             225,
@@ -268,15 +339,13 @@ int calledShotSelectHitLocationClient(Object* critter, int* hitLocation, int hit
     }
 
     FrmImage cancelButtonNormalFrmImage;
-    int cancelButtonNormalFid = buildFid(OBJ_TYPE_INTERFACE, 8, 0, 0, 0);
-    if (!cancelButtonNormalFrmImage.lock(cancelButtonNormalFid)) {
+    if (!cancelButtonNormalFrmImage.lock(InterfaceFrameId::LittleRedButtonUp)) {
         windowDestroy(gCalledShotWindow);
         return -1;
     }
 
     FrmImage cancelButtonPressedFrmImage;
-    int cancelButtonPressedFid = buildFid(OBJ_TYPE_INTERFACE, 9, 0, 0, 0);
-    if (!cancelButtonPressedFrmImage.lock(cancelButtonPressedFid)) {
+    if (!cancelButtonPressedFrmImage.lock(InterfaceFrameId::LittleRedButtonDown)) {
         windowDestroy(gCalledShotWindow);
         return -1;
     }
@@ -311,14 +380,14 @@ int calledShotSelectHitLocationClient(Object* critter, int* hitLocation, int hit
 
         btn = buttonCreate(gCalledShotWindow, 33, _call_ty[index] - 90, 128, 20, index, index, -1, index, nullptr, nullptr, nullptr, 0);
         buttonSetMouseCallbacks(btn, _draw_loc_on_, _draw_loc_off, nullptr, nullptr);
-        _draw_loc_(index, _colorTable[992]);
+        _draw_loc_(index, COLOR_GREEN);
 
         probability = _determine_to_hit(gDude, critter, _hit_loc_right[index], hitMode);
         _print_tohit(windowBuffer + CALLED_SHOT_WINDOW_WIDTH * (_call_ty[index] - 86) + 453, CALLED_SHOT_WINDOW_WIDTH, probability);
 
         btn = buttonCreate(gCalledShotWindow, 341, _call_ty[index] - 90, 128, 20, index + 4, index + 4, -1, index + 4, nullptr, nullptr, nullptr, 0);
         buttonSetMouseCallbacks(btn, _draw_loc_on_, _draw_loc_off, nullptr, nullptr);
-        _draw_loc_(index + 4, _colorTable[992]);
+        _draw_loc_(index + 4, COLOR_GREEN);
     }
 
     windowRefresh(gCalledShotWindow);
@@ -345,7 +414,7 @@ int calledShotSelectHitLocationClient(Object* critter, int* hitLocation, int hit
             break;
         }
 
-        if (_game_user_wants_to_quit != 0) {
+        if (_game_user_wants_to_quit != GAME_QUIT_REQUEST_NONE) {
             break;
         }
 

@@ -1,3 +1,17 @@
+#include "platform/git_version.h"
+#include "content_config.h"
+#include "dinput.h"
+#include "sfall_callbacks.h"
+#include "sfall_ext.h"
+#include "sfall_script_hooks.h"
+#include "string_utils.h"
+#include "win32.h"
+#if __APPLE__
+#include <TargetConditionals.h>
+#endif
+#include "config.h"
+#include "game_config.h"
+#include "message.h"
 // Client game lifecycle orchestrators, split out of game.cc so that f2_core no
 // longer names the window/palette/font/mouse/movie/dialog/pipboy/char-editor/
 // automap/loadsave client-init symbols at link time. These three functions are
@@ -88,7 +102,7 @@ namespace fallout {
 static int gameTakeScreenshot(int width, int height, unsigned char* buffer, unsigned char* palette);
 
 // 0x442580
-int gameInitWithOptions(const char* windowTitle, bool isMapper, int font, int a4, int argc, char** argv)
+int gameInitWithOptions(const char* windowTitle, bool isMapper, int font, int flags, int argc, char** argv)
 {
     char path[COMPAT_MAX_PATH];
 
@@ -109,7 +123,12 @@ int gameInitWithOptions(const char* windowTitle, bool isMapper, int font, int a4
     // override it's file name.
     sfallConfigInit(argc, argv);
 
+    // SFALL: Execute all code that should be executed BEFORE game init
+    sfallOnBeforeGameInit();
+
     settingsInit(isMapper, argc, argv);
+
+    debugModeInit(settings.debug.mode.c_str());
 
     gIsMapper = isMapper;
 
@@ -119,13 +138,34 @@ int gameInitWithOptions(const char* windowTitle, bool isMapper, int font, int a4
         return -1;
     }
 
+    // Content config reads from the VFS, so it must be initialized after gameDbInit.
+    contentConfigInit();
+
     // Message list repository is considered a specialized file manager, so
     // it should be initialized early in the process.
     messageListRepositoryInit();
 
     programWindowSetTitle(windowTitle);
-    _initWindow(1, a4);
+
+    const char* visibleWindowTitle = windowTitle;
+    char versionWindowTitle[256];
+    if (settings.screen.windowed == WindowMode::Windowed) {
+        char* configuredWindowTitle = nullptr;
+        configGetString(&gContentConfig, CONTENT_CONFIG_MISC_SECTION, "window_title", &configuredWindowTitle, "");
+        if (configuredWindowTitle != nullptr && configuredWindowTitle[0] != '\0') {
+            visibleWindowTitle = configuredWindowTitle;
+        } else {
+            versionGetVersion(versionWindowTitle, sizeof(versionWindowTitle));
+            visibleWindowTitle = versionWindowTitle;
+        }
+    }
+
+    programWindowSetTitle(visibleWindowTitle);
+    windowInit(1, flags);
     paletteInit();
+
+    // SFALL: Execute all code that should be executed ON game init
+    sfallOnGameInit();
 
     const char* language = settings.system.language.c_str();
     if (compat_stricmp(language, FRENCH) == 0) {
@@ -139,25 +179,18 @@ int gameInitWithOptions(const char* windowTitle, bool isMapper, int font, int a4
     }
 
     // SFALL: Allow to skip splash screen
-    int skipOpeningMovies = 0;
-    configGetInt(&gSfallConfig, SFALL_CONFIG_MISC_KEY, SFALL_CONFIG_SKIP_OPENING_MOVIES_KEY, &skipOpeningMovies);
+    int skipOpeningMovies = settings.ui.skip_opening_movies;
+
+    // load preferences before Splash screen to get proper brightness
+    if (_init_options_menu() != 0) {
+        debugPrint("Failed on init_options_menu\n");
+        return -1;
+    }
+
+    debugPrint(">init_options_menu\n");
 
     if (!gIsMapper && skipOpeningMovies < 2) {
         showSplash();
-    }
-
-    // CE: Handle debug mode (exactly as seen in `mapper2.exe`).
-    const char* debugMode = settings.debug.mode.c_str();
-    if (compat_stricmp(debugMode, "environment") == 0) {
-        _debug_register_env();
-    } else if (compat_stricmp(debugMode, "screen") == 0) {
-        _debug_register_screen();
-    } else if (compat_stricmp(debugMode, "log") == 0) {
-        _debug_register_log("debug.log", "wt");
-    } else if (compat_stricmp(debugMode, "mono") == 0) {
-        _debug_register_mono();
-    } else if (compat_stricmp(debugMode, "gnw") == 0) {
-        _debug_register_func(_win_debug);
     }
 
     interfaceFontsInit();
@@ -184,7 +217,7 @@ int gameInitWithOptions(const char* windowTitle, bool isMapper, int font, int a4
     queueInit();
     critterInit();
     aiInit();
-    _inven_reset_dude();
+    inventoryResetDude();
 
     if (gameSoundInit() != 0) {
         debugPrint("Sound initialization failed.\n");
@@ -299,7 +332,7 @@ int gameInitWithOptions(const char* windowTitle, bool isMapper, int font, int a4
 
     debugPrint(">message_init\t");
 
-    snprintf(path, sizeof(path), "%s%s", asc_5186C8, "misc.msg");
+    snprintf(path, sizeof(path), "%s%s", gGameMsgPath, "misc.msg");
 
     if (!messageListLoad(&gMiscMessageList, path)) {
         debugPrint("Failed on message_load\n");
@@ -308,19 +341,17 @@ int gameInitWithOptions(const char* windowTitle, bool isMapper, int font, int a4
 
     debugPrint(">message_load\t");
 
+    // CE: Optional, the code has the English texts.
+    messageListInit(&gCeMessageList);
+    snprintf(path, sizeof(path), "%s%s", gGameMsgPath, "ce.msg");
+    messageListLoad(&gCeMessageList, path);
+
     if (scriptsDisable() != 0) {
         debugPrint("Failed on scr_disable\n");
         return -1;
     }
 
     debugPrint(">scr_disable\t");
-
-    if (_init_options_menu() != 0) {
-        debugPrint("Failed on init_options_menu\n");
-        return -1;
-    }
-
-    debugPrint(">init_options_menu\n");
 
     if (endgameDeathEndingInit() != 0) {
         debugPrint("Failed on endgameDeathEndingInit");
@@ -352,11 +383,19 @@ int gameInitWithOptions(const char* windowTitle, bool isMapper, int font, int a4
         return -1;
     }
 
+    if (!scriptHooksInit()) {
+        debugPrint("Failed on scriptHooksInit");
+        return -1;
+    }
+
     char* customConfigBasePath;
     configGetString(&gSfallConfig, SFALL_CONFIG_SCRIPTS_KEY, SFALL_CONFIG_INI_CONFIG_FOLDER, &customConfigBasePath);
     sfall_ini_set_base_path(customConfigBasePath);
 
     messageListRepositorySetStandardMessageList(STANDARD_MESSAGE_LIST_MISC, &gMiscMessageList);
+
+    // SFALL: Execute all code that should be executed AFTER game init
+    sfallOnAfterGameInit();
 
     return 0;
 }
@@ -373,6 +412,13 @@ void gameReset()
     // over, and the flags word comes back through automap_state.cc's handler.
     paletteReset();
     gameSoundReset();
+
+    // Flush the art cache during game loads if the target map differs from the current one.
+    // This prevents memory fragmentation and avoids heavy eviction loops on the art heap.
+    if (_isLoadingGame() && gMapHeader.index != mapIdBeingLoaded()) {
+        artCacheFlush();
+    }
+
     _movieStop();
     movieEffectsReset();
     gameMoviesReset();
@@ -389,16 +435,21 @@ void gameExit()
 {
     debugPrint("\nGame Exit\n");
 
+    sfallOnGameModeChange(1, GameMode::getCurrentGameMode());
+
     // SFALL
+    scriptHooksExit();
     sfall_gl_scr_exit();
     sfallArraysExit();
     sfallListsExit();
     sfall_gl_vars_exit();
     premadeCharactersExit();
+    sfallOnGameExit();
 
     tileDisable();
     messageListRepositorySetStandardMessageList(STANDARD_MESSAGE_LIST_MISC, nullptr);
     messageListFree(&gMiscMessageList);
+    messageListFree(&gCeMessageList);
     combatExit();
     gameDialogExit();
     _scr_game_exit();
@@ -406,6 +457,7 @@ void gameExit()
     // NOTE: Uninline.
     gameFreeGlobalVars();
 
+    sfallOnBeforeGameClose();
     scriptsExit();
     animationExit();
     protoExit();
@@ -431,10 +483,11 @@ void gameExit()
     partyMembersExit();
     endgameDeathEndingExit();
     interfaceFontsExit();
-    _windowClose();
+    windowClose();
     messageListRepositoryExit();
-    dbExit();
+    dbCloseAll();
     settingsExit(true);
+    contentConfigExit();
     sfallConfigExit();
 }
 
@@ -443,7 +496,15 @@ static int gameTakeScreenshot(int width, int height, unsigned char* buffer, unsi
 {
     MessageListItem messageListItem;
 
-    if (screenshotHandlerDefaultImpl(width, height, buffer, palette) != 0) {
+    ScreenshotHandler* handler = screenshotHandlerDefaultImpl;
+
+    const char* formatName = settings.system.screenshots_format.c_str();
+
+    if (compat_stricmp(formatName, "png") == 0) {
+        handler = screenshotHandlerPngImpl;
+    }
+
+    if (handler(width, height, buffer, palette) != 0) {
         // Error saving screenshot.
         messageListItem.num = 8;
         if (messageListGetItem(&gMiscMessageList, &messageListItem)) {

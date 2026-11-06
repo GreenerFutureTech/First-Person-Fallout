@@ -44,7 +44,7 @@ public:
     // *elevation / *tile with the chosen destination and returns >= 0 on a
     // selection, or -1 if cancelled. Base returns -1 (no UI → no selection) so the
     // caller skips the whole placement/transition block.
-    virtual int elevatorSelect(int elevator, int* map, int* elevation, int* tile) { return -1; }
+    virtual int elevatorSelect(int elevator, Map* map, int* elevation, int* tile) { return -1; }
 
     // Persist the current level's automap (paired with a committed elevator move).
     virtual void automapSave() {}
@@ -54,6 +54,7 @@ public:
 
     // SCRIPT_REQUEST_ENDGAME: play the ending slideshow then movie.
     virtual void endgame() {}
+    virtual void endgameSlideshow() {}
 
     // SCRIPT_REQUEST_LOOTING / SCRIPT_REQUEST_STEALING: open the loot / steal
     // inventory screen.

@@ -1,9 +1,11 @@
+#include <vector>
 #include "player_sheet.h"
 
 #include <stdio.h> // TEMP [psht]: stderr trace of the sheet-delta emit
 #include <stdlib.h> // getenv — sheet-delta temp-file path
 
 #include "critter.h"
+#include "character_editor.h"
 #include "db.h"
 #include "debug.h"
 #include "object.h"
@@ -34,6 +36,10 @@ namespace fallout {
 // still load.
 static constexpr int kPlayerSheetBlockMagic = 0x50534854; // 'PSHT' (v1)
 static constexpr int kPlayerSheetBlockMagicV2 = 0x50534832; // 'PSH2' (v2)
+// Version 3 appends the exact earning levels of deferred perk picks. Both
+// savegames and live sheet updates use this layout so remote clients apply
+// the same perk eligibility rules as the authoritative actor.
+static constexpr int kPlayerSheetBlockMagicV3 = 0x50534833; // 'PSH3' (v3)
 
 // Sentinel ahead of the DISK appendix (extra actor bodies + sheets). Doubles as
 // the "is there an appendix" probe: the loader reads this word at the tail and
@@ -100,10 +106,14 @@ static int playerSheetRowWrite(File* stream, int slot)
         return -1;
     }
 
+    if (characterEditorPerkLevelsRowWrite(stream, slot) == -1) {
+        return -1;
+    }
+
     return 0;
 }
 
-static int playerSheetRowRead(File* stream, int slot, bool withOwedPick)
+static int playerSheetRowRead(File* stream, int slot, bool withOwedPick, bool withPerkLevels)
 {
     if (protoPlayerActorRowRead(stream, slot) == -1) {
         return -1;
@@ -135,6 +145,11 @@ static int playerSheetRowRead(File* stream, int slot, bool withOwedPick)
         }
     }
 
+    characterEditorResetPerkStateSlot(slot);
+    if (withPerkLevels && characterEditorPerkLevelsRowRead(stream, slot) == -1) {
+        return -1;
+    }
+
     return 0;
 }
 
@@ -148,7 +163,7 @@ int playerSheetBlockWrite(File* stream, int firstSlot)
         return 0;
     }
 
-    if (fileWriteInt32(stream, kPlayerSheetBlockMagicV2) == -1) {
+    if (fileWriteInt32(stream, kPlayerSheetBlockMagicV3) == -1) {
         return -1;
     }
 
@@ -176,7 +191,8 @@ int playerSheetBlockRead(File* stream)
         return -1;
     }
 
-    bool v2 = magic == kPlayerSheetBlockMagicV2;
+    bool v3 = magic == kPlayerSheetBlockMagicV3;
+    bool v2 = magic == kPlayerSheetBlockMagicV2 || v3;
     if (magic != kPlayerSheetBlockMagic && !v2) {
         debugPrint("player_sheet: bad block magic 0x%08x\n", magic);
         return -1;
@@ -202,7 +218,7 @@ int playerSheetBlockRead(File* stream)
     }
 
     for (int slot = firstSlot; slot < firstSlot + count; slot++) {
-        if (playerSheetRowRead(stream, slot, v2) == -1) {
+        if (playerSheetRowRead(stream, slot, v2, v3) == -1) {
             debugPrint("player_sheet: slot %d row read failed\n", slot);
             return -1;
         }
@@ -448,7 +464,7 @@ int playerActorAppendixLoad(File* stream)
 // firstSlot=slot + count=1 + the row). Used by the live delta channel.
 static int playerSheetBlockWriteOne(File* stream, int slot)
 {
-    if (fileWriteInt32(stream, kPlayerSheetBlockMagicV2) == -1) {
+    if (fileWriteInt32(stream, kPlayerSheetBlockMagicV3) == -1) {
         return -1;
     }
     if (fileWriteInt32(stream, slot) == -1) {

@@ -115,7 +115,7 @@ public:
     // -1 and continues), so freezing every other player while one of them reads a
     // floor panel would buy nothing but a wedge risk. Answer immediately, ride on the
     // verb.
-    int elevatorSelect(int elevator, int* map, int* elevation, int* tile) override
+    int elevatorSelect(int elevator, Map* map, int* elevation, int* tile) override
     {
         Object* rider = scriptsRequestedElevatorRider();
         int slot = rider != nullptr ? playerActorSlotOf(rider) : -1;

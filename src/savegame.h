@@ -2,6 +2,8 @@
 #define FALLOUT_SAVEGAME_H_
 
 #include "db.h"
+#include "map_defs.h"
+#include "worldmap.h"
 
 namespace fallout {
 
@@ -19,7 +21,9 @@ namespace fallout {
 // only checkpoint you had with a mid-encounter transient map and there was nothing
 // older to fall back to. The window is the fix; growing this constant is how you
 // widen it (nothing derives a loop bound from the array, it is indexed by slot).
-constexpr int kSaveSlotSpace = 15;
+constexpr int kManualSaveSlotCount = 1000;
+constexpr int kServerAutosaveFirstSlot = kManualSaveSlotCount;
+constexpr int kSaveSlotSpace = kManualSaveSlotCount + 5;
 
 typedef struct LoadSaveSlotData {
     char signature[24];
@@ -39,8 +43,8 @@ typedef struct LoadSaveSlotData {
     short gameDay;
     short gameYear;
     unsigned int gameTime;
-    short elevation;
-    short map;
+    MapElevation elevation;
+    Map map;
     char fileName[16];
 } LoadSaveSlotData;
 

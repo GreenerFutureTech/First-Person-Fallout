@@ -11,12 +11,12 @@ namespace fallout {
 
 typedef struct StraightPathNode {
     int tile;
-    int elevation;
+    MapElevation elevation;
     int x;
     int y;
 } StraightPathNode;
 
-typedef Object* PathBuilderCallback(Object* object, int tile, int elevation);
+typedef Object* PathBuilderCallback(Object* object, int tile, MapElevation elevation);
 
 bool canUseDoor(Object* critter, Object* door);
 int _make_path(Object* object, int from, int to, unsigned char* a4, int a5);

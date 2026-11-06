@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 
+#include "character_editor.h"
 #include "game.h"
 #include "perk.h"
 #include "player_sheet.h"
@@ -57,7 +58,7 @@ void sheetEditSessionOpen(Object* actor)
     // number the player is looking at.
     ServerActorScope scope(actor);
     for (int skill = 0; skill < SKILL_COUNT; skill++) {
-        session->skillBaseline[skill] = skillGetValue(actor, skill);
+        session->skillBaseline[skill] = skillGetValue(actor, static_cast<Skill>(skill));
     }
     session->open = true;
 
@@ -101,7 +102,7 @@ int sheetEditSkillUp(Object* actor, int skill)
     // to this actor makes the guard pass and puts the budget in the right row.
     ServerActorScope scope(actor);
 
-    int rc = skillAdd(actor, skill);
+    int rc = skillAdd(actor, static_cast<Skill>(skill));
     switch (rc) {
     case 0:
         // The skill value lands in the actor's proto row directly, not through a
@@ -141,11 +142,11 @@ int sheetEditSkillDown(Object* actor, int skill)
 
     // ►► THE POINT FOUNTAIN GUARD. Without the baseline a player could walk a
     // starting skill down and pocket refunds for points they were never awarded.
-    if (skillGetValue(actor, skill) <= session->skillBaseline[skill]) {
+    if (skillGetValue(actor, static_cast<Skill>(skill)) <= session->skillBaseline[skill]) {
         return kSheetEditAtBaseline;
     }
 
-    int rc = skillSub(actor, skill);
+    int rc = skillSub(actor, static_cast<Skill>(skill));
     switch (rc) {
     case 0:
         // A refund re-lights the badge: there is a point to spend again.
@@ -193,15 +194,17 @@ int sheetEditPerkPick(Object* actor, int perk, int* pendingChoice)
     // the ranks as they were before the pick, exactly as the perk dialog does.
     int ranksBefore[PERK_COUNT];
     for (int index = 0; index < PERK_COUNT; index++) {
-        ranksBefore[index] = perkGetRank(actor, index);
+        ranksBefore[index] = perkGetRank(actor, static_cast<Perk>(index));
     }
 
     int pending = PERK_CHOICE_PENDING_NONE;
-    if (perkChoiceApply(actor, perk, ranksBefore, &pending) == -1) {
+    if (perkChoiceApply(actor, static_cast<Perk>(perk), ranksBefore, &pending) == -1) {
         return kSheetEditPrereq;
     }
 
-    perkOwedPickAdd(actor, -1); // spend ONE — the actor may still owe more
+    if (pending == PERK_CHOICE_PENDING_NONE) {
+        characterEditorConsumeOwedPerk(actor);
+    }
     // The pick is spent — and Educated may have just added points, so re-derive
     // rather than assume the badge goes out.
     pcLevelUpBadgeRefresh(actor);
@@ -219,16 +222,13 @@ int sheetEditPerkPick(Object* actor, int perk, int* pendingChoice)
     return kSheetEditOk;
 }
 
-// Cancelling an owed follow-up takes the perk back off — vanilla's own behaviour
-// when the Tag!/Mutate! dialog is escaped (character_editor.cc). We also hand the
-// PICK back, which vanilla does not: it cleared the owed flag the moment the perk
-// applied, so escaping the follow-up lost the level's perk outright. On a
-// dedicated server that is a support ticket, not a quirk.
+// Cancelling a follow-up removes the provisional perk. Its owed level has not
+// been consumed, so another selection retains the original eligibility level.
 static int sheetEditChoiceCancel(Object* actor, SheetEditSession* session, int perk)
 {
     ServerActorScope scope(actor);
-    perkRemove(actor, perk);
-    perkOwedPickAdd(actor, 1); // hand the cancelled pick back, without erasing others
+    perkRemove(actor, static_cast<Perk>(perk));
+    // The owed level is retained until the follow-up commits.
     pcLevelUpBadgeRefresh(actor);
     session->pendingChoice = PERK_CHOICE_PENDING_NONE;
     session->pendingPerk = -1;
@@ -257,7 +257,7 @@ int sheetEditTagPick(Object* actor, int skill)
 
     ServerActorScope scope(actor);
 
-    int tagged[NUM_TAGGED_SKILLS];
+    Skill tagged[NUM_TAGGED_SKILLS];
     skillsGetTagged(tagged, NUM_TAGGED_SKILLS, actor);
     for (int index = 0; index < NUM_TAGGED_SKILLS; index++) {
         if (tagged[index] == skill) {
@@ -267,7 +267,9 @@ int sheetEditTagPick(Object* actor, int skill)
 
     // Writes slot 3 and commits. skillsSetTagged underneath takes no subject here,
     // so the scope is what puts the tag on this actor's row rather than the host's.
-    skillsTagPerkApply(tagged, skill);
+    skillsTagPerkApply(tagged, static_cast<Skill>(skill));
+    characterEditorConsumeOwedPerk(actor);
+    pcLevelUpBadgeRefresh(actor);
 
     session->pendingChoice = PERK_CHOICE_PENDING_NONE;
     session->pendingPerk = -1;
@@ -293,7 +295,7 @@ int sheetEditMutatePick(Object* actor, int dropTrait, int gainTrait)
 
     ServerActorScope scope(actor);
 
-    int traits[TRAITS_MAX_SELECTED_COUNT];
+    Trait traits[TRAITS_MAX_SELECTED_COUNT];
     traitsGetSelected(&(traits[0]), &(traits[1]), actor);
 
     // Addressed by TRAIT ID, not by the dialog's line number: the perk dialog sorts
@@ -305,9 +307,9 @@ int sheetEditMutatePick(Object* actor, int dropTrait, int gainTrait)
         }
         if (traits[0] == dropTrait) {
             traits[0] = traits[1];
-            traits[1] = -1;
+            traits[1] = TRAIT_INVALID;
         } else if (traits[1] == dropTrait) {
-            traits[1] = -1;
+            traits[1] = TRAIT_INVALID;
         } else {
             return kSheetEditBadIndex; // not one of this actor's traits
         }
@@ -321,9 +323,9 @@ int sheetEditMutatePick(Object* actor, int dropTrait, int gainTrait)
             return kSheetEditBadIndex; // already has it
         }
         if (traits[0] == -1) {
-            traits[0] = gainTrait;
+            traits[0] = static_cast<Trait>(gainTrait);
         } else if (traits[1] == -1) {
-            traits[1] = gainTrait;
+            traits[1] = static_cast<Trait>(gainTrait);
         } else {
             return kSheetEditRefused; // both slots full and nothing dropped
         }
@@ -332,6 +334,8 @@ int sheetEditMutatePick(Object* actor, int dropTrait, int gainTrait)
     // Trait modifiers are applied at READ time (traitGetStatModifier), so there is
     // no derived-stat table to recompute here — the next critterGetStat sees them.
     traitsSetSelected(traits[0], traits[1], actor);
+    characterEditorConsumeOwedPerk(actor);
+    pcLevelUpBadgeRefresh(actor);
 
     session->pendingChoice = PERK_CHOICE_PENDING_NONE;
     session->pendingPerk = -1;

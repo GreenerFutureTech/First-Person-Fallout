@@ -2,10 +2,47 @@
 #define FALLOUT_WORLDMAP_DEFS_H_
 
 #include "art.h"
+#include "worldmap.h"
 #include "db.h"
 #include "message.h"
 
 namespace fallout {
+
+enum EncounterSubInfoFlag : int {
+    ENCOUNTER_SUBINFO_NONE = 0x00,
+    ENCOUNTER_SUBINFO_DEAD = 0x01
+};
+
+inline EncounterSubInfoFlag& operator|=(EncounterSubInfoFlag& lhs, EncounterSubInfoFlag rhs)
+{
+    lhs = static_cast<EncounterSubInfoFlag>(static_cast<int>(lhs) | static_cast<int>(rhs));
+    return lhs;
+}
+
+enum EncounterEntryFlag : int {
+    ENCOUNTER_ENTRY_NONE = 0x00,
+    ENCOUNTER_ENTRY_SPECIAL = 0x01
+};
+
+inline EncounterEntryFlag& operator|=(EncounterEntryFlag& lhs, EncounterEntryFlag rhs)
+{
+    lhs = static_cast<EncounterEntryFlag>(static_cast<int>(lhs) | static_cast<int>(rhs));
+    return lhs;
+}
+
+inline EncounterConditionalOperator operator++(EncounterConditionalOperator& e, int)
+{
+    EncounterConditionalOperator result = e;
+    e = static_cast<EncounterConditionalOperator>(static_cast<int>(e) + 1);
+    return result;
+}
+
+inline CitySize operator++(CitySize& e, int)
+{
+    CitySize result = e;
+    e = static_cast<CitySize>(static_cast<int>(e) + 1);
+    return result;
+}
 
 #define CITY_NAME_SIZE (40)
 #define TILE_WALK_MASK_NAME_SIZE (40)
@@ -19,9 +56,9 @@ namespace fallout {
 #define SUBTILE_GRID_WIDTH (7)
 #define SUBTILE_GRID_HEIGHT (6)
 
-#define ENCOUNTER_ENTRY_SPECIAL (0x01)
 
-#define ENCOUNTER_SUBINFO_DEAD (0x01)
+
+
 
 #define WM_WINDOW_DIAL_X (532)
 #define WM_WINDOW_DIAL_Y (48)
@@ -61,7 +98,7 @@ namespace fallout {
 #define WM_VIEW_WIDTH (450)
 #define WM_VIEW_HEIGHT (443)
 
-typedef enum EncounterFormationType {
+enum EncounterFormationType : int {
     ENCOUNTER_FORMATION_TYPE_SURROUNDING,
     ENCOUNTER_FORMATION_TYPE_STRAIGHT_LINE,
     ENCOUNTER_FORMATION_TYPE_DOUBLE_LINE,
@@ -69,9 +106,9 @@ typedef enum EncounterFormationType {
     ENCOUNTER_FORMATION_TYPE_CONE,
     ENCOUNTER_FORMATION_TYPE_HUDDLE,
     ENCOUNTER_FORMATION_TYPE_COUNT,
-} EncounterFormationType;
+};
 
-typedef enum EncounterFrequencyType {
+enum EncounterFrequencyType : int {
     ENCOUNTER_FREQUENCY_TYPE_NONE,
     ENCOUNTER_FREQUENCY_TYPE_RARE,
     ENCOUNTER_FREQUENCY_TYPE_UNCOMMON,
@@ -79,31 +116,31 @@ typedef enum EncounterFrequencyType {
     ENCOUNTER_FREQUENCY_TYPE_FREQUENT,
     ENCOUNTER_FREQUENCY_TYPE_FORCED,
     ENCOUNTER_FREQUENCY_TYPE_COUNT,
-} EncounterFrequencyType;
+};
 
-typedef enum EncounterSceneryType {
+enum EncounterSceneryType : int {
     ENCOUNTER_SCENERY_TYPE_NONE,
     ENCOUNTER_SCENERY_TYPE_LIGHT,
     ENCOUNTER_SCENERY_TYPE_NORMAL,
     ENCOUNTER_SCENERY_TYPE_HEAVY,
     ENCOUNTER_SCENERY_TYPE_COUNT,
-} EncounterSceneryType;
+};
 
-typedef enum EncounterSituation {
+enum EncounterSituation : int {
     ENCOUNTER_SITUATION_NOTHING,
     ENCOUNTER_SITUATION_AMBUSH,
     ENCOUNTER_SITUATION_FIGHTING,
     ENCOUNTER_SITUATION_AND,
     ENCOUNTER_SITUATION_COUNT,
-} EncounterSituation;
+};
 
-typedef enum EncounterLogicalOperator {
+enum EncounterLogicalOperator : int {
     ENCOUNTER_LOGICAL_OPERATOR_NONE,
     ENCOUNTER_LOGICAL_OPERATOR_AND,
     ENCOUNTER_LOGICAL_OPERATOR_OR,
-} EncounterLogicalOperator;
+};
 
-typedef enum EncounterConditionType {
+enum EncounterConditionType : int {
     ENCOUNTER_CONDITION_TYPE_NONE = 0,
     ENCOUNTER_CONDITION_TYPE_GLOBAL = 1,
     ENCOUNTER_CONDITION_TYPE_NUMBER_OF_CRITTERS = 2,
@@ -111,41 +148,44 @@ typedef enum EncounterConditionType {
     ENCOUNTER_CONDITION_TYPE_PLAYER = 4,
     ENCOUNTER_CONDITION_TYPE_DAYS_PLAYED = 5,
     ENCOUNTER_CONDITION_TYPE_TIME_OF_DAY = 6,
-} EncounterConditionType;
+};
 
-typedef enum EncounterConditionalOperator {
+enum EncounterConditionalOperator : int {
     ENCOUNTER_CONDITIONAL_OPERATOR_NONE,
     ENCOUNTER_CONDITIONAL_OPERATOR_EQUAL,
     ENCOUNTER_CONDITIONAL_OPERATOR_NOT_EQUAL,
     ENCOUNTER_CONDITIONAL_OPERATOR_LESS_THAN,
     ENCOUNTER_CONDITIONAL_OPERATOR_GREATER_THAN,
     ENCOUNTER_CONDITIONAL_OPERATOR_COUNT,
-} EncounterConditionalOperator;
+    ENCOUNTER_CONDITIONAL_OPERATOR_FIRST = ENCOUNTER_CONDITIONAL_OPERATOR_NONE
+};
 
-typedef enum EncounterRatioMode {
+enum EncounterRatioMode : int {
     ENCOUNTER_RATIO_MODE_USE_RATIO,
     ENCOUNTER_RATIO_MODE_SINGLE,
-} EncounterRatioMode;
+};
 
-typedef enum Daytime {
+enum Daytime : int {
     DAY_PART_MORNING,
     DAY_PART_AFTERNOON,
     DAY_PART_NIGHT,
     DAY_PART_COUNT,
-} Daytime;
+    DAY_PART_FIRST = DAY_PART_MORNING
+};
 
-typedef enum LockState {
+enum LockState : int {
     LOCK_STATE_UNLOCKED,
     LOCK_STATE_LOCKED,
-} LockState;
+    LOCK_STATE_COUNT
+};
 
-typedef enum SubtileState {
+enum SubtileState : int {
     SUBTILE_STATE_UNKNOWN,
     SUBTILE_STATE_KNOWN,
     SUBTILE_STATE_VISITED,
-} SubtileState;
+};
 
-typedef enum SubtileFill {
+enum SubtileFill : int {
     SUBTILE_FILL_NONE,
     SUBTILE_FILL_N,
     SUBTILE_FILL_S,
@@ -156,7 +196,7 @@ typedef enum SubtileFill {
     SUBTILE_FILL_SW,
     SUBTILE_FILL_SE,
     SUBTILE_FILL_COUNT,
-} SubtileFill;
+};
 
 typedef enum WorldMapEncounterFrm {
     WORLD_MAP_ENCOUNTER_FRM_RANDOM_BRIGHT,
@@ -172,32 +212,33 @@ typedef enum WorldmapArrowFrm {
     WORLDMAP_ARROW_FRM_COUNT,
 } WorldmapArrowFrm;
 
-typedef enum CitySize {
+enum CitySize : int {
     CITY_SIZE_SMALL,
     CITY_SIZE_MEDIUM,
     CITY_SIZE_LARGE,
     CITY_SIZE_COUNT,
-} CitySize;
+    CITY_SIZE_FIRST = CITY_SIZE_SMALL
+};
 
 typedef struct EntranceInfo {
     int state;
     int x;
     int y;
-    int map;
-    int elevation;
+    Map map;
+    MapElevation elevation;
     int tile;
-    int rotation;
+    Rotation rotation;
 } EntranceInfo;
 
 typedef struct CityInfo {
     char name[CITY_NAME_SIZE];
-    int areaId;
+    City areaId;
     int x;
     int y;
-    int size;
-    int state;
-    int lockState;
-    int visitedState;
+    CitySize size;
+    CityState state;
+    LockState lockState;
+    VisitedState visitedState;
     int mapFid;
     int labelFid;
     int entrancesLength;
@@ -210,9 +251,9 @@ typedef struct MapAmbientSoundEffectInfo {
 } MapAmbientSoundEffectInfo;
 
 typedef struct MapStartPointInfo {
-    int elevation;
+    MapElevation elevation;
     int tile;
-    int rotation;
+    Rotation rotation;
 } MapStartPointInfo;
 
 typedef struct MapInfo {
@@ -221,7 +262,7 @@ typedef struct MapInfo {
     int field_2C;
     char mapFileName[40];
     char music[40];
-    int flags;
+    MapFlags flags;
     int ambientSoundEffectsLength;
     MapAmbientSoundEffectInfo ambientSoundEffects[MAP_AMBIENT_SOUND_EFFECTS_CAPACITY];
     int startPointsLength;
@@ -232,12 +273,12 @@ typedef struct Terrain {
     char lookupName[40];
     int difficulty;
     int mapsLength;
-    int maps[20];
+    Map maps[20];
 } Terrain;
 
 typedef struct EncounterConditionEntry {
-    int type;
-    int conditionalOperator;
+    EncounterConditionType type;
+    EncounterConditionalOperator conditionalOperator;
     int param;
     int value;
 } EncounterConditionEntry;
@@ -245,20 +286,20 @@ typedef struct EncounterConditionEntry {
 typedef struct EncounterCondition {
     int entriesLength;
     EncounterConditionEntry entries[3];
-    int logicalOperators[2];
+    EncounterLogicalOperator logicalOperators[2];
 } EncounterCondition;
 
 typedef struct EncounterTableSubEntry {
     int minimumCount;
     int maximumCount;
     int encounterIndex;
-    int situation;
+    EncounterSituation situation;
 } EncounterTableSubEntry;
 
 typedef struct EncounterTableEntry {
-    int flags;
-    int map;
-    int scenery;
+    EncounterEntryFlag flags;
+    Map map;
+    EncounterSceneryType scenery;
     int chance;
     int counter;
     EncounterCondition condition;
@@ -270,7 +311,7 @@ typedef struct EncounterTable {
     char lookupName[40];
     int index;
     int mapsLength;
-    int maps[6];
+    Map maps[6];
     int field_48;
     int entriesLength;
     EncounterTableEntry entries[41];
@@ -286,10 +327,10 @@ typedef struct EncounterItem {
 typedef struct EncounterEntry {
     char field_0[40];
     int field_28;
-    int ratioMode;
+    EncounterRatioMode ratioMode;
     int ratio;
     int pid;
-    int flags;
+    EncounterSubInfoFlag flags;
     int distance;
     int tile;
     int itemsLength;
@@ -301,7 +342,7 @@ typedef struct EncounterEntry {
 
 typedef struct Encounter {
     char name[40];
-    int position;
+    EncounterFormationType position;
     int spacing;
     int distance;
     int entriesLength;
@@ -310,10 +351,10 @@ typedef struct Encounter {
 
 typedef struct SubtileInfo {
     int terrain;
-    int fill;
-    int encounterChance[DAY_PART_COUNT];
+    SubtileFill fill;
+    EncounterFrequencyType encounterChance[DAY_PART_COUNT];
     int encounterType;
-    int state;
+    SubtileState state;
 } SubtileInfo;
 
 // A worldmap tile is 7x6 area, thus consisting of 42 individual subtiles.
@@ -333,10 +374,7 @@ typedef struct CitySizeDescription {
 } CitySizeDescription;
 
 typedef struct WmGenData {
-    bool mousePressed;
-    bool didMeetFrankHorrigan;
-
-    int currentAreaId;
+    City currentAreaId;
     int worldPosX;
     int worldPosY;
     SubtileInfo* currentSubtile;
@@ -356,7 +394,7 @@ typedef struct WmGenData {
     int walkWorldPosCrossAxisStepY;
 
     bool encounterIconIsVisible;
-    int encounterMapId;
+    Map encounterMapId;
     int encounterTableId;
     int encounterEntryId;
     int encounterCursorId;
@@ -365,7 +403,7 @@ typedef struct WmGenData {
     int oldWorldPosY;
 
     bool isInCar;
-    int currentCarAreaId;
+    City currentCarAreaId;
     int carFuel;
 
     CacheEntry* carImageFrmHandle;

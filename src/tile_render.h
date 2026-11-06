@@ -25,8 +25,10 @@ namespace fallout {
 
 // Elevation-refresh procs assigned to gTileWindowRefreshElevationProc by core
 // tileInit. Their bodies live in tile_render.cc but must be visible to tile.cc.
-void tileRefreshGame(Rect* rect, int elevation);
-void tileRefreshMapper(Rect* rect, int elevation);
+void tileRefreshGame(Rect* rect, MapElevation elevation);
+void tileRefreshMapper(Rect* rect, MapElevation elevation);
+
+void tileRenderFloor(const TileFrmId& frmId, int x, int y, Rect* rect);
 
 // tile.cc state consumed (read-only) by the render layer.
 extern unsigned char* gTileWindowBuffer;

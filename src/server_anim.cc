@@ -378,14 +378,14 @@ static bool serverAnimStepOnce(Object* owner, int rotation, int durMs, bool run)
 {
     Rect rect; // required out-param of the object primitives; discarded headless
 
-    objectSetRotation(owner, rotation, &rect);
+    objectSetRotation(owner, static_cast<Rotation>(rotation), &rect);
 
-    int nextTile = tileGetTileInDirection(owner->tile, rotation, 1);
+    int nextTile = tileGetTileInDirection(owner->tile, static_cast<Rotation>(rotation), 1);
 
     Object* obstacle = _obj_blocking_at(owner, nextTile, owner->elevation);
     if (obstacle != nullptr) {
         if (canUseDoor(owner, obstacle)) {
-            _obj_use_door(owner, obstacle, false);
+            objectUseDoor(owner, obstacle, false);
             // The door's USE script ran synchronously and can do anything —
             // including destroying the walker itself. Never touch `owner`
             // again without re-proving it is still in the world.
@@ -399,7 +399,7 @@ static bool serverAnimStepOnce(Object* owner, int rotation, int durMs, bool run)
 
     // Bracketed set/clear so the pending value can never leak onto an unrelated
     // mover's objectMoved (the door script above runs BEFORE the set).
-    int elevation = owner->elevation;
+    MapElevation elevation = owner->elevation;
 
     // Scope gDude to the mover for the commit + spatial proc below. The engine's
     // exit-grid trigger inside objectSetLocation is gated on `obj == gDude`, and
@@ -466,7 +466,7 @@ static void serverAnimWalk(Object* owner, const unsigned char* rotations, int st
         return;
     }
 
-    bool chargeAp = isInCombat() && FID_TYPE(owner->fid) == OBJ_TYPE_CRITTER;
+    bool chargeAp = isInCombat() && FrmId(owner->fid).objectType() == OBJ_TYPE_CRITTER;
     int durMs = (combatGlideEnabled() && isInCombat()) ? serverGlideMsPerTile(run) : 0;
 
     for (int step = 0; step < steps; step++) {
@@ -508,13 +508,13 @@ struct DeferredWalk {
     bool toObject = false;
     int tile = 0; // toTile only
     Object* target = nullptr; // toObject only
-    int elevation = 0; // toTile only
+    MapElevation elevation = ELEVATION_FIRST; // toTile only
     int actionPoints = 0;
     bool run = false;
 };
 static DeferredWalk gDeferredWalk;
 
-static int serverAnimMoveToTileApply(Object* owner, int tile, int elevation, int actionPoints, bool run);
+static int serverAnimMoveToTileApply(Object* owner, int tile, MapElevation elevation, int actionPoints, bool run);
 static int serverAnimMoveToObjectApply(Object* owner, Object* destination, int actionPoints, bool run);
 // Defined with the sequence bookkeeping at the bottom of the file; the move leaves above
 // need it to abandon a sequence they cannot realize.
@@ -640,18 +640,18 @@ void serverAnimAdvanceWalks()
 static bool serverAnimMoveArtAvailable(Object* owner, bool run, bool* effectiveRun)
 {
     *effectiveRun = run;
-    if (owner == nullptr || FID_TYPE(owner->fid) != OBJ_TYPE_CRITTER) {
+    if (owner == nullptr || FrmId(owner->fid).objectType() != OBJ_TYPE_CRITTER) {
         return true;
     }
 
     // Vanilla passes weaponCode 0 for this probe but the real weapon code for the
     // preload; mirror that asymmetry rather than tidying it (animation.cc:737 vs :748).
-    if (run && !artExists(buildFid(OBJ_TYPE_CRITTER, owner->fid & 0xFFF, ANIM_RUNNING, 0, owner->rotation + 1))) {
+    if (run && !FrmId(owner, ANIM_RUNNING, WeaponAnimation::None, owner->rotation + 1).exist()) {
         *effectiveRun = false;
     }
 
-    int anim = *effectiveRun ? ANIM_RUNNING : ANIM_WALK;
-    if (artExists(buildFid(OBJ_TYPE_CRITTER, owner->fid & 0xFFF, anim, (owner->fid & 0xF000) >> 12, owner->rotation + 1))) {
+    AnimationType anim = *effectiveRun ? ANIM_RUNNING : ANIM_WALK;
+    if (FrmId(owner, anim, FrmId(owner).weaponAnimation(), owner->rotation + 1).exist()) {
         return true;
     }
     // Name the refusal. A rooted critter is INVISIBLE otherwise — the AI simply stops
@@ -667,7 +667,7 @@ static bool serverAnimMoveArtAvailable(Object* owner, bool run, bool* effectiveR
 
 // The authoritative body: build the path and walk (or enqueue out-of-combat). Byte-identical
 // to the pre-record path; also the deferred-commit target for a recorded in-combat move.
-static int serverAnimMoveToTileApply(Object* owner, int tile, int elevation, int actionPoints, bool run)
+static int serverAnimMoveToTileApply(Object* owner, int tile, MapElevation elevation, int actionPoints, bool run)
 {
     if (actionPoints == 0) {
         return -1;
@@ -706,7 +706,7 @@ static int serverAnimMoveToTileApply(Object* owner, int tile, int elevation, int
     return 0;
 }
 
-static int serverAnimMoveToTile(Object* owner, int tile, int elevation, int actionPoints, bool run)
+static int serverAnimMoveToTile(Object* owner, int tile, MapElevation elevation, int actionPoints, bool run)
 {
     // ►►►► DO NOT POISON THE SEQUENCE HERE, EVEN THOUGH VANILLA DOES (_anim_cleanup on
     // actionPoints == 0). Tried it; it FAILED the record-purity melee gate — record mode
@@ -717,7 +717,7 @@ static int serverAnimMoveToTile(Object* owner, int tile, int elevation, int acti
     // the two modes. While the -1 was being ignored that asymmetry was harmless; routing it
     // into rc propagated it into whether the caller runs _combat_turn_run(), i.e. straight
     // into the simulation. Same shape as the record-purity AP asymmetry already on file
-    // (actionPickUp's ignored _check_scenery_ap_cost return — do not honor it either).
+    // (actionPickUp's ignored checkSceneryUseActionPointCost return — do not honor it either).
     // ►► THE RULE THIS BUYS: only MODE-INVARIANT facts may fail a sequence. The art test
     // below qualifies (a critter's FRMs do not depend on record mode); an AP read does not.
     // Restoring vanilla's AP-driven cleanup needs the deferred-AP asymmetry solved first.
@@ -737,7 +737,7 @@ static int serverAnimMoveToTile(Object* owner, int tile, int elevation, int acti
     // inside a combat MOVE bracket's ambient section (combatMoveRecorded()).
     if (presRecordActive()) {
         // owner->ap is the PRE-walk pool (the walk is deferred — it hasn't charged AP yet).
-        int preWalkAp = FID_TYPE(owner->fid) == OBJ_TYPE_CRITTER ? owner->data.critter.combat.ap : -1;
+        int preWalkAp = FrmId(owner->fid).objectType() == OBJ_TYPE_CRITTER ? owner->data.critter.combat.ap : -1;
         presRecordMoveToTile(owner, tile, elevation, run ? ANIM_RUNNING : ANIM_WALK, actionPoints, preWalkAp, 0);
         gDeferredWalk = DeferredWalk{ true, owner, false, tile, nullptr, elevation, actionPoints, run };
         if (getenv("F2_TRACE_EVENTS") != nullptr) {
@@ -749,12 +749,12 @@ static int serverAnimMoveToTile(Object* owner, int tile, int elevation, int acti
     return serverAnimMoveToTileApply(owner, tile, elevation, actionPoints, run);
 }
 
-int animationRegisterMoveToTile(Object* owner, int tile, int elevation, int actionPoints, int delay)
+int animationRegisterMoveToTile(Object* owner, int tile, MapElevation elevation, int actionPoints, int delay)
 {
     return serverAnimMoveToTile(owner, tile, elevation, actionPoints, false);
 }
 
-int animationRegisterRunToTile(Object* owner, int tile, int elevation, int actionPoints, int delay)
+int animationRegisterRunToTile(Object* owner, int tile, MapElevation elevation, int actionPoints, int delay)
 {
     return serverAnimMoveToTile(owner, tile, elevation, actionPoints, true);
 }
@@ -836,9 +836,9 @@ static int serverAnimMoveToObject(Object* owner, Object* destination, int action
     // trailing RotateToTile (vanilla-exact facing); the server's authoritative rotation
     // (in the deferred Apply) reconciles via the mover's held rotation delta.
     if (presRecordActive()) {
-        int preWalkAp = FID_TYPE(owner->fid) == OBJ_TYPE_CRITTER ? owner->data.critter.combat.ap : -1;
+        int preWalkAp = FrmId(owner->fid).objectType() == OBJ_TYPE_CRITTER ? owner->data.critter.combat.ap : -1;
         presRecordMoveToObject(owner, destination, run ? ANIM_RUNNING : ANIM_WALK, actionPoints, preWalkAp, 0);
-        gDeferredWalk = DeferredWalk{ true, owner, true, 0, destination, 0, actionPoints, run };
+        gDeferredWalk = DeferredWalk{ true, owner, true, 0, destination, ELEVATION_FIRST, actionPoints, run };
         if (getenv("F2_TRACE_EVENTS") != nullptr) {
             fprintf(stderr, "[cmove-rec] net=%d toObj=%d ap=%d run=%d\n",
                 owner->netId, destination->netId, actionPoints, run ? 1 : 0);
@@ -878,20 +878,20 @@ int animationRegisterRotateToTile(Object* owner, int tile)
 // The caller passes a concrete fid (no buildFid); applying it matches the
 // engine's end-state for the set-fid action.
 
-int animationRegisterSetFid(Object* owner, int fid, int delay)
+int animationRegisterSetFrmId(Object* owner, const FrmId& frmId, int delay)
 {
-    // Mirrors _anim_change_fid (animation.cc:2760): an anim-type fid is set with
+    // Mirrors animationChangeFrmId (animation.cc:2760): an anim-type fid is set with
     // the frame reset to 0; a bare STAND fid (anim type 0) is rebuilt via
     // _dude_stand. _dude_stand is client-only (stubbed on the server) and no
     // server-reachable caller passes a STAND fid today, so that branch falls back
     // to a raw set.
     if (presRecordActive()) {
-        presRecordSetFid(owner, fid, delay);
+        presRecordSetFid(owner, frmId.fid(), delay);
         return 0;
     }
     Rect rect;
-    objectSetFid(owner, fid, &rect);
-    if (FID_ANIM_TYPE(fid) != 0) {
+    objectSetFrmId(owner, frmId, &rect);
+    if (frmId.animationType() != ANIM_STAND) {
         objectSetFrame(owner, 0, &rect);
     }
     return 0;
@@ -902,7 +902,7 @@ int animationRegisterSetFid(Object* owner, int fid, int delay)
 // (animation.cc:1440-1454): lighting and hidden route through their object
 // primitives, everything else clears the bit directly.
 
-int animationRegisterUnsetFlag(Object* object, int flag, int delay)
+int animationRegisterUnsetFlag(Object* object, ObjectFlags flag, int delay)
 {
     if (presRecordActive()) {
         presRecordUnsetFlag(object, flag, delay);
@@ -966,7 +966,7 @@ static int serverAnimSeqFail()
     return -1;
 }
 
-int reg_anim_begin(int requestOptions)
+int reg_anim_begin(AnimationRequestOptions requestOptions)
 {
     gSeqLeafFailed = false;
     if (presRecordActive()) {
@@ -1043,25 +1043,25 @@ void _object_animate()
 // and RECORDS a typed command inside a record section (pres_record.cc) so the
 // viewer can replay the sequence through its own real reg_anim.
 
-int animationRegisterAnimate(Object* owner, int anim, int delay)
+int animationRegisterAnimate(Object* owner, AnimationType anim, int delay)
 {
     if (presRecordActive()) presRecordAnimate(owner, anim, delay);
     return 0;
 }
 
-int animationRegisterAnimateReversed(Object* owner, int anim, int delay)
+int animationRegisterAnimateReversed(Object* owner, AnimationType anim, int delay)
 {
     if (presRecordActive()) presRecordAnimateReversed(owner, anim, delay);
     return 0;
 }
 
-int animationRegisterAnimateForever(Object* owner, int anim, int delay)
+int animationRegisterAnimateForever(Object* owner, AnimationType anim, int delay)
 {
     if (presRecordActive()) presRecordAnimateForever(owner, anim, delay);
     return 0;
 }
 
-int animationRegisterAnimateAndHide(Object* owner, int anim, int delay)
+int animationRegisterAnimateAndHide(Object* owner, AnimationType anim, int delay)
 {
     // Faithful = play anim then objectDestroy(owner); destructive with
     // unconfirmed server reach and buildFid-coupled -> banked no-op. Recorded so
@@ -1078,7 +1078,7 @@ int animationRegisterHideObjectForced(Object* object)
     return 0;
 }
 
-int animationRegisterMoveToTileStraight(Object* object, int tile, int elevation, int anim, int delay)
+int animationRegisterMoveToTileStraight(Object* object, int tile, MapElevation elevation, AnimationType anim, int delay)
 {
     // Straight-line forced move (knockback / falling / stairs). Banked gap. The
     // record op carries only the PRESENTATION; the state (final tile) is still
@@ -1087,13 +1087,13 @@ int animationRegisterMoveToTileStraight(Object* object, int tile, int elevation,
     return 0;
 }
 
-int animationRegisterMoveToTileStraightAndWaitForComplete(Object* owner, int tile, int elev, int anim, int delay)
+int animationRegisterMoveToTileStraightAndWaitForComplete(Object* owner, int tile, MapElevation elev, AnimationType anim, int delay)
 {
     if (presRecordActive()) presRecordMoveStraightWait(owner, tile, elev, anim, delay);
     return 0;
 }
 
-int animationRegisterPing(int flags, int delay)
+int animationRegisterPing(AnimationRequestOptions flags, int delay)
 {
     if (presRecordActive()) presRecordPing(flags, delay);
     return 0;
@@ -1111,9 +1111,9 @@ int animationRegisterSetLightIntensity(Object* owner, int lightDistance, int lig
     return 0;
 }
 
-int animationRegisterTakeOutWeapon(Object* owner, int weaponAnimationCode, int delay)
+int animationRegisterTakeOutWeapon(Object* owner, WeaponAnimation weaponAnimationCode, int delay)
 {
-    if (presRecordActive()) presRecordTakeOut(owner, weaponAnimationCode, delay);
+    if (presRecordActive()) presRecordTakeOut(owner, static_cast<int>(weaponAnimationCode), delay);
     return 0;
 }
 
@@ -1127,9 +1127,9 @@ int animationRegisterTakeOutWeapon(Object* owner, int weaponAnimationCode, int d
 // server has existed — f2_core registers all of the below through these two
 // functions, and every one of them is a world-state mutation, not presentation:
 //
-//   _obj_use               use a door / scenery      actions.cc:1345/1456
-//   _obj_pickup            pick an item up           actions.cc:1565
-//   _obj_use_container     open a container          actions.cc:1593
+//   objectUse               use a door / scenery      actions.cc:1345/1456
+//   objectPickup            pick an item up           actions.cc:1565
+//   objectUseContainer     open a container          actions.cc:1593
 //   scriptsRequestLooting  open the loot screen      actions.cc:1601/1676
 //   _talk_to               start a conversation      actions.cc:2407
 //   _set_door_state_closed finish a door close       proto_instance.cc:1847
@@ -1142,7 +1142,7 @@ int animationRegisterTakeOutWeapon(Object* owner, int weaponAnimationCode, int d
 //
 // ALLOWLIST, not "invoke everything", deliberately (stage 1 of 2). Firing blind
 // would run PRESENTATION callbacks that reach tail stubs and abort — the header
-// names _ai_print_msg → textObjectsGetCount. ►► _check_scenery_ap_cost is also
+// names _ai_print_msg → textObjectsGetCount. ►► checkSceneryUseActionPointCost is also
 // held back on purpose: the record and non-record paths already disagree about
 // its return value ([[record-purity-ap-asymmetry]]), so it needs its own pass.
 // Stage 2 inverts this to a denylist once the presentation set is audited, and
@@ -1166,9 +1166,9 @@ static void serverAnimApplyCallbackState(void* a1, void* a2, void* proc)
     // [[record-purity-ap-asymmetry]]. The drop must be applied where BOTH paths
     // converge; deriving the death anim there is the open part of that work.
 
-    if (proc == (void*)(AnimationCallback*)_obj_use
-        || proc == (void*)(AnimationCallback*)_obj_pickup
-        || proc == (void*)(AnimationCallback*)_obj_use_container
+    if (proc == (void*)(AnimationCallback*)objectUse
+        || proc == (void*)(AnimationCallback*)objectPickup
+        || proc == (void*)(AnimationCallback*)objectUseContainer
         || proc == (void*)(AnimationCallback*)scriptsRequestLooting
         || proc == actionTalkToCallbackPtr()
         || proc == protoInstanceDoorCloseCallbackPtr()) {
@@ -1180,9 +1180,9 @@ static void serverAnimApplyCallbackState(void* a1, void* a2, void* proc)
         // like. If a long session never prints this line, the allowlist is inert in
         // practice and that is worth knowing before trusting it.
         fprintf(stderr, "f2_server: [anim-cb] applying state-bearing callback %s\n",
-            proc == (void*)(AnimationCallback*)_obj_use ? "_obj_use"
-                : proc == (void*)(AnimationCallback*)_obj_pickup ? "_obj_pickup"
-                : proc == (void*)(AnimationCallback*)_obj_use_container ? "_obj_use_container"
+            proc == (void*)(AnimationCallback*)objectUse ? "objectUse"
+                : proc == (void*)(AnimationCallback*)objectPickup ? "objectPickup"
+                : proc == (void*)(AnimationCallback*)objectUseContainer ? "objectUseContainer"
                 : proc == (void*)(AnimationCallback*)scriptsRequestLooting ? "scriptsRequestLooting"
                 : proc == actionTalkToCallbackPtr() ? "_talk_to"
                 : "_set_door_state_closed");

@@ -1,3 +1,18 @@
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+#include "content_config.h"
+#include "dinput.h"
+#include "game_config.h"
+#include "sfall_script_hooks.h"
+#include "map.h" // mapSetEnteringLocation — an entrance carries its arrival spot
+#include "server_players.h" // playerActorAt/Online — the party is every player, not slot 0
+#include "msg_channel.h" // kMsgChannelReward — the encounter-catch XP is addressed
+#include "client_net.h" // clientViewerActive — viewer skips the local map teardown
+#include "server_loop.h"
+#include "sim_clock.h"
+#include "message.h"
 #include "worldmap_ui.h"
 
 #include <assert.h>
@@ -56,6 +71,43 @@
 #include "worldmap_defs.h"
 
 namespace fallout {
+class WorldmapFirstPersonMouseScope {
+public:
+    WorldmapFirstPersonMouseScope()
+        : _firstPersonPreviewWasEnabled(tileFirstPersonPreviewIsEnabled())
+        , _relativeModeWasEnabled(mouseDeviceUsesRelativeMode())
+        , _cursorWasHidden(cursorIsHidden())
+    {
+        if (_firstPersonPreviewWasEnabled) {
+            if (_relativeModeWasEnabled && !mouseDeviceSetRelativeModeForced(false)) {
+                debugPrint("Failed to release mouse for world map: %s\n", SDL_GetError());
+            }
+            mouseShowCursor();
+        }
+    }
+
+    ~WorldmapFirstPersonMouseScope()
+    {
+        if (!_firstPersonPreviewWasEnabled || !tileFirstPersonPreviewIsEnabled()) {
+            return;
+        }
+
+        if (_relativeModeWasEnabled && !mouseDeviceSetRelativeModeForced(true)) {
+            debugPrint("Failed to restore mouse mode after world map: %s\n", SDL_GetError());
+        }
+        if (_cursorWasHidden) {
+            mouseHideCursor();
+        } else {
+            mouseShowCursor();
+        }
+    }
+
+private:
+    bool _firstPersonPreviewWasEnabled;
+    bool _relativeModeWasEnabled;
+    bool _cursorWasHidden;
+};
+
 
 // 0x51DE14
 static int wmBkWin = -1;
@@ -93,7 +145,7 @@ static int wmTownMapCurArea = -1;
 static int wmTownMapButtonId[ENTRANCE_LIST_CAPACITY];
 
 // 0x672FD8
-static int wmTownMapSubButtonIds[7];
+static int wmTownMapSubButtonIds[WM_TOWN_LIST_VISIBLE_SLOT_COUNT];
 
 static FrmImage _backgroundFrmImage;
 
@@ -116,7 +168,7 @@ static int wmInterfaceDrawCircleOverlay(CityInfo* cityInfo, CitySizeDescription*
 static void wmInterfaceDrawSubTileRectFogged(unsigned char* dest, int width, int height, int pitch);
 static int wmInterfaceDrawSubTileList(TileInfo* tileInfo, int column, int row, int x, int y, int a6);
 static int wmDrawCursorStopped();
-static int wmTownMapFunc(int* mapIdxPtr, int* entranceIdxPtr = nullptr);
+static int wmTownMapFunc(Map* mapIdxPtr, int* entranceIdxPtr = nullptr);
 static bool wmViewerEnterCurrentArea();
 static int wmTownMapInit();
 static int wmTownMapRefresh();
@@ -181,7 +233,9 @@ void wmWorldMap()
 static int wmWorldMapFunc(int a1)
 {
     ScopedGameMode gm(GameMode::kWorldmap);
+    WorldmapFirstPersonMouseScope firstPersonMouseScope;
 
+    wmResetTrailMarkers();
     // ►► SNAPSHOT BEFORE ANYTHING THAT PUMPS THE WIRE, not after. This used to be read
     // further down, past two fades and wmInterfaceInit — all of which reach
     // tickersExecute, and ScopedGameMode has already put us in kWorldmap, which is
@@ -196,11 +250,10 @@ static int wmWorldMapFunc(int a1)
 
     if (wmInterfaceInit() == -1) {
         wmInterfaceExit();
-        wmFadeReset();
         return -1;
     }
 
-    wmFadeIn();
+    touch_set_touchscreen_mode(false);
 
     wmMatchWorldPosToArea(wmGenData.worldPosX, wmGenData.worldPosY, &(wmGenData.currentAreaId));
 
@@ -209,8 +262,10 @@ static int wmWorldMapFunc(int a1)
     wmCarClearPlacedTile();
 
     unsigned int partyHealTime = 0;
-    int map = -1;
+    Map map = MAP_INVALID;
     int rc = 0;
+    wmResetTerrainInfo();
+    wmLastTravelTick = getTicks();
 
     while (true) {
         sharedFpsLimiter.mark();
@@ -234,6 +289,18 @@ static int wmWorldMapFunc(int a1)
         int worldX = wmWorldOffsetX + mouseX - WM_VIEW_X;
         int worldY = wmWorldOffsetY + mouseY - WM_VIEW_Y;
 
+        bool terrainInfoIsVisible = (worldmapTerrainInfo || !wmTownTitleOverrides.empty())
+            && !wmGenData.isWalking
+            && wmCursorIsVisible()
+            && mouseHitTestInWindow(wmBkWin, WM_VIEW_X, WM_VIEW_Y, WM_VIEW_WIDTH + WM_VIEW_X, WM_VIEW_HEIGHT + WM_VIEW_Y)
+            && abs(wmGenData.worldPosX - worldX) < 8
+            && abs(wmGenData.worldPosY - worldY) < 6
+            && wmGetHotspotText() != nullptr;
+        if (terrainInfoIsVisible != wmTerrainInfoIsVisible) {
+            wmTerrainInfoIsVisible = terrainInfoIsVisible;
+            wmInterfaceRefresh();
+        }
+
         if (keyCode == KEY_CTRL_Q || keyCode == KEY_CTRL_X || keyCode == KEY_F10) {
             showQuitConfirmationDialog();
         }
@@ -241,7 +308,7 @@ static int wmWorldMapFunc(int a1)
         // NOTE: Uninline.
         wmCheckGameEvents();
 
-        if (_game_user_wants_to_quit != 0) {
+        if (_game_user_wants_to_quit != GAME_QUIT_REQUEST_NONE) {
             break;
         }
 
@@ -265,7 +332,7 @@ static int wmWorldMapFunc(int a1)
                 }
                 wmInterfaceRefresh();
             }
-        } else if (wmGenData.isWalking) {
+        } else if (wmGenData.isWalking && wmTravelTickDue(now)) {
             {
                 worldmapTravelStep(worldX, worldY);
 
@@ -299,10 +366,11 @@ static int wmWorldMapFunc(int a1)
         }
 
         if ((mouseEvent & MOUSE_EVENT_LEFT_BUTTON_DOWN) != 0 && (mouseEvent & MOUSE_EVENT_LEFT_BUTTON_REPEAT) == 0) {
-            if (mouseHitTestInWindow(wmBkWin, WM_VIEW_X, WM_VIEW_Y, 472, 465)) {
-                if (!wmGenData.isWalking && !wmGenData.mousePressed && abs(wmGenData.worldPosX - worldX) < 5 && abs(wmGenData.worldPosY - worldY) < 5) {
-                    wmGenData.mousePressed = true;
+            if (mouseHitTestInWindow(wmBkWin, WM_VIEW_X, WM_VIEW_Y, WM_VIEW_WIDTH + WM_VIEW_X, WM_VIEW_HEIGHT + WM_VIEW_Y)) {
+                if (!wmGenData.isWalking && !mousePressed && abs(wmGenData.worldPosX - worldX) < 5 && abs(wmGenData.worldPosY - worldY) < 5) {
+                    mousePressed = true;
                     wmInterfaceRefresh();
+                    renderFpsCounter();
                     renderPresent();
                 }
             } else {
@@ -311,8 +379,8 @@ static int wmWorldMapFunc(int a1)
         }
 
         if ((mouseEvent & MOUSE_EVENT_LEFT_BUTTON_UP) != 0) {
-            if (wmGenData.mousePressed) {
-                wmGenData.mousePressed = false;
+            if (mousePressed) {
+                mousePressed = false;
                 wmInterfaceRefresh();
 
                 if (abs(wmGenData.worldPosX - worldX) < 5 && abs(wmGenData.worldPosY - worldY) < 5) {
@@ -326,40 +394,52 @@ static int wmWorldMapFunc(int a1)
                         wmViewerEnterCurrentArea();
                     } else if (wmGenData.currentAreaId != -1) {
                         CityInfo* city = &(wmAreaInfoList[wmGenData.currentAreaId]);
-                        if (city->visitedState == 2 && city->mapFid != -1) {
+                        if (city->visitedState == VisitedState::Visited && city->mapFid != -1) {
                             if (wmTownMapFunc(&map) == -1) {
                                 rc = -1;
                                 break;
                             }
                         } else {
-                            if (wmAreaFindFirstValidMap(&map) == -1) {
+                            MapElevation elevation;
+                            int tile;
+                            Rotation rotation;
+                            if (wmAreaFindFirstValidMap(&map, &elevation, &tile, &rotation) == -1) {
                                 rc = -1;
                                 break;
                             }
 
-                            city->visitedState = 2;
+                            mapSetEnteringLocation(elevation, tile, rotation);
+
+                            // SFALL/CE: LocalMapEnter runs after this first-entry
+                            // state transition, so a hook that redirects to a
+                            // different map still leaves the clicked area marked
+                            // visited.
+                            city->visitedState = VisitedState::Visited;
                         }
                     } else {
-                        map = 0;
+                        map = MAP_FIRST;
                     }
 
-                    if (map != -1 && !gWorldmapStreaming) {
+                    if (map != MAP_INVALID && !gWorldmapStreaming) {
+                        wmRunLocalMapEnterHook(&map);
                         if (wmGenData.isInCar) {
                             wmGenData.isInCar = false;
-                            if (wmGenData.currentAreaId == -1) {
-                                wmCarParkAtMapArea(map);
+                            if (wmGenData.currentAreaId == CITY_INVALID) {
+                                City areaIdx;
+                                if (wmTryMatchAreaContainingMapIdx(map, &areaIdx)) {
+                                    wmGenData.currentCarAreaId = areaIdx;
+                                }
                             } else {
                                 wmGenData.currentCarAreaId = wmGenData.currentAreaId;
                             }
                         }
 
-                        wmFadeOut();
                         mapLoadById(map);
                         break;
                     }
                 }
             } else {
-                if (mouseHitTestInWindow(wmBkWin, WM_VIEW_X, WM_VIEW_Y, 472, 465)) {
+                if (mouseHitTestInWindow(wmBkWin, WM_VIEW_X, WM_VIEW_Y, WM_VIEW_WIDTH + WM_VIEW_X, WM_VIEW_HEIGHT + WM_VIEW_Y)) {
                     if (gWorldmapStreaming) {
                         clientViewerWmMove(worldX, worldY);
                     } else {
@@ -367,7 +447,7 @@ static int wmWorldMapFunc(int a1)
                     }
                 }
 
-                wmGenData.mousePressed = false;
+                mousePressed = false;
             }
         }
 
@@ -380,12 +460,12 @@ static int wmWorldMapFunc(int a1)
                     wmViewerEnterCurrentArea();
                 } else {
                     CityInfo* city = &(wmAreaInfoList[wmGenData.currentAreaId]);
-                    if (city->visitedState == 2 && city->mapFid != -1) {
+                    if (city->visitedState == VisitedState::Visited && city->mapFid != -1) {
                         if (wmTownMapFunc(&map) == -1) {
                             rc = -1;
                         }
 
-                        if (map != -1) {
+                        if (map != MAP_INVALID) {
                             if (wmGenData.isInCar) {
                                 wmGenData.isInCar = false;
                                 wmCarParkAtMapArea(map);
@@ -427,25 +507,22 @@ static int wmWorldMapFunc(int a1)
             // NOTE: Uninline.
             wmInterfaceScroll(1, 0, nullptr);
         } else if (keyCode == KEY_CTRL_ARROW_UP) {
-            wmInterfaceScrollTabsStart(-27);
+            wmInterfaceScrollTabsStart(-WM_TOWN_LIST_SLOT_HEIGHT);
         } else if (keyCode == KEY_CTRL_ARROW_DOWN) {
-            wmInterfaceScrollTabsStart(27);
+            wmInterfaceScrollTabsStart(WM_TOWN_LIST_SLOT_HEIGHT);
         } else if (keyCode >= KEY_CTRL_F1 && keyCode <= KEY_CTRL_F7) {
-            int quickDestinationIndex = wmGenData.tabsOffsetY / 27 + (keyCode - KEY_CTRL_F1);
+            int quickDestinationIndex = wmGenData.tabsOffsetY / WM_TOWN_LIST_SLOT_HEIGHT + (keyCode - KEY_CTRL_F1);
             if (quickDestinationIndex < wmLabelCount) {
-                int areaIdx = wmLabelList[quickDestinationIndex];
+                City areaIdx = static_cast<City>(wmLabelList[quickDestinationIndex]);
                 CityInfo* city = &(wmAreaInfoList[areaIdx]);
                 if (wmAreaIsKnown(city->areaId)) {
                     if (wmGenData.currentAreaId != areaIdx) {
-                        CitySizeDescription* citySizeDescription = &(wmSphereData[city->size]);
-                        int destX = city->x + citySizeDescription->frmImage.getWidth() / 2 - WM_VIEW_X;
-                        int destY = city->y + citySizeDescription->frmImage.getHeight() / 2 - WM_VIEW_Y;
-                        if (gWorldmapStreaming) {
-                            clientViewerWmMove(destX, destY);
-                        } else {
-                            wmPartyInitWalking(destX, destY);
-                        }
-                        wmGenData.mousePressed = 0;
+                        int destX;
+                        int destY;
+                        wmAreaGetMarkWorldPos(city, &destX, &destY);
+                        if (gWorldmapStreaming) clientViewerWmMove(destX, destY);
+                        else wmPartyInitWalking(destX, destY);
+                        mousePressed = 0;
                     }
                 }
             }
@@ -456,29 +533,32 @@ static int wmWorldMapFunc(int a1)
             int wheelY;
             mouseGetWheel(&wheelX, &wheelY);
 
-            if (mouseHitTestInWindow(wmBkWin, WM_VIEW_X, WM_VIEW_Y, 472, 465)) {
+            if (mouseHitTestInWindow(wmBkWin, WM_VIEW_X, WM_VIEW_Y, WM_VIEW_WIDTH + WM_VIEW_X, WM_VIEW_HEIGHT + WM_VIEW_Y)) {
                 wmInterfaceScrollPixel(20, 20, wheelX, -wheelY, nullptr, true);
-            } else if (mouseHitTestInWindow(wmBkWin, 501, 135, 501 + 119, 135 + 178)) {
+            } else if (mouseHitTestInWindow(wmBkWin,
+                           WM_TOWN_LIST_X,
+                           WM_TOWN_LIST_Y,
+                           WM_TOWN_LIST_X + WM_TOWN_LIST_WIDTH,
+                           WM_TOWN_LIST_Y + WM_TOWN_LIST_HEIGHT)) {
                 if (wheelY != 0) {
-                    wmInterfaceScrollTabsStart(wheelY > 0 ? 27 : -27);
+                    wmInterfaceScrollTabsStart(wheelY > 0 ? -WM_TOWN_LIST_SLOT_HEIGHT : WM_TOWN_LIST_SLOT_HEIGHT);
                 }
             }
         }
 
-        if (map != -1 || rc == -1) {
+        if (map != MAP_INVALID || rc == -1) {
             break;
         }
 
+        renderFpsCounter();
         renderPresent();
         sharedFpsLimiter.throttle();
     }
 
     if (wmInterfaceExit() == -1) {
-        wmFadeReset();
+        paletteSetEntries(_cmap);
         return -1;
     }
-
-    wmFadeIn();
 
     return rc;
 }
@@ -505,16 +585,19 @@ static void wmCheckGameEvents()
 // 0x4C219C
 static void wmInterfaceScrollTabsStart(int delta)
 {
+    int tabsScrollMaxOffsetY = std::max(0,
+        wmGenData.tabsBackgroundFrmImage.getHeight() - (WM_TOWN_LIST_HEIGHT + 52));
+
     // SFALL: Fix world map cities list scrolling bug that might leave buttons
     // in the disabled state.
     if (delta >= 0) {
-        if (wmGenData.tabsOffsetY < wmGenData.tabsBackgroundFrmImage.getHeight() - 230) {
-            wmGenData.oldTabsOffsetY = std::min(wmGenData.tabsOffsetY + 7 * delta, wmGenData.tabsBackgroundFrmImage.getHeight() - 230);
+        if (wmGenData.tabsOffsetY < tabsScrollMaxOffsetY) {
+            wmGenData.oldTabsOffsetY = std::min(wmGenData.tabsOffsetY + delta, tabsScrollMaxOffsetY);
             wmGenData.tabsScrollingDelta = delta;
         }
     } else {
         if (wmGenData.tabsOffsetY > 0) {
-            wmGenData.oldTabsOffsetY = std::max(wmGenData.tabsOffsetY + 7 * delta, 0);
+            wmGenData.oldTabsOffsetY = std::max(wmGenData.tabsOffsetY + delta, 0);
             wmGenData.tabsScrollingDelta = delta;
         }
     }
@@ -523,7 +606,7 @@ static void wmInterfaceScrollTabsStart(int delta)
         return;
     }
 
-    for (int index = 0; index < 7; index++) {
+    for (int index = 0; index < WM_TOWN_LIST_VISIBLE_SLOT_COUNT; index++) {
         buttonDisable(wmTownMapSubButtonIds[index]);
     }
 
@@ -535,7 +618,7 @@ static void wmInterfaceScrollTabsStop()
 {
     wmGenData.tabsScrollingDelta = 0;
 
-    for (int index = 0; index < 7; index++) {
+    for (int index = 0; index < WM_TOWN_LIST_VISIBLE_SLOT_COUNT; index++) {
         buttonEnable(wmTownMapSubButtonIds[index]);
     }
 }
@@ -566,8 +649,6 @@ static void wmInterfaceScrollTabsUpdate()
 // 0x4C2324
 static int wmInterfaceInit()
 {
-    int fid;
-
     wmLastRndTime = getTicks();
 
     // SFALL: Fix default worldmap font.
@@ -578,8 +659,10 @@ static int wmInterfaceInit()
 
     wmTransitionSaveMap();
 
-    const char* backgroundSoundFileName = wmGenData.isInCar ? "20car" : "23world";
-    _gsound_background_play_level_music(backgroundSoundFileName, 12);
+    const char* backgroundSoundFileName = gameSoundGetMusicOverride(
+        wmGenData.isInCar ? "worldmap_car_music" : "worldmap_music",
+        wmGenData.isInCar ? "20car" : "23world");
+    _gsound_background_play_level_music(backgroundSoundFileName, GSOUND_LIMIT_AFTER);
 
     // CE: Hide entire interface, not just indicator bar, and disable tile
     // engine.
@@ -595,7 +678,7 @@ static int wmInterfaceInit()
         0,
         windowGetWidth(gIsoWindow),
         windowGetHeight(gIsoWindow),
-        _colorTable[0]);
+        COLOR_BLACK);
     windowRefresh(gIsoWindow);
 
     // CE: Stop all animations.
@@ -603,18 +686,23 @@ static int wmInterfaceInit()
 
     int worldmapWindowX = (screenGetWidth() - WM_WINDOW_WIDTH) / 2;
     int worldmapWindowY = (screenGetHeight() - WM_WINDOW_HEIGHT) / 2;
-    wmBkWin = windowCreate(worldmapWindowX, worldmapWindowY, WM_WINDOW_WIDTH, WM_WINDOW_HEIGHT, _colorTable[0], WINDOW_MOVE_ON_TOP);
+    wmBkWin = windowCreate(worldmapWindowX, worldmapWindowY, WM_WINDOW_WIDTH, WM_WINDOW_HEIGHT, COLOR_BLACK, WINDOW_MOVE_ON_TOP);
     if (wmBkWin == -1) {
         return -1;
     }
 
-    fid = buildFid(OBJ_TYPE_INTERFACE, 136, 0, 0, 0);
-    if (!_backgroundFrmImage.lock(fid)) {
+    if (!_backgroundFrmImage.lock(InterfaceFrameId::WorldMapDialogBox)) {
         return -1;
     }
 
     wmBkWinBuf = windowGetBuffer(wmBkWin);
     if (wmBkWinBuf == nullptr) {
+        return -1;
+    }
+
+    // CE: Allocate offscreen buffer for safe city overlay rendering
+    wmOverlayOffscreenBuf = (unsigned char*)internal_malloc(WM_OVERLAY_BUFFER_SIZE * WM_OVERLAY_BUFFER_SIZE);
+    if (wmOverlayOffscreenBuf == nullptr) {
         return -1;
     }
 
@@ -625,40 +713,31 @@ static int wmInterfaceInit()
         wmBkWinBuf,
         WM_WINDOW_WIDTH);
 
-    for (int citySize = 0; citySize < CITY_SIZE_COUNT; citySize++) {
+    for (CitySize citySize = CITY_SIZE_FIRST; citySize < CITY_SIZE_COUNT; citySize++) {
         CitySizeDescription* citySizeDescription = &(wmSphereData[citySize]);
-        if (!citySizeDescription->frmImage.lock(citySizeDescription->fid)) {
+        if (!citySizeDescription->frmImage.lock(FrmId(citySizeDescription->fid))) {
             return -1;
         }
     }
 
-    // hotspot1.frm - town map selector shape #1
-    fid = buildFid(OBJ_TYPE_INTERFACE, 168, 0, 0, 0);
-    if (!wmGenData.hotspotNormalFrmImage.lock(fid)) {
+    if (!wmGenData.hotspotNormalFrmImage.lock(InterfaceFrameId::TownMapHotspot1)) {
         return -1;
     }
 
-    // hotspot2.frm - town map selector shape #2
-    fid = buildFid(OBJ_TYPE_INTERFACE, 223, 0, 0, 0);
-    if (!wmGenData.hotspotPressedFrmImage.lock(fid)) {
+    if (!wmGenData.hotspotPressedFrmImage.lock(InterfaceFrameId::TownMapHotspot2)) {
         return -1;
     }
 
-    // wmaptarg.frm - world map move target maker #1
-    fid = buildFid(OBJ_TYPE_INTERFACE, 139, 0, 0, 0);
-    if (!wmGenData.destinationMarkerFrmImage.lock(fid)) {
+    if (!wmGenData.destinationMarkerFrmImage.lock(InterfaceFrameId::WorldMapMoveTargetMarker1)) {
         return -1;
     }
 
-    // wmaploc.frm - world map location marker
-    fid = buildFid(OBJ_TYPE_INTERFACE, 138, 0, 0, 0);
-    if (!wmGenData.locationMarkerFrmImage.lock(fid)) {
+    if (!wmGenData.locationMarkerFrmImage.lock(InterfaceFrameId::WorldMapLocationMarker)) {
         return -1;
     }
 
     for (int index = 0; index < WORLD_MAP_ENCOUNTER_FRM_COUNT; index++) {
-        fid = buildFid(OBJ_TYPE_INTERFACE, wmRndCursorFids[index], 0, 0, 0);
-        if (!wmGenData.encounterCursorFrmImages[index].lock(fid)) {
+        if (!wmGenData.encounterCursorFrmImages[index].lock(wmRndCursorFrmIds[index])) {
             return -1;
         }
     }
@@ -667,57 +746,39 @@ static int wmInterfaceInit()
         wmTileInfoList[index].handle = INVALID_CACHE_ENTRY;
     }
 
-    // wmtabs.frm - worldmap town tabs underlay
-    fid = buildFid(OBJ_TYPE_INTERFACE, 364, 0, 0, 0);
-    if (!wmGenData.tabsBackgroundFrmImage.lock(fid)) {
+    if (!wmGenData.tabsBackgroundFrmImage.lock(InterfaceFrameId::WorldMapTownTabsUnderlay)) {
         return -1;
     }
 
-    // wmtbedge.frm - worldmap town tabs edging overlay
-    fid = buildFid(OBJ_TYPE_INTERFACE, 367, 0, 0, 0);
-    if (!wmGenData.tabsBorderFrmImage.lock(fid)) {
+    if (!wmGenData.tabsBorderFrmImage.lock(InterfaceFrameId::WorldMapTownTabsEdgingOverlay)) {
         return -1;
     }
 
-    // wmdial.frm - worldmap night/day dial
-    fid = buildFid(OBJ_TYPE_INTERFACE, 365, 0, 0, 0);
-    wmGenData.dialFrm = artLock(fid, &(wmGenData.dialFrmHandle));
+    wmGenData.dialFrm = artLock(InterfaceFrameId::WorldMapNightDayDial, &(wmGenData.dialFrmHandle));
     if (wmGenData.dialFrm == nullptr) {
         return -1;
     }
 
-    wmGenData.dialFrmWidth = artGetWidth(wmGenData.dialFrm, 0, 0);
-    wmGenData.dialFrmHeight = artGetHeight(wmGenData.dialFrm, 0, 0);
+    wmGenData.dialFrmWidth = artGetWidth(wmGenData.dialFrm);
+    wmGenData.dialFrmHeight = artGetHeight(wmGenData.dialFrm);
 
-    // wmscreen - worldmap overlay screen
-    fid = buildFid(OBJ_TYPE_INTERFACE, 363, 0, 0, 0);
-    if (!wmGenData.carOverlayFrmImage.lock(fid)) {
+    if (!wmGenData.carOverlayFrmImage.lock(InterfaceFrameId::WorldMapOverlayScreen)) {
         return -1;
     }
 
-    // wmglobe.frm - worldmap globe stamp overlay
-    fid = buildFid(OBJ_TYPE_INTERFACE, 366, 0, 0, 0);
-    if (!wmGenData.globeOverlayFrmImage.lock(fid)) {
+    if (!wmGenData.globeOverlayFrmImage.lock(InterfaceFrameId::WorldMapGlobeStampOverlay)) {
         return -1;
     }
 
-    // lilredup.frm - little red button up
-    fid = buildFid(OBJ_TYPE_INTERFACE, 8, 0, 0, 0);
-    wmGenData.redButtonNormalFrmImage.lock(fid);
+    wmGenData.redButtonNormalFrmImage.lock(InterfaceFrameId::LittleRedButtonUp);
 
-    // lilreddn.frm - little red button down
-    fid = buildFid(OBJ_TYPE_INTERFACE, 9, 0, 0, 0);
-    wmGenData.redButtonPressedFrmImage.lock(fid);
+    wmGenData.redButtonPressedFrmImage.lock(InterfaceFrameId::LittleRedButtonDown);
 
-    // months.frm - month strings for pip boy
-    fid = buildFid(OBJ_TYPE_INTERFACE, 129, 0, 0, 0);
-    if (!wmGenData.monthsFrmImage.lock(fid)) {
+    if (!wmGenData.monthsFrmImage.lock(InterfaceFrameId::PipBoyMonthStrings)) {
         return -1;
     }
 
-    // numbers.frm - numbers for the hit points and fatigue counters
-    fid = buildFid(OBJ_TYPE_INTERFACE, 82, 0, 0, 0);
-    if (!wmGenData.numbersFrmImage.lock(fid)) {
+    if (!wmGenData.numbersFrmImage.lock(InterfaceFrameId::HitPointsNumbers)) {
         return -1;
     }
 
@@ -741,10 +802,10 @@ static int wmInterfaceInit()
         buttonSetCallbacks(switchBtn, _gsound_red_butt_press, _gsound_red_butt_release);
     }
 
-    for (int index = 0; index < 7; index++) {
+    for (int index = 0; index < WM_TOWN_LIST_VISIBLE_SLOT_COUNT; index++) {
         wmTownMapSubButtonIds[index] = buttonCreate(wmBkWin,
             508,
-            138 + 27 * index,
+            138 + WM_TOWN_LIST_SLOT_HEIGHT * index,
             wmGenData.redButtonNormalFrmImage.getWidth(),
             wmGenData.redButtonNormalFrmImage.getHeight(),
             -1,
@@ -762,22 +823,24 @@ static int wmInterfaceInit()
         }
     }
 
+    constexpr InterfaceFrmId kScrollUpButtonFrmIds[WORLDMAP_ARROW_FRM_COUNT] = {
+        InterfaceFrameId::CharacterEditorUpArrowOff,
+        InterfaceFrameId::CharacterEditorUpArrowOn,
+    };
+
     for (int index = 0; index < WORLDMAP_ARROW_FRM_COUNT; index++) {
-        // 200 - uparwon.frm - character editor
-        // 199 - uparwoff.frm - character editor
-        // SFALL: Fix images for scroll buttons.
-        fid = buildFid(OBJ_TYPE_INTERFACE, 199 + index, 0, 0, 0);
-        if (!wmGenData.scrollUpButtonFrmImages[index].lock(fid)) {
+        if (!wmGenData.scrollUpButtonFrmImages[index].lock(kScrollUpButtonFrmIds[index])) {
             return -1;
         }
     }
 
+    constexpr InterfaceFrmId kScrollDownButtonFrmIds[WORLDMAP_ARROW_FRM_COUNT] = {
+        InterfaceFrameId::CharacterEditorDownArrowOff,
+        InterfaceFrameId::CharacterEditorDownArrowOn,
+    };
+
     for (int index = 0; index < WORLDMAP_ARROW_FRM_COUNT; index++) {
-        // 182 - dnarwon.frm - character editor
-        // 181 - dnarwoff.frm - character editor
-        // SFALL: Fix images for scroll buttons.
-        fid = buildFid(OBJ_TYPE_INTERFACE, 181 + index, 0, 0, 0);
-        if (!wmGenData.scrollDownButtonFrmImages[index].lock(fid)) {
+        if (!wmGenData.scrollDownButtonFrmImages[index].lock(kScrollDownButtonFrmIds[index])) {
             return -1;
         }
     }
@@ -823,15 +886,16 @@ static int wmInterfaceInit()
     }
 
     if (wmGenData.isInCar) {
-        // wmcarmve.frm - worldmap car movie
-        fid = buildFid(OBJ_TYPE_INTERFACE, 433, 0, 0, 0);
-        wmGenData.carImageFrm = artLock(fid, &(wmGenData.carImageFrmHandle));
-        if (wmGenData.carImageFrm == nullptr) {
-            return -1;
+        if (!wmLockCarInterfaceArt(carInterfaceArtFrmId, &(wmGenData.carImageFrm), &(wmGenData.carImageFrmHandle))) {
+            carInterfaceArtFrmId = kDefaultCarInterfaceArtFrmId;
+
+            if (!wmLockCarInterfaceArt(carInterfaceArtFrmId, &(wmGenData.carImageFrm), &(wmGenData.carImageFrmHandle))) {
+                return -1;
+            }
         }
 
-        wmGenData.carImageFrmWidth = artGetWidth(wmGenData.carImageFrm, 0, 0);
-        wmGenData.carImageFrmHeight = artGetHeight(wmGenData.carImageFrm, 0, 0);
+        wmGenData.carImageFrmWidth = artGetWidth(wmGenData.carImageFrm);
+        wmGenData.carImageFrmHeight = artGetHeight(wmGenData.carImageFrm);
     }
 
     tickersAdd(wmMouseBkProc);
@@ -877,8 +941,8 @@ static int wmInterfaceExit()
         wmGenData.encounterCursorFrmImages[i].unlock();
     }
 
-    for (i = 0; i < CITY_SIZE_COUNT; i++) {
-        CitySizeDescription* citySizeDescription = &(wmSphereData[i]);
+    for (CitySize citySize = CITY_SIZE_FIRST; citySize < CITY_SIZE_COUNT; citySize++) {
+        CitySizeDescription* citySizeDescription = &(wmSphereData[citySize]);
         citySizeDescription->frmImage.unlock();
     }
 
@@ -940,6 +1004,12 @@ static int wmInterfaceExit()
 
     // NOTE: Uninline.
     wmFreeTabsLabelList(&wmLabelList, &wmLabelCount);
+
+    // CE: Free offscreen buffer for safe city overlay rendering
+    if (wmOverlayOffscreenBuf != nullptr) {
+        internal_free(wmOverlayOffscreenBuf);
+        wmOverlayOffscreenBuf = nullptr;
+    }
 
     wmInterfaceWasInitialized = 0;
 
@@ -1053,8 +1123,8 @@ static void wmMouseBkProc()
         dy = -1;
     }
 
-    int oldMouseCursor = gameMouseGetCursor();
-    int newMouseCursor = oldMouseCursor;
+    MouseCursorType oldMouseCursor = gameMouseGetCursor();
+    MouseCursorType newMouseCursor = oldMouseCursor;
 
     if (dx != 0 || dy != 0) {
         if (dx > 0) {
@@ -1089,7 +1159,7 @@ static void wmMouseBkProc()
         }
 
         if (!couldScroll) {
-            newMouseCursor += 8;
+            newMouseCursor = newMouseCursor + MOUSE_CURSOR_SCROLL_OFFSET_INVALID;
         }
     } else {
         if (oldMouseCursor != MOUSE_CURSOR_ARROW) {
@@ -1112,9 +1182,12 @@ static int wmTileGrabArt(int tileIdx)
         return 0;
     }
 
-    tile->data = artLockFrameData(tile->fid, 0, 0, &(tile->handle));
-    if (tile->data != nullptr) {
-        return 0;
+    Art* art = artLock(FrmId(tile->fid), &(tile->handle));
+    if (art != nullptr) {
+        tile->data = artGetFrameData(art, 0, ROTATION_NE);
+        if (tile->data != nullptr) {
+            return 0;
+        }
     }
 
     wmInterfaceExit();
@@ -1142,7 +1215,7 @@ static int wmInterfaceRefresh()
     while (y < WM_VIEW_HEIGHT) {
         x = 0;
         int v23 = 0;
-        int height;
+        int height = WM_TILE_HEIGHT;
         while (x < WM_VIEW_WIDTH) {
             if (wmTileGrabArt(v0) == -1) {
                 return -1;
@@ -1194,10 +1267,8 @@ static int wmInterfaceRefresh()
             CitySizeDescription* citySizeDescription = &(wmSphereData[cityInfo->size]);
             int cityX = cityInfo->x - wmWorldOffsetX;
             int cityY = cityInfo->y - wmWorldOffsetY;
-            if (cityX >= 0 && cityX <= 472 - citySizeDescription->frmImage.getWidth()
-                && cityY >= 0 && cityY <= 465 - citySizeDescription->frmImage.getHeight()) {
-                wmInterfaceDrawCircleOverlay(cityInfo, citySizeDescription, wmBkWinBuf, cityX, cityY);
-            }
+            // CE: Use safe overlay drawing with proper bounds checking instead of hardcoded limits
+            wmInterfaceDrawCircleOverlaySafe(cityInfo, citySizeDescription, wmBkWinBuf, cityX, cityY);
         }
     }
 
@@ -1207,7 +1278,7 @@ static int wmInterfaceRefresh()
     while (v30 < WM_VIEW_HEIGHT) {
         int v24 = 0;
         int v33 = 0;
-        int v29;
+        int v29 = WM_TILE_HEIGHT;
         while (v33 < WM_VIEW_WIDTH) {
             int v31 = WM_TILE_WIDTH;
             if (v33 == 0) {
@@ -1350,7 +1421,7 @@ static int wmInterfaceDrawCircleOverlay(CityInfo* city, CitySizeDescription* cit
     // CE: Slightly increase whitespace between cirle and city name.
     int nameY = y + citySizeDescription->frmImage.getHeight() + 3;
     int maxY = 464 - fontGetLineHeight();
-    if (nameY < maxY) {
+    if (!wmTownNamesHidden && nameY < maxY) {
         MessageListItem messageListItem;
         char name[40];
         if (wmAreaIsKnown(city->areaId)) {
@@ -1365,7 +1436,7 @@ static int wmInterfaceDrawCircleOverlay(CityInfo* city, CitySizeDescription* cit
             name,
             width,
             WM_WINDOW_WIDTH,
-            _colorTable[992] | FONT_SHADOW);
+            COLOR_GREEN | DRAW_TEXT_FLAG_SHADOWED);
     }
 
     return 0;
@@ -1406,8 +1477,8 @@ static int wmInterfaceDrawSubTileList(TileInfo* tileInfo, int column, int row, i
         destY = WM_VIEW_Y;
     }
 
-    if (height + y > 464) {
-        height -= height + y - 464;
+    if (height + y > WM_VIEW_Y + WM_VIEW_HEIGHT) {
+        height -= height + y - (WM_VIEW_Y + WM_VIEW_HEIGHT);
     }
 
     int width = WM_SUBTILE_SIZE * a6;
@@ -1416,18 +1487,20 @@ static int wmInterfaceDrawSubTileList(TileInfo* tileInfo, int column, int row, i
         width -= WM_VIEW_X - x;
     }
 
-    if (width + x > 472) {
-        width -= width + x - 472;
+    if (width + x > WM_VIEW_X + WM_VIEW_WIDTH) {
+        width -= width + x - (WM_VIEW_X + WM_VIEW_WIDTH);
     }
 
     if (width > 0 && height > 0) {
         unsigned char* dest = wmBkWinBuf + WM_WINDOW_WIDTH * destY + destX;
         switch (subtileInfo->state) {
         case SUBTILE_STATE_UNKNOWN:
-            bufferFill(dest, width, height, WM_WINDOW_WIDTH, _colorTable[0]);
+            bufferFill(dest, width, height, WM_WINDOW_WIDTH, COLOR_BLACK);
             break;
         case SUBTILE_STATE_KNOWN:
             wmInterfaceDrawSubTileRectFogged(dest, width, height, WM_WINDOW_WIDTH);
+            break;
+        default:
             break;
         }
     }
@@ -1442,13 +1515,16 @@ static int wmDrawCursorStopped()
     int width;
     int height;
 
-    if (wmGenData.walkDestinationX >= 1 || wmGenData.walkDestinationY >= 1) {
+    bool isWalkingNow = wmGenData.walkDestinationX > 0 || wmGenData.walkDestinationY > 0;
 
+    if (isWalkingNow) {
+        // moving cursor
         if (wmGenData.encounterIconIsVisible) {
             src = wmGenData.encounterCursorFrmImages[wmGenData.encounterCursorId].getData();
             width = wmGenData.encounterCursorFrmImages[wmGenData.encounterCursorId].getWidth();
             height = wmGenData.encounterCursorFrmImages[wmGenData.encounterCursorId].getHeight();
         } else {
+            // current location (+)
             src = wmGenData.locationMarkerFrmImage.getData();
             width = wmGenData.locationMarkerFrmImage.getWidth();
             height = wmGenData.locationMarkerFrmImage.getHeight();
@@ -1474,7 +1550,7 @@ static int wmDrawCursorStopped()
             width = wmGenData.encounterCursorFrmImages[wmGenData.encounterCursorId].getWidth();
             height = wmGenData.encounterCursorFrmImages[wmGenData.encounterCursorId].getHeight();
         } else {
-            src = wmGenData.mousePressed ? wmGenData.hotspotPressedFrmImage.getData() : wmGenData.hotspotNormalFrmImage.getData();
+            src = mousePressed ? wmGenData.hotspotPressedFrmImage.getData() : wmGenData.hotspotNormalFrmImage.getData();
             width = wmGenData.hotspotNormalFrmImage.getWidth();
             height = wmGenData.hotspotNormalFrmImage.getHeight();
         }
@@ -1484,6 +1560,32 @@ static int wmDrawCursorStopped()
             blitBufferToBufferTrans(src, width, height, width, wmBkWinBuf + WM_WINDOW_WIDTH * (WM_VIEW_Y - wmWorldOffsetY + wmGenData.worldPosY - height / 2) + WM_VIEW_X - wmWorldOffsetX + wmGenData.worldPosX - width / 2, WM_WINDOW_WIDTH);
         }
     }
+
+    // Dotted Trail logic
+
+    if (worldmapTrailMarkers) {
+        // Clear the trail when player stops - needs to be done when reloading map too
+        if (!isWalkingNow) {
+            wmResetTrailMarkers();
+        }
+
+        // Render the trail dots
+        for (int i = 0; i < trailMarkerState.dotCount; i++) {
+            int x = trailMarkerState.dots[i].x;
+            int y = trailMarkerState.dots[i].y;
+            if (x >= wmWorldOffsetX && x < wmWorldOffsetX + WM_VIEW_WIDTH
+                && y >= wmWorldOffsetY && y < wmWorldOffsetY + WM_VIEW_HEIGHT) {
+                int screenY = WM_VIEW_Y - wmWorldOffsetY + y;
+                int screenX = WM_VIEW_X - wmWorldOffsetX + x;
+                unsigned char* dst = wmBkWinBuf
+                    + WM_WINDOW_WIDTH * screenY
+                    + screenX;
+                *dst = worldmapTrailMarkerColor;
+            }
+        }
+    }
+
+    wmInterfaceDrawTerrainInfo();
 
     return 0;
 }
@@ -1544,19 +1646,17 @@ static bool wmViewerEnterCurrentArea()
     return true;
 }
 
-static int wmTownMapFunc(int* mapIdxPtr, int* entranceIdxPtr)
+static int wmTownMapFunc(Map* mapIdxPtr, int* entranceIdxPtr)
 {
-    *mapIdxPtr = -1;
-    if (entranceIdxPtr != nullptr) {
-        *entranceIdxPtr = -1;
-    }
+    *mapIdxPtr = MAP_INVALID;
+    if (entranceIdxPtr != nullptr) *entranceIdxPtr = -1;
 
     if (wmTownMapInit() == -1) {
         wmTownMapExit();
         return -1;
     }
 
-    if (wmGenData.currentAreaId == -1) {
+    if (wmGenData.currentAreaId == CITY_INVALID) {
         return -1;
     }
 
@@ -1584,7 +1684,7 @@ static int wmTownMapFunc(int* mapIdxPtr, int* entranceIdxPtr)
 
                 // SFALL: Prevent using number keys to enter unvisited areas on
                 // a town map.
-                if (gTownMapHotkeysFix) {
+                if (townMapHotkeysFix) {
                     if (entrance->state == 0 || entrance->x == -1 || entrance->y == -1) {
                         continue;
                     }
@@ -1601,32 +1701,30 @@ static int wmTownMapFunc(int* mapIdxPtr, int* entranceIdxPtr)
             }
 
             if (keyCode >= KEY_CTRL_F1 && keyCode <= KEY_CTRL_F7) {
-                int quickDestinationIndex = wmGenData.tabsOffsetY / 27 + keyCode - KEY_CTRL_F1;
+                int quickDestinationIndex = wmGenData.tabsOffsetY / WM_TOWN_LIST_SLOT_HEIGHT + keyCode - KEY_CTRL_F1;
                 if (quickDestinationIndex < wmLabelCount) {
-                    int areaIdx = wmLabelList[quickDestinationIndex];
+                    City areaIdx = static_cast<City>(wmLabelList[quickDestinationIndex]);
                     CityInfo* city = &(wmAreaInfoList[areaIdx]);
                     if (!wmAreaIsKnown(city->areaId)) {
                         break;
                     }
 
                     if (areaIdx != wmGenData.currentAreaId) {
-                        // CE: Fix incorrect destination positioning. See
-                        // `wmWorldMapFunc` for explanation.
-                        CitySizeDescription* citySizeDescription = &(wmSphereData[city->size]);
-                        int destX = city->x + citySizeDescription->frmImage.getWidth() / 2 - WM_VIEW_X;
-                        int destY = city->y + citySizeDescription->frmImage.getHeight() / 2 - WM_VIEW_Y;
+                        int destX;
+                        int destY;
+                        wmAreaGetMarkWorldPos(city, &destX, &destY);
                         wmPartyInitWalking(destX, destY);
 
-                        wmGenData.mousePressed = false;
+                        mousePressed = false;
 
                         break;
                     }
                 }
             } else {
                 if (keyCode == KEY_CTRL_ARROW_UP) {
-                    wmInterfaceScrollTabsStart(-27);
+                    wmInterfaceScrollTabsStart(-WM_TOWN_LIST_SLOT_HEIGHT);
                 } else if (keyCode == KEY_CTRL_ARROW_DOWN) {
-                    wmInterfaceScrollTabsStart(27);
+                    wmInterfaceScrollTabsStart(WM_TOWN_LIST_SLOT_HEIGHT);
                 } else if (keyCode == 2069) {
                     if (wmTownMapRefresh() == -1) {
                         return -1;
@@ -1643,6 +1741,7 @@ static int wmTownMapFunc(int* mapIdxPtr, int* entranceIdxPtr)
             }
         }
 
+        renderFpsCounter();
         renderPresent();
         sharedFpsLimiter.throttle();
     }
@@ -1661,7 +1760,7 @@ static int wmTownMapInit()
 
     CityInfo* city = &(wmAreaInfoList[wmGenData.currentAreaId]);
 
-    if (!_townFrmImage.lock(city->mapFid)) {
+    if (!_townFrmImage.lock(FrmId(city->mapFid))) {
         return -1;
     }
 
@@ -1711,8 +1810,8 @@ static int wmTownMapInit()
 static int wmTownMapRefresh()
 {
     blitBufferToBuffer(_townFrmImage.getData(),
-        _townFrmImage.getWidth(),
-        _townFrmImage.getHeight(),
+        std::min(_townFrmImage.getWidth(), WM_VIEW_WIDTH),
+        std::min(_townFrmImage.getHeight(), WM_VIEW_HEIGHT),
         _townFrmImage.getWidth(),
         wmBkWinBuf + WM_WINDOW_WIDTH * WM_VIEW_Y + WM_VIEW_X,
         WM_WINDOW_WIDTH);
@@ -1742,7 +1841,7 @@ static int wmTownMapRefresh()
                     width,
                     wmGenData.hotspotNormalFrmImage.getWidth() / 2 + entrance->x - width / 2,
                     wmGenData.hotspotNormalFrmImage.getHeight() + entrance->y + 4,
-                    _colorTable[992] | 0x2000000 | FONT_SHADOW);
+                    COLOR_GREEN | DRAW_TEXT_FLAG_NO_BG | DRAW_TEXT_FLAG_SHADOWED);
             }
         }
     }
@@ -1794,7 +1893,7 @@ static int wmRefreshInterfaceOverlay(bool shouldRefreshWindow)
     wmRefreshInterfaceDial(false);
 
     if (wmGenData.isInCar) {
-        unsigned char* data = artGetFrameData(wmGenData.carImageFrm, wmGenData.carImageCurrentFrameIndex, 0);
+        unsigned char* data = artGetFrameData(wmGenData.carImageFrm, wmGenData.carImageCurrentFrameIndex);
         if (data == nullptr) {
             return -1;
         }
@@ -1861,65 +1960,68 @@ static void wmInterfaceRefreshCarFuel()
 // 0x4C52B0
 static int wmRefreshTabs()
 {
-    unsigned char* v30;
-    unsigned char* v0;
-    int v31;
+    unsigned char* firstTabBottomDest;
+    unsigned char* firstTabDest;
+    int firstVisibleLabelIndex;
     CityInfo* city;
-    int v10;
-    unsigned char* v11;
-    unsigned char* v12;
-    int v32;
-    unsigned char* v13;
+    int firstTabVisibleHeight;
+    unsigned char* firstTabSrc;
+    unsigned char* firstTabClampedDest;
+    int lastLabelIndexToDraw;
+    unsigned char* nextTabDest;
     FrmImage labelFrm;
 
     // CE: Skip first empty tab (original code does this in the
     // `wmInterfaceInit`).
-    unsigned char* src = wmGenData.tabsBackgroundFrmImage.getData() + wmGenData.tabsBackgroundFrmImage.getWidth() * 27;
+    unsigned char* src = wmGenData.tabsBackgroundFrmImage.getData() + wmGenData.tabsBackgroundFrmImage.getWidth() * WM_TOWN_LIST_SLOT_HEIGHT;
     blitBufferToBufferTrans(src + wmGenData.tabsBackgroundFrmImage.getWidth() * wmGenData.tabsOffsetY + 9,
-        119,
-        178,
+        WM_TOWN_LIST_WIDTH,
+        WM_TOWN_LIST_HEIGHT,
         wmGenData.tabsBackgroundFrmImage.getWidth(),
-        wmBkWinBuf + WM_WINDOW_WIDTH * 135 + 501,
+        wmBkWinBuf + WM_WINDOW_WIDTH * WM_TOWN_LIST_Y + WM_TOWN_LIST_X,
         WM_WINDOW_WIDTH);
 
-    v30 = wmBkWinBuf + WM_WINDOW_WIDTH * 138 + 530;
-    v0 = wmBkWinBuf + WM_WINDOW_WIDTH * 138 + 530 - WM_WINDOW_WIDTH * (wmGenData.tabsOffsetY % 27);
-    v31 = wmGenData.tabsOffsetY / 27;
+    int tabsOffsetWithinSlot = wmGenData.tabsOffsetY % WM_TOWN_LIST_SLOT_HEIGHT;
+    firstTabBottomDest = wmBkWinBuf + WM_WINDOW_WIDTH * 138 + 530;
+    firstTabDest = firstTabBottomDest - WM_WINDOW_WIDTH * tabsOffsetWithinSlot;
+    firstVisibleLabelIndex = wmGenData.tabsOffsetY / WM_TOWN_LIST_SLOT_HEIGHT;
 
-    if (v31 < wmLabelCount) {
-        city = &(wmAreaInfoList[wmLabelList[v31]]);
-        if (city->labelFid != -1) {
-            if (!labelFrm.lock(city->labelFid)) {
+    if (firstVisibleLabelIndex < wmLabelCount) {
+        city = &(wmAreaInfoList[wmLabelList[firstVisibleLabelIndex]]);
+        const FrmId cityLabelFrmId = FrmId(city->labelFid);
+        if (cityLabelFrmId.valid()) {
+            if (!labelFrm.lock(cityLabelFrmId)) {
                 return -1;
             }
 
-            v10 = labelFrm.getHeight() - wmGenData.tabsOffsetY % 27;
-            v11 = labelFrm.getData() + labelFrm.getWidth() * (wmGenData.tabsOffsetY % 27);
+            firstTabVisibleHeight = labelFrm.getHeight() - tabsOffsetWithinSlot;
+            firstTabSrc = labelFrm.getData() + labelFrm.getWidth() * tabsOffsetWithinSlot;
 
-            v12 = v0;
-            if (v0 < v30 - WM_WINDOW_WIDTH) {
-                v12 = v30 - WM_WINDOW_WIDTH;
+            firstTabClampedDest = firstTabDest;
+            if (firstTabDest < firstTabBottomDest - WM_WINDOW_WIDTH) {
+                firstTabClampedDest = firstTabBottomDest - WM_WINDOW_WIDTH;
             }
 
-            blitBufferToBuffer(v11,
+            blitBufferToBuffer(firstTabSrc,
                 labelFrm.getWidth(),
-                v10,
+                firstTabVisibleHeight,
                 labelFrm.getWidth(),
-                v12,
+                firstTabClampedDest,
                 WM_WINDOW_WIDTH);
 
             labelFrm.unlock();
         }
     }
 
-    v13 = v0 + WM_WINDOW_WIDTH * 27;
-    v32 = v31 + 6;
+    nextTabDest = firstTabDest + WM_WINDOW_WIDTH * WM_TOWN_LIST_SLOT_HEIGHT;
+    lastLabelIndexToDraw = firstVisibleLabelIndex + (WM_TOWN_LIST_VISIBLE_SLOT_COUNT - 1);
 
-    for (int v14 = v31 + 1; v14 < v32; v14++) {
-        if (v14 < wmLabelCount) {
-            city = &(wmAreaInfoList[wmLabelList[v14]]);
-            if (city->labelFid != -1) {
-                if (!labelFrm.lock(city->labelFid)) {
+    for (int labelIndex = firstVisibleLabelIndex + 1; labelIndex < lastLabelIndexToDraw; labelIndex++) {
+        if (labelIndex < wmLabelCount) {
+            city = &(wmAreaInfoList[wmLabelList[labelIndex]]);
+            const FrmId cityLabelFrmId = FrmId(city->labelFid);
+            if (cityLabelFrmId.valid()) {
+                if (!labelFrm.lock(cityLabelFrmId)) {
                     return -1;
                 }
 
@@ -1927,19 +2029,20 @@ static int wmRefreshTabs()
                     labelFrm.getWidth(),
                     labelFrm.getHeight(),
                     labelFrm.getWidth(),
-                    v13,
+                    nextTabDest,
                     WM_WINDOW_WIDTH);
 
                 labelFrm.unlock();
             }
         }
-        v13 += WM_WINDOW_WIDTH * 27;
+        nextTabDest += WM_WINDOW_WIDTH * WM_TOWN_LIST_SLOT_HEIGHT;
     }
 
-    if (v31 + 6 < wmLabelCount) {
-        city = &(wmAreaInfoList[wmLabelList[v31 + 6]]);
-        if (city->labelFid != -1) {
-            if (!labelFrm.lock(city->labelFid)) {
+    if (lastLabelIndexToDraw < wmLabelCount) {
+        city = &(wmAreaInfoList[wmLabelList[lastLabelIndexToDraw]]);
+        const FrmId cityLabelFrmId = FrmId(city->labelFid);
+        if (cityLabelFrmId.valid()) {
+            if (!labelFrm.lock(cityLabelFrmId)) {
                 return -1;
             }
 
@@ -1947,7 +2050,7 @@ static int wmRefreshTabs()
                 labelFrm.getWidth(),
                 labelFrm.getHeight() - 5,
                 labelFrm.getWidth(),
-                v13,
+                nextTabDest,
                 WM_WINDOW_WIDTH);
 
             labelFrm.unlock();
@@ -1955,10 +2058,10 @@ static int wmRefreshTabs()
     }
 
     blitBufferToBufferTrans(wmGenData.tabsBorderFrmImage.getData(),
-        119,
-        178,
-        119,
-        wmBkWinBuf + WM_WINDOW_WIDTH * 135 + 501,
+        WM_TOWN_LIST_WIDTH,
+        WM_TOWN_LIST_HEIGHT,
+        WM_TOWN_LIST_WIDTH,
+        wmBkWinBuf + WM_WINDOW_WIDTH * WM_TOWN_LIST_Y + WM_TOWN_LIST_X,
         WM_WINDOW_WIDTH);
 
     return 0;
@@ -1984,7 +2087,7 @@ static int wmMakeTabsLabelList(int** quickDestinationsPtr, int* quickDestination
     }
 
     int quickDestinationsLength = *quickDestinationsLengthPtr;
-    for (int index = 0; index < wmMaxAreaNum; index++) {
+    for (City index = CITY_FIRST; index < wmMaxAreaNum; index++) {
         if (wmAreaIsKnown(index) && wmAreaInfoList[index].labelFid != -1) {
             quickDestinationsLength++;
             *quickDestinationsLengthPtr = quickDestinationsLength;
@@ -2039,7 +2142,7 @@ static int wmFreeTabsLabelList(int** quickDestinationsListPtr, int* quickDestina
 // 0x4C5734
 static void wmRefreshInterfaceDial(bool shouldRefreshWindow)
 {
-    unsigned char* data = artGetFrameData(wmGenData.dialFrm, wmGenData.dialFrmCurrentFrameIndex, 0);
+    unsigned char* data = artGetFrameData(wmGenData.dialFrm, wmGenData.dialFrmCurrentFrameIndex);
     blitBufferToBufferTrans(data,
         wmGenData.dialFrmWidth,
         wmGenData.dialFrmHeight,

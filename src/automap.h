@@ -51,7 +51,7 @@ inline AutomapFlags& operator|=(AutomapFlags& lhs, AutomapFlags rhs)
 }
 
 // Lives in automap_state.cc so the savegame driver in f2_core can reach it.
-extern int gAutomapFlags;
+extern AutomapFlags gAutomapFlags;
 
 typedef struct AutomapHeader {
     unsigned char version;
