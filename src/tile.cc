@@ -2243,7 +2243,16 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         isTinyScenery = sceneryProtoId == SceneryProtoTypeId::SmallBowl
         || sceneryProtoId == SceneryProtoTypeId::Rubble1
         || sceneryProtoId == SceneryProtoTypeId::Rocks
+        || sceneryProtoId == SceneryProtoTypeId::RocksAlt9
         || sceneryProtoId == static_cast<SceneryProtoTypeId>(91)
+        || sceneryProtoId == static_cast<SceneryProtoTypeId>(429)
+        || sceneryProtoId == static_cast<SceneryProtoTypeId>(430)
+        || sceneryProtoId == static_cast<SceneryProtoTypeId>(432)
+        
+        || sceneryProtoId == SceneryProtoTypeId::Unknown1;
+
+        isMediumScenery = sceneryProtoId == SceneryProtoTypeId::Mailbox
+        || sceneryProtoId == SceneryProtoTypeId::FireHydrant
         || sceneryProtoId == SceneryProtoTypeId::RocksAlt
         || sceneryProtoId == SceneryProtoTypeId::RocksAlt2
         || sceneryProtoId == SceneryProtoTypeId::RocksAlt3
@@ -2251,14 +2260,20 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         || sceneryProtoId == SceneryProtoTypeId::RocksAlt5
         || sceneryProtoId == SceneryProtoTypeId::RocksAlt6
         || sceneryProtoId == SceneryProtoTypeId::RocksAlt7
-        || sceneryProtoId == static_cast<SceneryProtoTypeId>(429)
-        || sceneryProtoId == static_cast<SceneryProtoTypeId>(430)
-        || sceneryProtoId == static_cast<SceneryProtoTypeId>(432)
-        || sceneryProtoId == static_cast<SceneryProtoTypeId>(433)
-        || sceneryProtoId == static_cast<SceneryProtoTypeId>(435);
+        || sceneryProtoId == SceneryProtoTypeId::RocksAlt8
+        || sceneryProtoId == SceneryProtoTypeId::RocksAlt11
+        || sceneryProtoId == SceneryProtoTypeId::BedAlt10
+        || sceneryProtoId == SceneryProtoTypeId::BedAlt9
 
-        isMediumScenery = sceneryProtoId == SceneryProtoTypeId::Mailbox
-        || sceneryProtoId == SceneryProtoTypeId::FireHydrant;
+        || sceneryProtoId == static_cast<SceneryProtoTypeId>(435)
+        || sceneryProtoId == static_cast<SceneryProtoTypeId>(433)
+        || sceneryProtoId == static_cast<SceneryProtoTypeId>(947)
+        || sceneryProtoId == static_cast<SceneryProtoTypeId>(278)
+
+
+        || sceneryProtoId == SceneryProtoTypeId::RocksAlt12;
+
+
 
         isWideScenery = sceneryProtoId == SceneryProtoTypeId::Bed
 
@@ -2443,13 +2458,14 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
             std::max(1, static_cast<int>(gTileWindowHeight * 0.8)),
             projectedActorHeight)
         : projectedActorHeight;
+    const double critterBottomLeeway = isDeadCritter ? 0.5 : 0.2;
     const int projectedActorBottom = renderContext->horizonY
         + static_cast<int>(projectionScale * 0.5);
     const int actorBottom = isRock
         ? projectedActorBottom + std::max(20, actorHeight / 3)
         : objectType == OBJ_TYPE_CRITTER
             ? std::min(
-                gTileWindowHeight + static_cast<int>(actorHeight * 0.20),
+                gTileWindowHeight + static_cast<int>(actorHeight * critterBottomLeeway),
                 projectedActorBottom)
         : projectedActorBottom;
 

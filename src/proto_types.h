@@ -311,6 +311,8 @@ enum class SceneryProtoTypeId : int {
     BedAlt6 = 678,
     BedAlt7 = 680,
     BedAlt8 = 681,
+    BedAlt9 = 378,
+    BedAlt10 = 948,
 
     LampPost = 246,
     LampPostAlt = 248,
@@ -379,6 +381,7 @@ enum class SceneryProtoTypeId : int {
     RopeAlt2 = 919,
 
     Tire = 101,
+    Unknown1 = 102,
 
     RocksAlt = 90,
     RocksAlt2 = 92,
@@ -387,6 +390,11 @@ enum class SceneryProtoTypeId : int {
     RocksAlt5 = 434,
     RocksAlt6 = 279,
     RocksAlt7 = 280,
+    RocksAlt8 = 428,
+    RocksAlt9 = 461,
+    RocksAlt11 = 430,
+    RocksAlt12 = 111,
+
 
     Chair = 229,
     ChairAlt = 230,
