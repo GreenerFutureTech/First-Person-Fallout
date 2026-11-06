@@ -57,6 +57,8 @@ void tileFirstPersonPreviewRequestRefresh();
 void tileFirstPersonPreviewFlushRefresh();
 void tileFirstPersonPreviewRefresh();
 void tileFirstPersonPreviewRefreshCombat();
+bool tileFirstPersonPreviewGetViewAngles(double* yaw, double* pitch);
+void tileFirstPersonPreviewSetViewAngles(double yaw, double pitch);
 void tileFirstPersonPreviewLook(double deltaX, double deltaY);
 void tileFirstPersonPreviewTurnToTile(int tile);
 void tileFirstPersonPreviewToggleTopology();

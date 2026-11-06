@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <limits>
 #include <stack>
 #include <unordered_map>
@@ -181,6 +182,11 @@ static void tileFirstPersonTopologyMarkObject(Object* object, void* context);
 static void tileFirstPersonSnapshotTopologyObject(Object* object, void* context);
 static void tileFirstPersonGrayboxMarkObject(Object* object, void* context);
 static void tileFirstPersonRenderActor(Object* object, void* context);
+static const std::vector<unsigned char>* tileFirstPersonGetActorOutlinePixels(
+    const unsigned char* pixels,
+    int width,
+    int height,
+    Color color);
 static void tileFirstPersonRenderExitGridMarkers(
     const std::vector<int>& tiles,
     const TileFirstPersonExitGridRenderContext* context);
@@ -2598,6 +2604,20 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
     if (!upperVisible && !lowerVisible) {
         return;
     }
+    const bool drawCombatOutline = objectType == OBJ_TYPE_CRITTER
+        && !critterIsDead(object)
+        && gDude != nullptr
+        && gDude->elevation == object->elevation
+        && tileIsValid(gDude->tile)
+        && isInCombat()
+        && gameMouseGetMode() == GAME_MOUSE_MODE_CROSSHAIR
+        && settings.preferences.target_highlight != TARGET_HIGHLIGHT_OFF
+        && !_combat_is_shot_blocked(gDude, gDude->tile, object->tile, object, nullptr);
+    const Color combatOutlineColor = drawCombatOutline
+            && (objectIsPartyMember(object)
+                || gDude->data.critter.combat.team == object->data.critter.combat.team)
+        ? Color(229)
+        : Color(243);
     Color actorColor = COLOR_AMBER;
     if (objectType == OBJ_TYPE_CRITTER) {
         if (objectIsPartyMember(object)
@@ -2615,6 +2635,13 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         if (frame.width <= 0 || frame.height <= 0) {
             return;
         }
+        const std::vector<unsigned char>* outlinePixels = drawCombatOutline
+            ? tileFirstPersonGetActorOutlinePixels(frame.data, frame.width, frame.height,
+                combatOutlineColor)
+            : nullptr;
+        const int outlineScale = combatOutlineColor == Color(243) ? 2 : 1;
+        const int outlineWidth = frame.width * outlineScale;
+        const int outlineHeight = frame.height * outlineScale;
         const int artHeight = actorHeight;
         const int artWidth = std::max(1,
             static_cast<int>(artHeight * frame.width / static_cast<double>(frame.height)
@@ -2756,6 +2783,10 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                             inRun = true;
                         } else if (!visible && inRun) {
                             const SDL_Rect clip = { runStart, top, x - runStart, bottom - top };
+                            if (outlinePixels != nullptr) {
+                                gpuBillboardSubmit(outlinePixels->data(), outlineWidth, outlineHeight,
+                                    destination, clip, transformY);
+                            }
                             gpuBillboardSubmit(frame.data, frame.width, frame.height,
                                 destination, clip, transformY);
                             inRun = false;
@@ -2811,6 +2842,10 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                     }
                     for (size_t index = 0; index < activeClips.size(); index++) {
                         if (!retained[index]) {
+                            if (outlinePixels != nullptr) {
+                                gpuBillboardSubmit(outlinePixels->data(), outlineWidth, outlineHeight,
+                                    destination, activeClips[index], transformY);
+                            }
                             gpuBillboardSubmit(frame.data, frame.width, frame.height,
                                 destination, activeClips[index], transformY);
                         }
@@ -2818,6 +2853,10 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                     activeClips.swap(nextClips);
                 }
                 for (const SDL_Rect& clip : activeClips) {
+                    if (outlinePixels != nullptr) {
+                        gpuBillboardSubmit(outlinePixels->data(), outlineWidth, outlineHeight,
+                            destination, clip, transformY);
+                    }
                     gpuBillboardSubmit(frame.data, frame.width, frame.height,
                         destination, clip, transformY);
                 }
@@ -2846,6 +2885,41 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
             : artHeight >= 192 ? 4
             : artHeight >= 96 ? 3
             : 2;
+        if (outlinePixels != nullptr) {
+            const int outlineTop = std::max(0, artTop);
+            const int outlineBottom = std::min(gTileWindowHeight, artTop + artHeight);
+            const int outlineLeft = std::max(0, artLeft);
+            const int outlineRight = std::min(gTileWindowWidth, artLeft + artWidth);
+            for (int y = outlineTop; y < outlineBottom; y++) {
+                const int sourceY = (y - artTop) * outlineHeight / artHeight;
+                for (int x = outlineLeft; x < outlineRight; x++) {
+                    const int sourceX = (x - artLeft) * outlineWidth / artWidth;
+                    const unsigned char color = (*outlinePixels)[sourceY * outlineWidth + sourceX];
+                    if (color == 0
+                        || transformY >= tileFirstPersonGetWallDepthAt(
+                            x,
+                            y,
+                            renderContext->horizonY,
+                            renderContext->wallDepths,
+                            renderContext->wallSillDepths,
+                            renderContext->doorCapDepths)) {
+                        continue;
+                    }
+                    const size_t depthIndex = static_cast<size_t>(y) * gTileWindowWidth + x;
+                    if ((*renderContext->actorDepthStamps)[depthIndex]
+                        != renderContext->actorDepthStamp) {
+                        (*renderContext->actorDepthStamps)[depthIndex] =
+                            renderContext->actorDepthStamp;
+                        (*renderContext->actorDepths)[depthIndex] =
+                            std::numeric_limits<double>::infinity();
+                    }
+                    if (transformY < (*renderContext->actorDepths)[depthIndex]) {
+                        gTileWindowBuffer[y * gTileWindowPitch + x] = color;
+                        (*renderContext->actorDepths)[depthIndex] = transformY;
+                    }
+                }
+            }
+        }
         int sourceXNumerator = (firstOpaqueColumn - artLeft) * frame.width;
         int sourceX = sourceXNumerator / artWidth;
         int sourceXRemainder = sourceXNumerator % artWidth;
@@ -2894,7 +2968,9 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                                     (*renderContext->actorDepths)[depthIndex] =
                                         std::numeric_limits<double>::infinity();
                                 }
-                                if (transformY < (*renderContext->actorDepths)[depthIndex]) {
+                                if (transformY < (*renderContext->actorDepths)[depthIndex]
+                                    || (outlinePixels != nullptr
+                                        && transformY == (*renderContext->actorDepths)[depthIndex])) {
                                     gTileWindowBuffer[blockY * gTileWindowPitch + blockX] = color;
                                     (*renderContext->actorDepths)[depthIndex] = transformY;
                                 }
@@ -3007,6 +3083,65 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
             renderSilhouetteRange(std::max(clippedTop, horizon), clippedBottom);
         }
     }
+}
+
+static const std::vector<unsigned char>* tileFirstPersonGetActorOutlinePixels(
+    const unsigned char* pixels,
+    int width,
+    int height,
+    Color color)
+{
+    struct OutlineFrameCacheEntry {
+        int width = 0;
+        int height = 0;
+        std::array<std::vector<unsigned char>, 2> frames;
+    };
+    static std::unordered_map<const unsigned char*, OutlineFrameCacheEntry> cache;
+
+    OutlineFrameCacheEntry& entry = cache[pixels];
+    if (entry.width != width || entry.height != height) {
+        entry = {};
+        entry.width = width;
+        entry.height = height;
+    }
+
+    const size_t frameIndex = color == Color(229) ? 0 : 1;
+    std::vector<unsigned char>& outlinePixels = entry.frames[frameIndex];
+    if (outlinePixels.empty()) {
+        const int scale = color == Color(243) ? 2 : 1;
+        const int outlineWidth = width * scale;
+        const int outlineHeight = height * scale;
+        outlinePixels.assign(static_cast<size_t>(outlineWidth) * outlineHeight, 0);
+        for (int y = 0; y < outlineHeight; y++) {
+            for (int x = 0; x < outlineWidth; x++) {
+                if (pixels[(y / scale) * width + x / scale] != 0) {
+                    continue;
+                }
+
+                for (int offsetY = -1; offsetY <= 1; offsetY++) {
+                    for (int offsetX = -1; offsetX <= 1; offsetX++) {
+                        if (offsetX == 0 && offsetY == 0) {
+                            continue;
+                        }
+
+                        const int neighborX = x + offsetX;
+                        const int neighborY = y + offsetY;
+                        if (neighborX >= 0 && neighborX < outlineWidth
+                            && neighborY >= 0 && neighborY < outlineHeight
+                            && pixels[(neighborY / scale) * width + neighborX / scale] != 0) {
+                            outlinePixels[y * outlineWidth + x] = color;
+                            break;
+                        }
+                    }
+                    if (outlinePixels[y * outlineWidth + x] != 0) {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    return &outlinePixels;
 }
 
 static bool tileFirstPersonGetWorldPosition(int tile, double* x, double* y)
@@ -4275,6 +4410,34 @@ void tileFirstPersonPreviewRefreshCombat()
     gFirstPersonPreviewPitch = preservedPitch;
     gFirstPersonPreviewYawTurning = false;
     tileFirstPersonPreviewRefresh();
+}
+
+bool tileFirstPersonPreviewGetViewAngles(double* yaw, double* pitch)
+{
+    if (!gFirstPersonPreviewEnabled || yaw == nullptr || pitch == nullptr) {
+        return false;
+    }
+
+    *yaw = tileFirstPersonPreviewGetYaw();
+    *pitch = gFirstPersonPreviewPitch;
+    return true;
+}
+
+void tileFirstPersonPreviewSetViewAngles(double yaw, double pitch)
+{
+    if (!gFirstPersonPreviewEnabled || !std::isfinite(yaw) || !std::isfinite(pitch)) {
+        return;
+    }
+
+    gFirstPersonPreviewYaw = std::fmod(yaw, 360.0);
+    if (gFirstPersonPreviewYaw < 0.0) {
+        gFirstPersonPreviewYaw += 360.0;
+    }
+    constexpr int kMaximumPitch = 24;
+    gFirstPersonPreviewPitch = std::clamp(
+        pitch, -static_cast<double>(kMaximumPitch), static_cast<double>(kMaximumPitch));
+    gFirstPersonPreviewYawTurning = false;
+    tileFirstPersonPreviewRequestRefresh();
 }
 
 void tileFirstPersonPreviewToggleTopology()
