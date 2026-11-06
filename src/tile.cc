@@ -193,6 +193,7 @@ static void tileFirstPersonDrawDiagnosticLine(int x1, int y1, int x2, int y2, Co
 static bool tileFirstPersonGetWorldPosition(int tile, double* x, double* y);
 static Rotation tileFirstPersonGetRotationToward(int tile, double targetX, double targetY);
 static double tileFirstPersonPreviewGetYaw();
+static int tileFirstPersonPreviewGetHorizonY();
 static void tileFirstPersonGetCameraPosition(int tile, MapElevation elevation, double* x, double* y);
 static void roof_fill_push_task_if_in_bounds(std::stack<roof_fill_task>& tasks_stack, int x, int y);
 static void roof_fill_off_process_task(std::stack<roof_fill_task>& tasks_stack, MapElevation elevation, bool on);
@@ -236,7 +237,8 @@ static std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSi
 static std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize> gFirstPersonCaveWallTexture;
 static std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize> gFirstPersonDoorWallTexture;
 static bool gFirstPersonWallTexturesInitialized = false;
-static int gFirstPersonPreviewYaw = 0;
+static double gFirstPersonPreviewYaw = 0.0;
+static double gFirstPersonPreviewPitch = 0.0;
 static double gFirstPersonPreviewYawStart = 0.0;
 static double gFirstPersonPreviewYawTarget = 0.0;
 static unsigned int gFirstPersonPreviewYawStartTime = 0;
@@ -1196,7 +1198,7 @@ static void tileRenderFirstPersonPreview()
     tileFirstPersonInitializeWallTextures();
     gFirstPersonPreviewDoorHitTargets.clear();
 
-    const int horizonY = gTileWindowHeight / 2;
+    const int horizonY = tileFirstPersonPreviewGetHorizonY();
     const bool useCaveWallTexture = gMapHeader.index == MAP_ARROYO_TEMPLE
         || tileFirstPersonMapUsesCaveSkybox(gMapHeader.index);
     const FirstPersonSkyType skyType = useCaveWallTexture
@@ -1205,7 +1207,7 @@ static void tileRenderFirstPersonPreview()
     if (skyType == FirstPersonSkyType::Cave
         || !tileFirstPersonMapIsIndoors(gMapHeader.index)) {
         firstPersonSkyRender(gTileWindowBuffer, gTileWindowWidth, gTileWindowHeight,
-            gTileWindowPitch, tileFirstPersonPreviewGetYaw(), kFieldOfViewScale,
+            gTileWindowPitch, horizonY, tileFirstPersonPreviewGetYaw(), kFieldOfViewScale,
             ambientIntensityIndex, skyType);
     }
     bufferFill(gTileWindowBuffer + horizonY * gTileWindowPitch,
@@ -3091,10 +3093,19 @@ static double tileFirstPersonPreviewGetYaw()
         + (gFirstPersonPreviewYawTarget - gFirstPersonPreviewYawStart) * easedProgress;
     if (progress >= 1.0) {
         gFirstPersonPreviewYawTurning = false;
-        gFirstPersonPreviewYaw = static_cast<int>(gFirstPersonPreviewYawTarget + 360.0) % 360;
+        gFirstPersonPreviewYaw = std::fmod(gFirstPersonPreviewYawTarget + 360.0, 360.0);
         return gFirstPersonPreviewYaw;
     }
     return yaw;
+}
+
+static int tileFirstPersonPreviewGetHorizonY()
+{
+    constexpr double kPi = 3.14159265358979323846;
+    const double pitch = gFirstPersonPreviewPitch * kPi / 180.0;
+    const int horizonY = static_cast<int>(std::lround(
+        gTileWindowHeight / 2.0 + gTileWindowHeight * std::tan(pitch)));
+    return std::clamp(horizonY, 0, std::max(0, gTileWindowHeight - 1));
 }
 
 static void tileFirstPersonPreviewResetForModeRefresh()
@@ -3104,6 +3115,7 @@ static void tileFirstPersonPreviewResetForModeRefresh()
     gFirstPersonPreviewPendingMoveDirection = -1;
     gFirstPersonPreviewYawTurning = false;
     gFirstPersonPreviewYaw = 0;
+    gFirstPersonPreviewPitch = 0;
 
     if (gDude == nullptr || !tileIsValid(gDude->tile) || !rotationIsValid(gDude->rotation)) {
         return;
@@ -3272,7 +3284,7 @@ static void tileFirstPersonDrawMoveMarker(double directionX, double directionY)
     }
 
     const int centerX = static_cast<int>((gTileWindowWidth / 2.0) * (1.0 + transformX / transformY));
-    const int centerY = gTileWindowHeight / 2
+    const int centerY = tileFirstPersonPreviewGetHorizonY()
         + static_cast<int>((gTileWindowHeight * 0.5) / transformY);
     if (centerX < 0 || centerX >= gTileWindowWidth || centerY < 0 || centerY >= gTileWindowHeight
         || (gFirstPersonPreviewWallDepths.size() == static_cast<size_t>(gTileWindowWidth)
@@ -4023,7 +4035,7 @@ Object* tileFirstPersonPreviewPickDoorAt(int screenX, int screenY)
 
     const int x = screenX - isoWindowRect.left;
     const int y = screenY - isoWindowRect.top;
-    const int horizonY = gTileWindowHeight / 2;
+    const int horizonY = tileFirstPersonPreviewGetHorizonY();
     if (x < 0 || x >= gTileWindowWidth || y < horizonY || y >= gTileWindowHeight) {
         return nullptr;
     }
@@ -4054,7 +4066,7 @@ int tileFirstPersonPreviewPickGroundTileAt(int screenX, int screenY)
     constexpr double kFieldOfViewScale = 0.66;
     if (!gFirstPersonPreviewEnabled
         || gDude == nullptr || !elevationIsValid(gElevation)
-        || screenY < gTileWindowHeight / 2 || screenY >= gTileWindowHeight
+        || screenY <= tileFirstPersonPreviewGetHorizonY() || screenY >= gTileWindowHeight
         || screenX < 0 || screenX >= gTileWindowWidth
         || gFirstPersonPreviewWallDepths.size() != static_cast<size_t>(gTileWindowWidth)) {
         return -1;
@@ -4071,7 +4083,8 @@ int tileFirstPersonPreviewPickGroundTileAt(int screenX, int screenY)
     const double cameraOffset = 2.0 * screenX / gTileWindowWidth - 1.0;
     const double rayDirectionX = directionX + cameraPlaneX * cameraOffset;
     const double rayDirectionY = directionY + cameraPlaneY * cameraOffset;
-    const double distance = (gTileWindowHeight * 0.5) / (screenY - gTileWindowHeight / 2);
+    const double distance = (gTileWindowHeight * 0.5)
+        / (screenY - tileFirstPersonPreviewGetHorizonY());
     if (distance >= gFirstPersonPreviewWallDepths[screenX]) {
         return -1;
     }
@@ -4254,10 +4267,12 @@ void tileFirstPersonPreviewRefreshCombat()
         return;
     }
 
-    const int preservedYaw = static_cast<int>(tileFirstPersonPreviewGetYaw());
+    const double preservedYaw = tileFirstPersonPreviewGetYaw();
+    const double preservedPitch = gFirstPersonPreviewPitch;
     tileFirstPersonPreviewToggle();
     tileFirstPersonPreviewToggle();
     gFirstPersonPreviewYaw = preservedYaw;
+    gFirstPersonPreviewPitch = preservedPitch;
     gFirstPersonPreviewYawTurning = false;
     tileFirstPersonPreviewRefresh();
 }
@@ -4289,19 +4304,26 @@ bool tileFirstPersonPreviewZoomTopology(int direction)
     return true;
 }
 
-void tileFirstPersonPreviewLook(int deltaX)
+void tileFirstPersonPreviewLook(double deltaX, double deltaY)
 {
-    if (!gFirstPersonPreviewEnabled || deltaX == 0) {
+    if (!gFirstPersonPreviewEnabled || (deltaX == 0 && deltaY == 0)) {
         return;
     }
 
-    gFirstPersonPreviewYaw = static_cast<int>(tileFirstPersonPreviewGetYaw());
-    gFirstPersonPreviewYaw = (gFirstPersonPreviewYaw + deltaX) % 360;
-    if (gFirstPersonPreviewYaw < 0) {
-        gFirstPersonPreviewYaw += 360;
+    constexpr double kLookSensitivity = 0.15;
+    if (deltaX != 0) {
+        gFirstPersonPreviewYaw = std::fmod(
+            tileFirstPersonPreviewGetYaw() + deltaX * kLookSensitivity, 360.0);
+        if (gFirstPersonPreviewYaw < 0) {
+            gFirstPersonPreviewYaw += 360.0;
+        }
+        gFirstPersonPreviewYawTurning = false;
     }
-    gFirstPersonPreviewYawTurning = false;
 
+    constexpr int kMaximumPitch = 24;
+    gFirstPersonPreviewPitch = std::clamp(
+        gFirstPersonPreviewPitch - deltaY * kLookSensitivity,
+        -static_cast<double>(kMaximumPitch), static_cast<double>(kMaximumPitch));
     tileFirstPersonPreviewRequestRefresh();
 }
 

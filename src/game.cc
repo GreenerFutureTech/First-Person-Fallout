@@ -588,8 +588,9 @@ void gameHandleFirstPersonPreviewInput(int eventCode)
         int deltaX;
         int deltaY;
         mouseDeviceGetRelativeMotion(&deltaX, &deltaY);
-        (void)deltaY;
-        tileFirstPersonPreviewLook(static_cast<int>(deltaX * settings.preferences.mouse_sensitivity));
+        tileFirstPersonPreviewLook(
+            deltaX * settings.preferences.mouse_sensitivity,
+            deltaY * settings.preferences.mouse_sensitivity);
     }
 
     if (eventCode == INPUT_EVENT_FIRST_PERSON_RIGHT_CLICK) {

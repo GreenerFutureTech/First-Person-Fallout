@@ -57,7 +57,7 @@ void tileFirstPersonPreviewRequestRefresh();
 void tileFirstPersonPreviewFlushRefresh();
 void tileFirstPersonPreviewRefresh();
 void tileFirstPersonPreviewRefreshCombat();
-void tileFirstPersonPreviewLook(int deltaX);
+void tileFirstPersonPreviewLook(double deltaX, double deltaY);
 void tileFirstPersonPreviewTurnToTile(int tile);
 void tileFirstPersonPreviewToggleTopology();
 bool tileFirstPersonPreviewZoomTopology(int direction);
