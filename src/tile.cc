@@ -233,6 +233,7 @@ static int gFirstPersonPreviewTopologyPosition = -1;
 static int gFirstPersonPreviewTopologyZoom = 0;
 static constexpr int kFirstPersonWallTextureSize = 64;
 static std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize> gFirstPersonStoneWallTexture;
+static std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize> gFirstPersonCaveWallTexture;
 static std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize> gFirstPersonDoorWallTexture;
 static bool gFirstPersonWallTexturesInitialized = false;
 static int gFirstPersonPreviewYaw = 0;
@@ -990,6 +991,17 @@ static void tileFirstPersonInitializeWallTextures()
     const Color stoneEdge = _colorTable[rgb555(0x44382F)];
     const Color stoneHighlight = _colorTable[rgb555(0x89765F)];
 
+    const Color caveRockColors[] = {
+        _colorTable[rgb555(0x282A2A)],
+        _colorTable[rgb555(0x393431)],
+        _colorTable[rgb555(0x514238)],
+        _colorTable[rgb555(0x6A503C)],
+        _colorTable[rgb555(0x806344)],
+    };
+    const Color caveMortar = _colorTable[rgb555(0x211F20)];
+    const Color caveStoneEdge = _colorTable[rgb555(0x302A26)];
+    const Color caveStoneHighlight = _colorTable[rgb555(0x8B7655)];
+
     const Color woodColors[] = {
         _colorTable[rgb555(0x38271D)],
         _colorTable[rgb555(0x4C3424)],
@@ -1011,6 +1023,29 @@ static void tileFirstPersonInitializeWallTextures()
             const int stoneBase = (blockSeed
                 + static_cast<int>(tileFirstPersonTextureNoise(blockX, course, 29) % 3)) % 5;
             const size_t index = static_cast<size_t>(y) * kFirstPersonWallTextureSize + x;
+
+            const int caveCourse = y / 16;
+            const int caveLocalY = y % 16;
+            const int caveOffset = (caveCourse & 1) != 0 ? 8 : 0;
+            const int cavePhaseX = (x + caveOffset) & 15;
+            const int caveBlockX = ((x + caveOffset) / 16) & 3;
+            const unsigned int caveNoise = tileFirstPersonTextureNoise(x, y, 61);
+            const int caveRock = static_cast<int>(
+                tileFirstPersonTextureNoise(caveBlockX, caveCourse, 67) % 5);
+            const bool horizontalJoint = caveLocalY == 0 || caveLocalY == 1;
+            const int verticalJointWidth = 1 + static_cast<int>(
+                tileFirstPersonTextureNoise(caveBlockX, y, 71) & 1);
+            const bool verticalJoint = cavePhaseX < verticalJointWidth;
+            if (horizontalJoint || verticalJoint) {
+                gFirstPersonCaveWallTexture[index] = caveMortar;
+            } else if (caveLocalY == 2 || cavePhaseX == 2) {
+                gFirstPersonCaveWallTexture[index] = caveStoneEdge;
+            } else if ((caveNoise & 127) == 0) {
+                gFirstPersonCaveWallTexture[index] = caveStoneHighlight;
+            } else {
+                gFirstPersonCaveWallTexture[index] =
+                    caveRockColors[std::clamp(caveRock + static_cast<int>((caveNoise >> 8) & 3) - 1, 0, 4)];
+            }
 
             if (localY == 0 || phaseX == 0) {
                 gFirstPersonStoneWallTexture[index] = mortar;
@@ -1162,8 +1197,9 @@ static void tileRenderFirstPersonPreview()
     gFirstPersonPreviewDoorHitTargets.clear();
 
     const int horizonY = gTileWindowHeight / 2;
-    const FirstPersonSkyType skyType = gMapHeader.index == MAP_ARROYO_TEMPLE
-            || tileFirstPersonMapUsesCaveSkybox(gMapHeader.index)
+    const bool useCaveWallTexture = gMapHeader.index == MAP_ARROYO_TEMPLE
+        || tileFirstPersonMapUsesCaveSkybox(gMapHeader.index);
+    const FirstPersonSkyType skyType = useCaveWallTexture
         ? FirstPersonSkyType::Cave
         : FirstPersonSkyType::Desert;
     if (skyType == FirstPersonSkyType::Cave
@@ -1643,7 +1679,10 @@ static void tileRenderFirstPersonPreview()
                 int textureY = static_cast<int>(
                     textureOffset * kFirstPersonWallTextureSize / textureScaleHeight);
                 textureY %= kFirstPersonWallTextureSize;
-                const Color texel = texture[textureY * kFirstPersonWallTextureSize + textureX];
+                const int textureIndex = textureY * kFirstPersonWallTextureSize + textureX;
+                const Color texel = brickTexture && useCaveWallTexture
+                    ? gFirstPersonCaveWallTexture[textureIndex]
+                    : texture[textureIndex];
                 const unsigned char color = intensityColorTable[texel][light];
                 gTileWindowBuffer[y * gTileWindowPitch + x] = color;
                 if (wallRenderStep == 2 && y + 1 <= wallBottom) {
