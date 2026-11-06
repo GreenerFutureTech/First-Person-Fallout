@@ -142,11 +142,12 @@ std::vector<uint16_t> buildPanorama()
 } // namespace
 
 void firstPersonSkyRender(unsigned char* buffer, int width, int height, int pitch,
-    double yaw, double fieldOfViewScale)
+    double yaw, double fieldOfViewScale, int ambientIntensityIndex)
 {
     if (buffer == nullptr || width < 2 || height < 2 || pitch < width
         || !std::isfinite(yaw) || !std::isfinite(fieldOfViewScale)
-        || fieldOfViewScale <= 0.0) {
+        || fieldOfViewScale <= 0.0 || ambientIntensityIndex < 0
+        || ambientIntensityIndex >= COLOR_COUNT) {
         return;
     }
 
@@ -186,7 +187,9 @@ void firstPersonSkyRender(unsigned char* buffer, int width, int height, int pitc
         for (int x = 0; x < width; x++) {
             const int panoramaY = static_cast<int>(std::min(
                 (horizon - y) * columnScales[x], static_cast<double>(kPanoramaHeight - 1)));
-            row[x] = _colorTable[panorama[panoramaY * kPanoramaWidth + panoramaColumns[x]]];
+            const unsigned char color =
+                _colorTable[panorama[panoramaY * kPanoramaWidth + panoramaColumns[x]]];
+            row[x] = intensityColorTable[color][ambientIntensityIndex];
         }
     }
 }

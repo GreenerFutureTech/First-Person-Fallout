@@ -59,7 +59,7 @@ bool screenIsHardwareAccelerated();
 const char* screenGetRendererName();
 bool screenSupportsGpuFirstPersonPass();
 bool screenHasOpenGLContext();
-void gpuBillboardBeginFrame();
+void gpuBillboardBeginFrame(unsigned char lightModulation);
 void gpuBillboardMarkSceneComplete();
 void gpuBillboardClear();
 void gpuBillboardBeginCursorRestore();

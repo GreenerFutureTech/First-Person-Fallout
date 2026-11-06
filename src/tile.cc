@@ -1057,7 +1057,11 @@ static void tileRenderFirstPersonPreview()
     constexpr double kFieldOfViewScale = 0.66;
     const bool profileFrame = settings.debug.show_fps;
     const unsigned int frameStart = profileFrame ? getTicks() : 0;
-    gpuBillboardBeginFrame();
+    const int ambientIntensity = lightGetAmbientIntensity();
+    const int ambientIntensityIndex = std::clamp(ambientIntensity / 512, 0, 255);
+    const unsigned char lightModulation = static_cast<unsigned char>(
+        std::clamp(ambientIntensity * 255 / LIGHT_INTENSITY_MAX, 0, 255));
+    gpuBillboardBeginFrame(lightModulation);
     gFirstPersonPreviewActorHitTargets.clear();
 
     bufferFill(gTileWindowBuffer,
@@ -1076,7 +1080,8 @@ static void tileRenderFirstPersonPreview()
 
     const int horizonY = gTileWindowHeight / 2;
     firstPersonSkyRender(gTileWindowBuffer, gTileWindowWidth, gTileWindowHeight,
-        gTileWindowPitch, tileFirstPersonPreviewGetYaw(), kFieldOfViewScale);
+        gTileWindowPitch, tileFirstPersonPreviewGetYaw(), kFieldOfViewScale,
+        ambientIntensityIndex);
     bufferFill(gTileWindowBuffer + horizonY * gTileWindowPitch,
         gTileWindowWidth,
         gTileWindowHeight - horizonY,
@@ -1527,7 +1532,8 @@ static void tileRenderFirstPersonPreview()
             const double textureHeight = std::max(1.0, projectedWallHeight);
             const int faceShade = wallSide == 0 ? 116 : 96;
             const int distanceShade = std::min(48, static_cast<int>(distance * 7.0));
-            const int light = std::max(48, faceShade - distanceShade);
+            const int light = std::max(48, faceShade - distanceShade)
+                * ambientIntensity / LIGHT_INTENSITY_MAX;
             const int wallRenderStep = type == 3 || type == 5 ? 1 : 2;
             if (type == 5 && wallTop <= wallBottom) {
                 hasDoorCaps = true;
@@ -1614,7 +1620,8 @@ static void tileRenderFirstPersonPreview()
                 static_cast<int>((worldY - mapY) * kFloorCacheCellResolution));
             const int cacheIndex = (mapY * SQUARE_GRID_WIDTH + mapX) * kFloorCacheCellArea
                 + sampleY * kFloorCacheCellResolution + sampleX;
-            const unsigned char color = cachedFloorColors[cacheIndex];
+            const unsigned char color = intensityColorTable[
+                cachedFloorColors[cacheIndex]][ambientIntensityIndex];
             for (int blockY = y;
                  blockY < blockBottom;
                  blockY++) {

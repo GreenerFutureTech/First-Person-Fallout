@@ -63,6 +63,7 @@ struct GpuBillboardTexture {
     SDL_Texture* texture;
     int width;
     int height;
+    unsigned char lightModulation;
     uint64_t paletteRevision;
     IndexedTexturePalette palette;
 };
@@ -89,6 +90,7 @@ static bool gGpuHasCursor = false;
 static std::unordered_map<const unsigned char*, GpuBillboardTexture> gGpuBillboardTextures;
 static unsigned char gGpuPalette[256 * 3];
 static uint64_t gGpuPaletteRevision = 0;
+static unsigned char gGpuBillboardLightModulation = 255;
 
 // TODO: Remove once migration to update-render cycle is completed.
 FpsLimiter sharedFpsLimiter;
@@ -140,11 +142,12 @@ bool screenHasOpenGLContext()
         && SDL_GL_GetCurrentContext() != nullptr;
 }
 
-void gpuBillboardBeginFrame()
+void gpuBillboardBeginFrame(unsigned char lightModulation)
 {
     gGpuBillboards.clear();
     gGpuOverlayRects.clear();
     gGpuCursorRestoreRects.clear();
+    gGpuBillboardLightModulation = lightModulation;
     const size_t expectedBillboardCount =
         static_cast<size_t>(std::max(64, screenGetWidth() / 2));
     if (gGpuBillboards.capacity() < expectedBillboardCount) {
@@ -314,18 +317,33 @@ void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
             return;
         }
         SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+        SDL_SetTextureColorMod(texture, gGpuBillboardLightModulation,
+            gGpuBillboardLightModulation, gGpuBillboardLightModulation);
 #if SDL_VERSION_ATLEAST(2, 0, 12)
         SDL_SetTextureScaleMode(texture, SDL_ScaleModeNearest);
 #endif
         if (textureIt != gGpuBillboardTextures.end()) {
             SDL_DestroyTexture(textureIt->second.texture);
-            textureIt->second = { texture, width, height, gGpuPaletteRevision, texturePalette };
+            textureIt->second = {
+                texture, width, height, gGpuBillboardLightModulation,
+                gGpuPaletteRevision, texturePalette
+            };
             cachedTexture = &textureIt->second;
         } else {
             cachedTexture =
                 &gGpuBillboardTextures.emplace(pixels,
-                    GpuBillboardTexture { texture, width, height, gGpuPaletteRevision, texturePalette }).first->second;
+                    GpuBillboardTexture {
+                        texture, width, height, gGpuBillboardLightModulation,
+                        gGpuPaletteRevision, texturePalette
+                    }).first->second;
         }
+    }
+    if (cachedTexture->lightModulation != gGpuBillboardLightModulation) {
+        SDL_SetTextureColorMod(cachedTexture->texture,
+            gGpuBillboardLightModulation,
+            gGpuBillboardLightModulation,
+            gGpuBillboardLightModulation);
+        cachedTexture->lightModulation = gGpuBillboardLightModulation;
     }
 
     if (!gGpuBillboards.empty()) {
