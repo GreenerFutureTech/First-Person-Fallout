@@ -191,6 +191,7 @@ static void tileFirstPersonDrawCrosshair(double directionX, double directionY);
 static void tileFirstPersonDrawMoveMarker(double directionX, double directionY);
 static void tileFirstPersonDrawDiagnosticLine(int x1, int y1, int x2, int y2, Color color);
 static bool tileFirstPersonGetWorldPosition(int tile, double* x, double* y);
+static Rotation tileFirstPersonGetRotationToward(int tile, double targetX, double targetY);
 static double tileFirstPersonPreviewGetYaw();
 static void tileFirstPersonGetCameraPosition(int tile, MapElevation elevation, double* x, double* y);
 static void roof_fill_push_task_if_in_bounds(std::stack<roof_fill_task>& tasks_stack, int x, int y);
@@ -2150,51 +2151,9 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
             : ROTATION_NE;
     }
     if (objectType != OBJ_TYPE_CRITTER) {
-        static std::array<std::array<std::array<double, 2>, ROTATION_COUNT>, 2> facingDirections {};
-        static int facingDirectionsGridWidth = 0;
-        if (facingDirectionsGridWidth != gHexGridWidth) {
-            for (int parity = 0; parity < 2; parity++) {
-                const int referenceTile = gHexGridWidth * 2 + 2 + parity;
-                double referenceX;
-                double referenceY;
-                if (!tileFirstPersonGetWorldPosition(referenceTile, &referenceX, &referenceY)) {
-                    continue;
-                }
-                for (int rotationIndex = ROTATION_FIRST; rotationIndex < ROTATION_COUNT; rotationIndex++) {
-                    const Rotation rotation = static_cast<Rotation>(rotationIndex);
-                    const int adjacentTile = tileGetTileInDirection(referenceTile, rotation, 1);
-                    double adjacentX;
-                    double adjacentY;
-                    if (!tileFirstPersonGetWorldPosition(adjacentTile, &adjacentX, &adjacentY)) {
-                        continue;
-                    }
-
-                    const double directionX = adjacentX - referenceX;
-                    const double directionY = adjacentY - referenceY;
-                    const double directionLength = sqrt(directionX * directionX + directionY * directionY);
-                    if (directionLength > 0.0) {
-                        facingDirections[parity][rotationIndex] = {
-                            directionX / directionLength,
-                            directionY / directionLength,
-                        };
-                    }
-                }
-            }
-            facingDirectionsGridWidth = gHexGridWidth;
-        }
-
-        const double viewX = renderContext->cameraX - objectX;
-        const double viewY = renderContext->cameraY - objectY;
-        double bestDot = -std::numeric_limits<double>::infinity();
-        const int parity = (object->tile % gHexGridWidth) & 1;
-        for (int rotationIndex = ROTATION_FIRST; rotationIndex < ROTATION_COUNT; rotationIndex++) {
-            const double dot = facingDirections[parity][rotationIndex][0] * viewX
-                + facingDirections[parity][rotationIndex][1] * viewY;
-            if (dot > bestDot) {
-                bestDot = dot;
-                facingRotation = static_cast<Rotation>(rotationIndex);
-            }
-        }
+        facingRotation = tileFirstPersonGetRotationToward(object->tile,
+            renderContext->cameraX,
+            renderContext->cameraY);
     }
 
     const double projectionScale = gTileWindowHeight / transformY;
@@ -2241,6 +2200,7 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
             isTinyScenery = cachedProfile->second.tiny;
         } else {
         isTinyScenery = sceneryProtoId == SceneryProtoTypeId::SmallBowl
+        || sceneryProtoId == SceneryProtoTypeId::TempleRubble
         || sceneryProtoId == SceneryProtoTypeId::Rubble1
         || sceneryProtoId == SceneryProtoTypeId::Rocks
         || sceneryProtoId == SceneryProtoTypeId::RocksAlt9
@@ -2264,6 +2224,9 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         || sceneryProtoId == SceneryProtoTypeId::RocksAlt11
         || sceneryProtoId == SceneryProtoTypeId::BedAlt10
         || sceneryProtoId == SceneryProtoTypeId::BedAlt9
+        || sceneryProtoId == SceneryProtoTypeId::OldMattressAlt
+        || sceneryProtoId == SceneryProtoTypeId::Bed
+
 
         || sceneryProtoId == static_cast<SceneryProtoTypeId>(435)
         || sceneryProtoId == static_cast<SceneryProtoTypeId>(433)
@@ -2275,9 +2238,7 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
 
 
 
-        isWideScenery = sceneryProtoId == SceneryProtoTypeId::Bed
-
-        || sceneryProtoId == SceneryProtoTypeId::BucknerHouseSign
+        isWideScenery = sceneryProtoId == SceneryProtoTypeId::BucknerHouseSign
 
 
         || sceneryProtoId == SceneryProtoTypeId::Stove
@@ -2287,7 +2248,6 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         || sceneryProtoId == SceneryProtoTypeId::TableAlt12
         || sceneryProtoId == SceneryProtoTypeId::TableAlt13
 
-        || sceneryProtoId == SceneryProtoTypeId::OldMattressAlt
 
         || sceneryProtoId == SceneryProtoTypeId::Desk
         || sceneryProtoId == SceneryProtoTypeId::DeskAlt
@@ -2920,6 +2880,64 @@ static bool tileFirstPersonGetWorldPosition(int tile, double* x, double* y)
     *x = (gHexGridWidth - 1 - tile % gHexGridWidth) / 2.0 + 0.25;
     *y = (tile / gHexGridWidth) / 2.0 + 0.25;
     return true;
+}
+
+static Rotation tileFirstPersonGetRotationToward(int tile, double targetX, double targetY)
+{
+    static std::array<std::array<std::array<double, 2>, ROTATION_COUNT>, 2> facingDirections {};
+    static int facingDirectionsGridWidth = 0;
+    if (facingDirectionsGridWidth != gHexGridWidth) {
+        for (int parity = 0; parity < 2; parity++) {
+            const int referenceTile = gHexGridWidth * 2 + 2 + parity;
+            double referenceX;
+            double referenceY;
+            if (!tileFirstPersonGetWorldPosition(referenceTile, &referenceX, &referenceY)) {
+                continue;
+            }
+            for (int rotationIndex = ROTATION_FIRST; rotationIndex < ROTATION_COUNT; rotationIndex++) {
+                const Rotation rotation = static_cast<Rotation>(rotationIndex);
+                const int adjacentTile = tileGetTileInDirection(referenceTile, rotation, 1);
+                double adjacentX;
+                double adjacentY;
+                if (!tileFirstPersonGetWorldPosition(adjacentTile, &adjacentX, &adjacentY)) {
+                    continue;
+                }
+
+                const double directionX = adjacentX - referenceX;
+                const double directionY = adjacentY - referenceY;
+                const double directionLength = sqrt(directionX * directionX + directionY * directionY);
+                if (directionLength > 0.0) {
+                    facingDirections[parity][rotationIndex] = {
+                        directionX / directionLength,
+                        directionY / directionLength,
+                    };
+                }
+            }
+        }
+        facingDirectionsGridWidth = gHexGridWidth;
+    }
+
+    double objectX;
+    double objectY;
+    if (!tileFirstPersonGetWorldPosition(tile, &objectX, &objectY)) {
+        return ROTATION_NE;
+    }
+
+    const double viewX = targetX - objectX;
+    const double viewY = targetY - objectY;
+    double bestDot = -std::numeric_limits<double>::infinity();
+    Rotation facingRotation = ROTATION_NE;
+    const int parity = (tile % gHexGridWidth) & 1;
+    for (int rotationIndex = ROTATION_FIRST; rotationIndex < ROTATION_COUNT; rotationIndex++) {
+        const double dot = facingDirections[parity][rotationIndex][0] * viewX
+            + facingDirections[parity][rotationIndex][1] * viewY;
+        if (dot > bestDot) {
+            bestDot = dot;
+            facingRotation = static_cast<Rotation>(rotationIndex);
+        }
+    }
+
+    return facingRotation;
 }
 
 static double tileFirstPersonPreviewGetYaw()
@@ -3695,6 +3713,21 @@ static void tileFirstPersonTopologyMarkObject(Object* object, void* context)
 bool tileFirstPersonPreviewIsEnabled()
 {
     return gFirstPersonPreviewEnabled;
+}
+
+Rotation tileFirstPersonPreviewGetFacingRotation(int tile)
+{
+    if (!gFirstPersonPreviewEnabled
+        || gDude == nullptr
+        || !tileIsValid(gDude->tile)
+        || !tileIsValid(tile)) {
+        return ROTATION_NE;
+    }
+
+    double cameraX;
+    double cameraY;
+    tileFirstPersonGetCameraPosition(gDude->tile, gDude->elevation, &cameraX, &cameraY);
+    return tileFirstPersonGetRotationToward(tile, cameraX, cameraY);
 }
 
 static Object* tileFirstPersonPreviewPickCritterAtPosition(int x, int y)

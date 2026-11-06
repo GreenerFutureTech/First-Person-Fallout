@@ -429,7 +429,6 @@ enum class SceneryProtoTypeId : int {
     BoxesAlt2 = 220,
     BoxesAlt3 = 223,
 
-    BedAlt9 = 680, // already exists as BedAlt7
     TableAlt = 301,
     TableAlt2 = 306,
 
@@ -513,6 +512,8 @@ enum class SceneryProtoTypeId : int {
     TableAlt13 = 304,
 
     OldMattressAlt = 206,
+
+    TempleRubble = 1372,
 
     JunkAlt9 = 252,
 
