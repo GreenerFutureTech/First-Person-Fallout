@@ -17,6 +17,7 @@
 #include "dinput.h"
 #include "draw.h"
 #include "game.h"
+#include "indexed_texture_palette.h"
 #include "interface.h"
 #include "map.h"
 #include "memory.h"
@@ -62,7 +63,9 @@ struct GpuBillboardTexture {
     SDL_Texture* texture;
     int width;
     int height;
-    unsigned int paletteHash;
+    unsigned char lightModulation;
+    uint64_t paletteRevision;
+    IndexedTexturePalette palette;
 };
 
 enum class GpuOverlayType {
@@ -86,7 +89,8 @@ static SDL_Rect gGpuCursorRect {};
 static bool gGpuHasCursor = false;
 static std::unordered_map<const unsigned char*, GpuBillboardTexture> gGpuBillboardTextures;
 static unsigned char gGpuPalette[256 * 3];
-static unsigned int gGpuPaletteHash = 0;
+static uint64_t gGpuPaletteRevision = 0;
+static unsigned char gGpuBillboardLightModulation = 255;
 
 // TODO: Remove once migration to update-render cycle is completed.
 FpsLimiter sharedFpsLimiter;
@@ -138,22 +142,21 @@ bool screenHasOpenGLContext()
         && SDL_GL_GetCurrentContext() != nullptr;
 }
 
-void gpuBillboardBeginFrame()
+void gpuBillboardBeginFrame(unsigned char lightModulation)
 {
     gGpuBillboards.clear();
     gGpuOverlayRects.clear();
     gGpuCursorRestoreRects.clear();
+    gGpuBillboardLightModulation = lightModulation;
     const size_t expectedBillboardCount =
         static_cast<size_t>(std::max(64, screenGetWidth() / 2));
     if (gGpuBillboards.capacity() < expectedBillboardCount) {
         gGpuBillboards.reserve(expectedBillboardCount);
     }
     unsigned char* palette = directDrawGetPalette();
-    gGpuPaletteHash = 2166136261u;
-    for (int index = 0; index < 256 * 3; index++) {
-        gGpuPalette[index] = palette[index];
-        gGpuPaletteHash ^= palette[index];
-        gGpuPaletteHash *= 16777619u;
+    if (memcmp(gGpuPalette, palette, sizeof(gGpuPalette)) != 0) {
+        memcpy(gGpuPalette, palette, sizeof(gGpuPalette));
+        gGpuPaletteRevision++;
     }
 }
 
@@ -275,19 +278,30 @@ void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
     auto textureIt = gGpuBillboardTextures.find(pixels);
     if (textureIt != gGpuBillboardTextures.end()
         && textureIt->second.width == width
-        && textureIt->second.height == height
-        && textureIt->second.paletteHash == gGpuPaletteHash) {
-        cachedTexture = &textureIt->second;
-    } else {
+        && textureIt->second.height == height) {
+        GpuBillboardTexture& candidate = textureIt->second;
+        // Color cycling changes a small palette range many times per second.
+        // Reuse textures whose opaque pixels do not use the changed colors.
+        // Check once per palette revision, not once per wall-clipped span.
+        if (candidate.paletteRevision == gGpuPaletteRevision
+            || candidate.palette.matches(gGpuPalette)) {
+            candidate.paletteRevision = gGpuPaletteRevision;
+            cachedTexture = &candidate;
+        }
+    }
+    if (cachedTexture == nullptr) {
         SDL_Texture* texture = SDL_CreateTexture(gSdlRenderer,
             SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, width, height);
         if (texture == nullptr) {
             return;
         }
+        IndexedTexturePalette texturePalette;
+        texturePalette.capture(gGpuPalette);
         std::vector<uint32_t> rgba(static_cast<size_t>(width) * height);
         for (int y = 0; y < height; y++) {
             for (int x = 0; x < width; x++) {
                 const unsigned char colorIndex = pixels[y * width + x];
+                texturePalette.useColor(colorIndex);
                 const int paletteIndex = colorIndex * 3;
                 const uint32_t color = colorIndex == 0
                     ? 0
@@ -303,18 +317,33 @@ void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
             return;
         }
         SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+        SDL_SetTextureColorMod(texture, gGpuBillboardLightModulation,
+            gGpuBillboardLightModulation, gGpuBillboardLightModulation);
 #if SDL_VERSION_ATLEAST(2, 0, 12)
         SDL_SetTextureScaleMode(texture, SDL_ScaleModeNearest);
 #endif
         if (textureIt != gGpuBillboardTextures.end()) {
             SDL_DestroyTexture(textureIt->second.texture);
-            textureIt->second = { texture, width, height, gGpuPaletteHash };
+            textureIt->second = {
+                texture, width, height, gGpuBillboardLightModulation,
+                gGpuPaletteRevision, texturePalette
+            };
             cachedTexture = &textureIt->second;
         } else {
             cachedTexture =
                 &gGpuBillboardTextures.emplace(pixels,
-                    GpuBillboardTexture { texture, width, height, gGpuPaletteHash }).first->second;
+                    GpuBillboardTexture {
+                        texture, width, height, gGpuBillboardLightModulation,
+                        gGpuPaletteRevision, texturePalette
+                    }).first->second;
         }
+    }
+    if (cachedTexture->lightModulation != gGpuBillboardLightModulation) {
+        SDL_SetTextureColorMod(cachedTexture->texture,
+            gGpuBillboardLightModulation,
+            gGpuBillboardLightModulation,
+            gGpuBillboardLightModulation);
+        cachedTexture->lightModulation = gGpuBillboardLightModulation;
     }
 
     if (!gGpuBillboards.empty()) {
@@ -608,7 +637,12 @@ void _GNW95_ShowRect(unsigned char* src, int srcPitch, int unused, int srcX, int
         case GpuOverlayType::Cursor:
             break;
         case GpuOverlayType::Default:
-            gGpuOverlayRects.push_back(destRect);
+            // F11 UI coverage comes from the live windows at presentation.
+            // A dirty rectangle can include the CPU-only map background and
+            // is not an opaque overlay (notably for transparent hold menus).
+            if (!tileFirstPersonPreviewIsEnabled()) {
+                gGpuOverlayRects.push_back(destRect);
+            }
             break;
         }
     }
@@ -752,6 +786,8 @@ void handleWindowSizeChanged()
 
 void renderFpsCounter()
 {
+    // Finish the scene before painting this direct framebuffer overlay.
+    tileFirstPersonPreviewFlushRefresh();
     if (!settings.debug.show_fps || gSdlSurface == nullptr || gSdlTextureSurface == nullptr) {
         return;
     }
@@ -808,6 +844,9 @@ void renderFpsCounter()
 
 void renderPresent()
 {
+    // Every presentation loop consumes pending F11 work, including combat
+    // animation waits and modal loops that never return to the main loop.
+    tileFirstPersonPreviewFlushRefresh();
     SDL_UpdateTexture(gSdlTexture, nullptr, gSdlTextureSurface->pixels, gSdlTextureSurface->pitch);
     SDL_RenderClear(gSdlRenderer);
     SDL_RenderCopy(gSdlRenderer, gSdlTexture, nullptr, nullptr);
@@ -850,8 +889,10 @@ void renderPresent()
             SDL_RenderCopy(gSdlRenderer, gSdlTexture, &windowRect, &windowRect);
         }
     }
-    for (const SDL_Rect& overlayRect : gGpuOverlayRects) {
-        SDL_RenderCopy(gSdlRenderer, gSdlTexture, &overlayRect, &overlayRect);
+    if (!firstPersonPreviewEnabled) {
+        for (const SDL_Rect& overlayRect : gGpuOverlayRects) {
+            SDL_RenderCopy(gSdlRenderer, gSdlTexture, &overlayRect, &overlayRect);
+        }
     }
     if (gGpuHasCursor && gGpuCursorTexture != nullptr) {
         SDL_RenderCopy(gSdlRenderer, gGpuCursorTexture, nullptr, &gGpuCursorRect);

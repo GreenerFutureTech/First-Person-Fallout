@@ -386,6 +386,8 @@ void tickersDisable()
 // 0x4C8F4C
 void takeScreenshot()
 {
+    // Capture current scene data before redirecting the window blitters.
+    tileFirstPersonPreviewFlushRefresh();
     int width = _scr_size.right - _scr_size.left + 1;
     int height = _scr_size.bottom - _scr_size.top + 1;
     gScreenshotBuffer = (unsigned char*)internal_malloc(static_cast<size_t>(width) * height);

@@ -1,7 +1,7 @@
 $cmake = 'C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'
 
 Write-Host "Building..."
-& $cmake --build 'out\build\windows-x64-vs18' --config Release --target fallout2-ce --parallel
+& $cmake --build 'out\build\windows-x64-vs18' --config Release --target fallout2-ce --parallel 1
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Build failed!"

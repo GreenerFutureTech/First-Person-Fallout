@@ -129,6 +129,31 @@ map conversion logic should get focused tests if they are introduced.
 
 ### GPU billboard migration plan
 
+F11 mouse-look and map rectangle invalidations now request a deferred scene
+refresh. Main/player-combat/NPC-animation loops also request their continuous
+camera refresh; all presentation loops flush pending work through
+`renderPresent()`. This coalesces repeated requests without relying on a return
+to the outer main loop. Picking, screenshots, and the FPS overlay flush first
+when they require current scene data. Explicit synchronous refreshes remain for
+mode transitions and action-menu setup. Disabling F11 clears pending work.
+Native build and runtime validation are pending; compare turning FPS and verify
+player/NPC combat animation, turn-and-click targeting, modal menus, and F11
+toggles. The earlier main-loop-only deferral broke combat and must not be
+reintroduced.
+
+Current checkout optimization (November 2026): door-top occlusion is stored as
+one vertical span per screen column, matching the single cap retained by ray
+traversal, rather than a full-resolution double depth buffer. Empty scenes
+skip cap-depth queries. GPU billboard visibility rejection checks the endpoints
+of each horizon band; bands without an overlapping occluding cap are clipped
+once per column and adjacent visible columns are submitted as rectangles.
+Bands overlapping caps retain the existing detailed clipping path. This removes
+resolution-dependent work in the common case without changing door geometry.
+Randomized algorithm-level comparisons against dense per-pixel depth passed;
+native compilation and in-game 1080p/1440p comparisons remain pending because
+the local Visual Studio/CMake toolchain was unavailable. Validate open/closed
+doors, sprites crossing door tops, window sills, and CPU fallback before release.
+
 The current F11 renderer is a CPU software renderer. `tileRenderFirstPersonPreview`
 writes palette indices into the shared 8-bit window buffer; SDL uploads that
 completed image to a texture afterward. The GPU therefore does not accelerate
@@ -206,11 +231,23 @@ CPU overlay rectangles updated after the F11 scene refresh are replayed after
 the GPU billboard pass. This preserves the expected ordering for menus,
 widgets, and the software cursor while retaining GPU rendering for the scene.
 
-The CPU fallback floor pass now uses adaptive blocks: distant rows near the
-horizon use 4x4 blocks, while the close foreground retains 2x2 blocks. This
-reduces the dominant full-screen floor loop while retaining detail where
-perspective changes fastest. A shader-based floor pass remains the long-term
-solution.
+The current CPU floor pass retains fixed 2x2 samples; the earlier adaptive
+4x4 treatment was removed to preserve detail. Walls now rasterize first and
+record their floor-covering bottom edge per column. Entirely covered 2x2 blocks
+skip floor sampling, while partial blocks keep the original sample and write
+only uncovered pixels. Sample coordinates still advance through skipped blocks
+to preserve texture alignment. Openings and above-horizon door caps do not
+suppress visible floor. Exit markers and billboards render after both passes.
+
+Floor-cache invalidation now compares only the floor half of packed tile IDs.
+Room entry/exit changes roof visibility in the other half; it previously caused
+an unnecessary full floor-cache rebuild. Floor art/flag changes and elevation
+changes still invalidate the cache. This is a candidate fix for room-transition
+hitches, pending runtime confirmation. Algorithm-level reference checks matched
+3,000 randomized framebuffers and verified roof-only versus floor-bit changes;
+native build and in-game 1080p/1440p tests remain pending because the local C++
+toolchain is unavailable. Compare wall edges, windows, open doors, and room
+transitions, preserving the existing floor quality.
 
 The CPU wall pass likewise samples each wall texture column in vertical
 2-pixel blocks. Wall ray traversal and one depth result per screen column are

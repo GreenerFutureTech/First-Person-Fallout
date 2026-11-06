@@ -42,6 +42,7 @@ void tileEnable();
 void tileWindowRefreshRect(Rect* rect, MapElevation elevation);
 void tileWindowRefresh();
 bool tileFirstPersonPreviewIsEnabled();
+Rotation tileFirstPersonPreviewGetFacingRotation(int tile);
 Object* tileFirstPersonPreviewPickCritter();
 Object* tileFirstPersonPreviewPickCritterAt(int screenX, int screenY);
 Object* tileFirstPersonPreviewPickDoorAt(int screenX, int screenY);
@@ -50,6 +51,10 @@ int tileFirstPersonPreviewPickGroundTileAt(int screenX, int screenY);
 void tileFirstPersonPreviewSetMoveMarkerTile(int tile);
 bool tileFirstPersonPreviewMove(int relativeDirection);
 void tileFirstPersonPreviewProcessPendingMove();
+// Coalesce scene invalidations until presentation. Refresh remains synchronous
+// for callers that need an up-to-date framebuffer or picking data immediately.
+void tileFirstPersonPreviewRequestRefresh();
+void tileFirstPersonPreviewFlushRefresh();
 void tileFirstPersonPreviewRefresh();
 void tileFirstPersonPreviewRefreshCombat();
 void tileFirstPersonPreviewLook(int deltaX);

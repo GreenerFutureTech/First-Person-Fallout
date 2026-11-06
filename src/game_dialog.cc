@@ -2828,7 +2828,7 @@ static bool gameDialogRenderSpeakerInDisplayBuffer()
         if (gGameDialogSpeaker->tile == gDude->tile && rotationIsValid(gDude->rotation)) {
             facingRotation = static_cast<Rotation>((gDude->rotation + ROTATION_COUNT / 2) % ROTATION_COUNT);
         } else if (gGameDialogSpeaker->tile != gDude->tile) {
-            facingRotation = tileGetRotationTo(gGameDialogSpeaker->tile, gDude->tile);
+            facingRotation = tileFirstPersonPreviewGetFacingRotation(gGameDialogSpeaker->tile);
         }
     }
 

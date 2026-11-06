@@ -3245,7 +3245,7 @@ void _combat_turn_run()
         gameHandleFirstPersonPreviewInput(inputGetInput());
 
         if (tileFirstPersonPreviewIsEnabled()) {
-            tileFirstPersonPreviewRefresh();
+            tileFirstPersonPreviewRequestRefresh();
         }
 
         renderPresent();
@@ -3304,7 +3304,7 @@ static int _combat_input()
 
         if (tileFirstPersonPreviewIsEnabled()) {
             tileFirstPersonPreviewProcessPendingMove();
-            tileFirstPersonPreviewRefresh();
+            tileFirstPersonPreviewRequestRefresh();
         }
 
         renderPresent();

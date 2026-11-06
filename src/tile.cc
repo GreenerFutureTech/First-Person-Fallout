@@ -14,11 +14,13 @@
 
 #include "art.h"
 #include "animation.h"
+#include "billboard_clip_bands.h"
 #include "combat.h"
 #include "color.h"
 #include "critter.h"
 #include "debug.h"
 #include "draw.h"
+#include "first_person_sky.h"
 #include "game_mouse.h"
 #include "input.h"
 #include "light.h"
@@ -126,6 +128,14 @@ struct TileFirstPersonObjectHitTarget {
     double depth;
 };
 
+// Ray traversal retains at most one door cap per column. Bottom is exclusive,
+// matching billboard clip rectangles; an empty span contributes no occlusion.
+struct TileFirstPersonDoorCapSpan {
+    int top = 0;
+    int bottom = 0;
+    double depth = std::numeric_limits<double>::infinity();
+};
+
 struct TileFirstPersonActorRenderContext {
     MapElevation elevation;
     double cameraX;
@@ -138,8 +148,7 @@ struct TileFirstPersonActorRenderContext {
     int horizonY;
     std::vector<double>* wallDepths;
     std::vector<double>* wallSillDepths;
-    std::vector<double>* doorCapDepths;
-    bool hasDoorCaps;
+    std::vector<TileFirstPersonDoorCapSpan>* doorCapDepths;
     std::vector<double>* actorDepths;
     std::vector<unsigned int>* actorDepthStamps;
     unsigned int actorDepthStamp;
@@ -158,7 +167,7 @@ struct TileFirstPersonExitGridRenderContext {
     int horizonY;
     std::vector<double>* wallDepths;
     std::vector<double>* wallSillDepths;
-    std::vector<double>* doorCapDepths;
+    std::vector<TileFirstPersonDoorCapSpan>* doorCapDepths;
 };
 
 static void tileSetBorder(int windowWidth, int windowHeight, int hexGridWidth, int hexGridHeight);
@@ -182,6 +191,7 @@ static void tileFirstPersonDrawCrosshair(double directionX, double directionY);
 static void tileFirstPersonDrawMoveMarker(double directionX, double directionY);
 static void tileFirstPersonDrawDiagnosticLine(int x1, int y1, int x2, int y2, Color color);
 static bool tileFirstPersonGetWorldPosition(int tile, double* x, double* y);
+static Rotation tileFirstPersonGetRotationToward(int tile, double targetX, double targetY);
 static double tileFirstPersonPreviewGetYaw();
 static void tileFirstPersonGetCameraPosition(int tile, MapElevation elevation, double* x, double* y);
 static void roof_fill_push_task_if_in_bounds(std::stack<roof_fill_task>& tasks_stack, int x, int y);
@@ -215,12 +225,15 @@ static TileWindowRefreshElevationProc* gTileWindowRefreshElevationProc = tileRef
 // 0x51D968 refresh_enabled
 static bool gTileEnabled = true;
 static bool gFirstPersonPreviewEnabled = false;
+static bool gFirstPersonPreviewRefreshPending = false;
+static bool gFirstPersonPreviewRefreshing = false;
 static bool gFirstPersonPreviewTopologyEnabled = false;
 static bool gFirstPersonPreviewTopologyRendering = false;
 static int gFirstPersonPreviewTopologyPosition = -1;
 static int gFirstPersonPreviewTopologyZoom = 0;
 static constexpr int kFirstPersonWallTextureSize = 64;
 static std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize> gFirstPersonStoneWallTexture;
+static std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize> gFirstPersonCaveWallTexture;
 static std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize> gFirstPersonDoorWallTexture;
 static bool gFirstPersonWallTexturesInitialized = false;
 static int gFirstPersonPreviewYaw = 0;
@@ -904,7 +917,7 @@ static void tileRefreshMapper(Rect* rect, MapElevation elevation)
 static void tileRefreshGame(Rect* rect, MapElevation elevation)
 {
     if (gFirstPersonPreviewEnabled) {
-        tileFirstPersonPreviewRefresh();
+        tileFirstPersonPreviewRequestRefresh();
         return;
     }
 
@@ -978,6 +991,17 @@ static void tileFirstPersonInitializeWallTextures()
     const Color stoneEdge = _colorTable[rgb555(0x44382F)];
     const Color stoneHighlight = _colorTable[rgb555(0x89765F)];
 
+    const Color caveRockColors[] = {
+        _colorTable[rgb555(0x282A2A)],
+        _colorTable[rgb555(0x393431)],
+        _colorTable[rgb555(0x514238)],
+        _colorTable[rgb555(0x6A503C)],
+        _colorTable[rgb555(0x806344)],
+    };
+    const Color caveMortar = _colorTable[rgb555(0x211F20)];
+    const Color caveStoneEdge = _colorTable[rgb555(0x302A26)];
+    const Color caveStoneHighlight = _colorTable[rgb555(0x8B7655)];
+
     const Color woodColors[] = {
         _colorTable[rgb555(0x38271D)],
         _colorTable[rgb555(0x4C3424)],
@@ -999,6 +1023,29 @@ static void tileFirstPersonInitializeWallTextures()
             const int stoneBase = (blockSeed
                 + static_cast<int>(tileFirstPersonTextureNoise(blockX, course, 29) % 3)) % 5;
             const size_t index = static_cast<size_t>(y) * kFirstPersonWallTextureSize + x;
+
+            const int caveCourse = y / 16;
+            const int caveLocalY = y % 16;
+            const int caveOffset = (caveCourse & 1) != 0 ? 8 : 0;
+            const int cavePhaseX = (x + caveOffset) & 15;
+            const int caveBlockX = ((x + caveOffset) / 16) & 3;
+            const unsigned int caveNoise = tileFirstPersonTextureNoise(x, y, 61);
+            const int caveRock = static_cast<int>(
+                tileFirstPersonTextureNoise(caveBlockX, caveCourse, 67) % 5);
+            const bool horizontalJoint = caveLocalY == 0 || caveLocalY == 1;
+            const int verticalJointWidth = 1 + static_cast<int>(
+                tileFirstPersonTextureNoise(caveBlockX, y, 71) & 1);
+            const bool verticalJoint = cavePhaseX < verticalJointWidth;
+            if (horizontalJoint || verticalJoint) {
+                gFirstPersonCaveWallTexture[index] = caveMortar;
+            } else if (caveLocalY == 2 || cavePhaseX == 2) {
+                gFirstPersonCaveWallTexture[index] = caveStoneEdge;
+            } else if ((caveNoise & 127) == 0) {
+                gFirstPersonCaveWallTexture[index] = caveStoneHighlight;
+            } else {
+                gFirstPersonCaveWallTexture[index] =
+                    caveRockColors[std::clamp(caveRock + static_cast<int>((caveNoise >> 8) & 3) - 1, 0, 4)];
+            }
 
             if (localY == 0 || phaseX == 0) {
                 gFirstPersonStoneWallTexture[index] = mortar;
@@ -1039,13 +1086,100 @@ static void tileFirstPersonInitializeWallTextures()
     gFirstPersonWallTexturesInitialized = true;
 }
 
+// Map headers have no indoor/outdoor flag, so classify known stock interiors.
+static bool tileFirstPersonMapIsIndoors(Map map)
+{
+    switch (map) {
+    case MAP_ARROYO_CAVES:
+    case MAP_DEN_BUSINESS:
+    case MAP_DEN_RESIDENTIAL:
+    case MAP_KLAMATH_RATCAVES:
+    case MAP_KLAMATH_TOXICCAVES:
+    case MAP_VAULTCITY_COUNCIL:
+    case MAP_MODOC_BEDNBREAKFAST:
+    case MAP_MODOC_DOWNTHESHITTER:
+    case MAP_MODOC_WELL:
+    case MAP_GHOST_CAVERN:
+    case MAP_SIERRA_BATTLE:
+    case MAP_SIERRA_123:
+    case MAP_SIERRA_4:
+    case MAP_VAULT_CITY_VAULT:
+    case MAP_GECKO_POWER_PLANT:
+    case MAP_GECKO_ACCESS_TUNNELS:
+    case MAP_VAULT_15:
+    case MAP_VAULT_13:
+    case MAP_NCR_COUNCIL_1:
+    case MAP_NCR_COUNCIL_2:
+    case MAP_MILITARY_BASE_12:
+    case MAP_MILITARY_BASE_34:
+    case MAP_DEN_SLAVE_RUN:
+    case MAP_NEW_RENO_CHOP_SHOP:
+    case MAP_NEW_RENO_BOXING:
+    case MAP_REDDING_WANAMINGO_ENT:
+    case MAP_REDDING_WANAMINGO_12:
+    case MAP_REDDING_DTOWN_TUNNEL:
+    case MAP_REDDING_MINE_TUNNEL:
+    case MAP_RND_CAVERN0:
+    case MAP_RND_CAVERN1:
+    case MAP_RND_CAVERN2:
+    case MAP_RND_CAVERN3:
+    case MAP_RND_CAVERN4:
+    case MAP_RND_CAVERN5:
+    case MAP_BROKEN_HILLS2:
+    case MAP_RAIDERS_CAMP2:
+    case MAP_RND_CAVERN_5:
+    case MAP_RND_CAVERN_6:
+    case MAP_RND_CAVERN_7:
+    case MAP_ENCLAVE_DETENTION:
+    case MAP_ENCLAVE_END_FIGHT:
+    case MAP_ENCLAVE_BARRACKS:
+    case MAP_ENCLAVE_PRESIDENT:
+    case MAP_ENCLAVE_REACTOR:
+    case MAP_ENCLAVE_TRAP_ROOM:
+    case MAP_SAN_FRAN_TANKER:
+    case MAP_SHUTTLE_INTERIOR:
+    case MAP_ELRONOLOGIST_BASE:
+    case MAP_NEW_RENO_VB:
+    case MAP_SHI_TEMPLE:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool tileFirstPersonMapUsesCaveSkybox(Map map)
+{
+    switch (map) {
+    case MAP_ARROYO_CAVES:
+    case MAP_KLAMATH_RATCAVES:
+    case MAP_KLAMATH_TOXICCAVES:
+    case MAP_GHOST_CAVERN:
+    case MAP_RND_CAVERN0:
+    case MAP_RND_CAVERN1:
+    case MAP_RND_CAVERN2:
+    case MAP_RND_CAVERN3:
+    case MAP_RND_CAVERN4:
+    case MAP_RND_CAVERN5:
+    case MAP_RND_CAVERN_5:
+    case MAP_RND_CAVERN_6:
+    case MAP_RND_CAVERN_7:
+        return true;
+    default:
+        return false;
+    }
+}
+
 static void tileRenderFirstPersonPreview()
 {
     constexpr double kPi = 3.14159265358979323846;
     constexpr double kFieldOfViewScale = 0.66;
     const bool profileFrame = settings.debug.show_fps;
     const unsigned int frameStart = profileFrame ? getTicks() : 0;
-    gpuBillboardBeginFrame();
+    const int ambientIntensity = lightGetAmbientIntensity();
+    const int ambientIntensityIndex = std::clamp(ambientIntensity / 512, 0, 255);
+    const unsigned char lightModulation = static_cast<unsigned char>(
+        std::clamp(ambientIntensity * 255 / LIGHT_INTENSITY_MAX, 0, 255));
+    gpuBillboardBeginFrame(lightModulation);
     gFirstPersonPreviewActorHitTargets.clear();
 
     bufferFill(gTileWindowBuffer,
@@ -1063,45 +1197,22 @@ static void tileRenderFirstPersonPreview()
     gFirstPersonPreviewDoorHitTargets.clear();
 
     const int horizonY = gTileWindowHeight / 2;
-    bufferFill(gTileWindowBuffer,
-        gTileWindowWidth,
-        horizonY,
-        gTileWindowPitch,
-        COLOR_LIGHT_BLUE);
+    const bool useCaveWallTexture = gMapHeader.index == MAP_ARROYO_TEMPLE
+        || tileFirstPersonMapUsesCaveSkybox(gMapHeader.index);
+    const FirstPersonSkyType skyType = useCaveWallTexture
+        ? FirstPersonSkyType::Cave
+        : FirstPersonSkyType::Desert;
+    if (skyType == FirstPersonSkyType::Cave
+        || !tileFirstPersonMapIsIndoors(gMapHeader.index)) {
+        firstPersonSkyRender(gTileWindowBuffer, gTileWindowWidth, gTileWindowHeight,
+            gTileWindowPitch, tileFirstPersonPreviewGetYaw(), kFieldOfViewScale,
+            ambientIntensityIndex, skyType);
+    }
     bufferFill(gTileWindowBuffer + horizonY * gTileWindowPitch,
         gTileWindowWidth,
         gTileWindowHeight - horizonY,
         gTileWindowPitch,
         COLOR_DULL_BROWN);
-
-    // A low-resolution sky and distant desert ridge give outdoor maps a simple
-    // horizon without adding another texture or asset dependency.
-    constexpr int kSkylineStep = 8;
-    const double skyYaw = tileFirstPersonPreviewGetYaw();
-    const int panoramaWidth = std::max(kSkylineStep, gTileWindowWidth * 2);
-    const int panoramaSegments = std::max(1, panoramaWidth / kSkylineStep);
-    const int parallaxOffset = static_cast<int>(skyYaw * panoramaWidth / 360.0);
-    for (int x = 0; x < gTileWindowWidth; x += kSkylineStep) {
-        const int panoramaX = (x + parallaxOffset) % panoramaWidth;
-        const int segment = (panoramaX / kSkylineStep) % panoramaSegments;
-        unsigned int noise = static_cast<unsigned int>(segment) * 1103515245u + 12345u;
-        noise ^= noise >> 11;
-        const int ridgeHeight = std::max(2, horizonY / 12
-            + static_cast<int>(noise % static_cast<unsigned int>(std::max(1, horizonY / 10))));
-        const int ridgeTop = std::max(0, horizonY - ridgeHeight);
-        const int ridgeWidth = std::min(kSkylineStep, gTileWindowWidth - x);
-        bufferFill(gTileWindowBuffer + ridgeTop * gTileWindowPitch + x,
-            ridgeWidth,
-            horizonY - ridgeTop,
-            gTileWindowPitch,
-            COLOR_SAGE_GREEN);
-        const int foregroundHeight = std::max(1, ridgeHeight / 3);
-        bufferFill(gTileWindowBuffer + (horizonY - foregroundHeight) * gTileWindowPitch + x,
-            ridgeWidth,
-            foregroundHeight,
-            gTileWindowPitch,
-            COLOR_DULL_BROWN);
-    }
 
     gFirstPersonPreviewWallCells.assign(gHexGridSize, 0);
     gFirstPersonPreviewWallOrientations.assign(gHexGridSize, 0);
@@ -1157,9 +1268,15 @@ static void tileRenderFirstPersonPreview()
     static std::vector<int> floorTextureIndices;
     static int cachedFloorElevation = -1;
     const int* currentFloorFids = gTileSquares[gElevation]->tileFid;
+    const unsigned int floorCacheStart = profileFrame ? getTicks() : 0;
     const bool floorLayoutChanged = cachedFloorElevation != static_cast<int>(gElevation)
         || cachedFloorFids.size() != SQUARE_GRID_SIZE
-        || !std::equal(currentFloorFids, currentFloorFids + SQUARE_GRID_SIZE, cachedFloorFids.begin());
+        || !std::equal(currentFloorFids, currentFloorFids + SQUARE_GRID_SIZE,
+            cachedFloorFids.begin(), [](int current, int cached) {
+                // Packed tile IDs also contain roof visibility. Walking into
+                // a room hides its roof but does not change the floor cache.
+                return FloorTileFrmId(current).fid() == FloorTileFrmId(cached).fid();
+            });
     if (floorLayoutChanged) {
         cachedFloorFids.assign(currentFloorFids, currentFloorFids + SQUARE_GRID_SIZE);
         floorTextures.clear();
@@ -1259,61 +1376,19 @@ static void tileRenderFirstPersonPreview()
         }
         cachedFloorElevation = static_cast<int>(gElevation);
     }
-
-    const unsigned int floorStart = profileFrame ? getTicks() : 0;
-    constexpr int kFloorRenderStep = 2;
-    for (int y = horizonY + 1; y < gTileWindowHeight; y += kFloorRenderStep) {
-        const double rowDistance = (gTileWindowHeight * 0.5) / (y - horizonY);
-        double worldX = cameraX + rayDirectionXs[0] * rowDistance;
-        double worldY = cameraY + rayDirectionYs[0] * rowDistance;
-        const double worldXStep = gTileWindowWidth > 1
-            ? (rayDirectionXs[std::min(kFloorRenderStep, gTileWindowWidth - 1)]
-                    - rayDirectionXs[0]) * rowDistance
-            : 0.0;
-        const double worldYStep = gTileWindowWidth > 1
-            ? (rayDirectionYs[std::min(kFloorRenderStep, gTileWindowWidth - 1)]
-                    - rayDirectionYs[0]) * rowDistance
-            : 0.0;
-        for (int x = 0; x < gTileWindowWidth; x += kFloorRenderStep) {
-            const int mapX = static_cast<int>(floor(worldX));
-            const int mapY = static_cast<int>(floor(worldY));
-            if (mapX < 0 || mapX >= SQUARE_GRID_WIDTH
-                || mapY < 0 || mapY >= SQUARE_GRID_HEIGHT) {
-                worldX += worldXStep;
-                worldY += worldYStep;
-                continue;
-            }
-
-            const int sampleX = std::min(kFloorCacheCellResolution - 1,
-                static_cast<int>((worldX - mapX) * kFloorCacheCellResolution));
-            const int sampleY = std::min(kFloorCacheCellResolution - 1,
-                static_cast<int>((worldY - mapY) * kFloorCacheCellResolution));
-            const int cacheIndex = (mapY * SQUARE_GRID_WIDTH + mapX) * kFloorCacheCellArea
-                + sampleY * kFloorCacheCellResolution + sampleX;
-            const unsigned char color = cachedFloorColors[cacheIndex];
-            for (int blockY = y;
-                 blockY < std::min(gTileWindowHeight, y + kFloorRenderStep);
-                 blockY++) {
-                for (int blockX = x;
-                     blockX < std::min(gTileWindowWidth, x + kFloorRenderStep);
-                     blockX++) {
-                    gTileWindowBuffer[blockY * gTileWindowPitch + blockX] = color;
-                }
-            }
-            worldX += worldXStep;
-            worldY += worldYStep;
-        }
+    const unsigned int floorCacheEnd = profileFrame ? getTicks() : 0;
+    if (profileFrame && floorLayoutChanged) {
+        debugPrint("F11 floor cache rebuild: tick=%u tile=%d elevation=%d ms=%u\n",
+            floorCacheEnd, gDude != nullptr ? gDude->tile : -1,
+            static_cast<int>(gElevation), getTicksBetween(floorCacheEnd, floorCacheStart));
     }
 
-    const unsigned int floorEnd = profileFrame ? getTicks() : 0;
     std::vector<double>& wallDepths = gFirstPersonPreviewWallDepths;
     wallDepths.assign(gTileWindowWidth, std::numeric_limits<double>::infinity());
     static std::vector<double> wallSillDepths;
     wallSillDepths.assign(gTileWindowWidth, std::numeric_limits<double>::infinity());
-    static std::vector<double> doorCapDepths;
-    doorCapDepths.assign(
-        static_cast<size_t>(gTileWindowWidth) * gTileWindowHeight,
-        std::numeric_limits<double>::infinity());
+    static std::vector<TileFirstPersonDoorCapSpan> doorCapDepths;
+    doorCapDepths.assign(gTileWindowWidth, TileFirstPersonDoorCapSpan {});
     bool hasDoorCaps = false;
     static std::vector<double> actorDepths;
     static std::vector<unsigned int> actorDepthStamps;
@@ -1329,6 +1404,12 @@ static void tileRenderFirstPersonPreview()
         std::fill(actorDepthStamps.begin(), actorDepthStamps.end(), 0);
         actorDepthStamp = 1;
     }
+
+    // Solid walls and window sills cover a continuous span from the horizon
+    // down to their floor edge. Door caps end above the floor and do not hide
+    // it. Record actual raster bounds so floor clipping agrees at every edge.
+    static std::vector<int> floorOcclusionBottoms;
+    floorOcclusionBottoms.assign(gTileWindowWidth, horizonY);
 
     const unsigned int wallStart = profileFrame ? getTicks() : 0;
     for (int x = 0; x < gTileWindowWidth; x++) {
@@ -1559,6 +1640,9 @@ static void tileRenderFirstPersonPreview()
                 static_cast<int>(ceil(unclippedWallTop)));
             const int wallBottom = std::min(gTileWindowHeight - 1,
                 static_cast<int>(floor(type == 5 ? doorSplitY : floorY)));
+            if (wallTop <= horizonY + 1 && wallBottom >= horizonY + 1) {
+                floorOcclusionBottoms[x] = std::max(floorOcclusionBottoms[x], wallBottom);
+            }
             const double hitWorldX = cameraX + rayDirectionX * distance;
             const double hitWorldY = cameraY + rayDirectionY * distance;
             const double wallCoordinate = orientation == TILE_FIRST_PERSON_WALL_ORIENTATION_NORTH_SOUTH
@@ -1574,8 +1658,13 @@ static void tileRenderFirstPersonPreview()
             const double textureHeight = std::max(1.0, projectedWallHeight);
             const int faceShade = wallSide == 0 ? 116 : 96;
             const int distanceShade = std::min(48, static_cast<int>(distance * 7.0));
-            const int light = std::max(48, faceShade - distanceShade);
+            const int light = std::max(48, faceShade - distanceShade)
+                * ambientIntensity / LIGHT_INTENSITY_MAX;
             const int wallRenderStep = type == 3 || type == 5 ? 1 : 2;
+            if (type == 5 && wallTop <= wallBottom) {
+                hasDoorCaps = true;
+                doorCapDepths[x] = { wallTop, wallBottom + 1, distance };
+            }
             for (int y = wallTop; y <= wallBottom; y += wallRenderStep) {
                 const bool brickTexture = type != 3 || y < doorSplitY;
                 const auto& texture = brickTexture
@@ -1590,22 +1679,14 @@ static void tileRenderFirstPersonPreview()
                 int textureY = static_cast<int>(
                     textureOffset * kFirstPersonWallTextureSize / textureScaleHeight);
                 textureY %= kFirstPersonWallTextureSize;
-                const Color texel = texture[textureY * kFirstPersonWallTextureSize + textureX];
+                const int textureIndex = textureY * kFirstPersonWallTextureSize + textureX;
+                const Color texel = brickTexture && useCaveWallTexture
+                    ? gFirstPersonCaveWallTexture[textureIndex]
+                    : texture[textureIndex];
                 const unsigned char color = intensityColorTable[texel][light];
                 gTileWindowBuffer[y * gTileWindowPitch + x] = color;
-                if (type == 5) {
-                    hasDoorCaps = true;
-                    const size_t depthIndex = static_cast<size_t>(y) * gTileWindowWidth + x;
-                    doorCapDepths[depthIndex] = std::min(doorCapDepths[depthIndex], distance);
-                }
                 if (wallRenderStep == 2 && y + 1 <= wallBottom) {
                     gTileWindowBuffer[(y + 1) * gTileWindowPitch + x] = color;
-                    if (type == 5) {
-                        const size_t depthIndex =
-                            static_cast<size_t>(y + 1) * gTileWindowWidth + x;
-                        doorCapDepths[depthIndex] =
-                            std::min(doorCapDepths[depthIndex], distance);
-                    }
                 }
             }
         };
@@ -1624,6 +1705,71 @@ static void tileRenderFirstPersonPreview()
     }
 
     const unsigned int wallEnd = profileFrame ? getTicks() : 0;
+
+    const unsigned int floorStart = profileFrame ? getTicks() : 0;
+    constexpr int kFloorRenderStep = 2;
+    for (int y = horizonY + 1; y < gTileWindowHeight; y += kFloorRenderStep) {
+        const double rowDistance = (gTileWindowHeight * 0.5) / (y - horizonY);
+        double worldX = cameraX + rayDirectionXs[0] * rowDistance;
+        double worldY = cameraY + rayDirectionYs[0] * rowDistance;
+        const double worldXStep = gTileWindowWidth > 1
+            ? (rayDirectionXs[std::min(kFloorRenderStep, gTileWindowWidth - 1)]
+                    - rayDirectionXs[0]) * rowDistance
+            : 0.0;
+        const double worldYStep = gTileWindowWidth > 1
+            ? (rayDirectionYs[std::min(kFloorRenderStep, gTileWindowWidth - 1)]
+                    - rayDirectionYs[0]) * rowDistance
+            : 0.0;
+        for (int x = 0; x < gTileWindowWidth; x += kFloorRenderStep) {
+            const int blockBottom = std::min(gTileWindowHeight, y + kFloorRenderStep);
+            const int blockRight = std::min(gTileWindowWidth, x + kFloorRenderStep);
+            int coveredThrough = floorOcclusionBottoms[x];
+            for (int blockX = x + 1; blockX < blockRight; blockX++) {
+                coveredThrough = std::min(coveredThrough, floorOcclusionBottoms[blockX]);
+            }
+            if (blockBottom - 1 <= coveredThrough) {
+                // Preserve the original incremental coordinates even when a
+                // sample is skipped, avoiding texture shifts at wall edges.
+                worldX += worldXStep;
+                worldY += worldYStep;
+                continue;
+            }
+            const int mapX = static_cast<int>(floor(worldX));
+            const int mapY = static_cast<int>(floor(worldY));
+            if (mapX < 0 || mapX >= SQUARE_GRID_WIDTH
+                || mapY < 0 || mapY >= SQUARE_GRID_HEIGHT) {
+                worldX += worldXStep;
+                worldY += worldYStep;
+                continue;
+            }
+
+            const int sampleX = std::min(kFloorCacheCellResolution - 1,
+                static_cast<int>((worldX - mapX) * kFloorCacheCellResolution));
+            const int sampleY = std::min(kFloorCacheCellResolution - 1,
+                static_cast<int>((worldY - mapY) * kFloorCacheCellResolution));
+            const int cacheIndex = (mapY * SQUARE_GRID_WIDTH + mapX) * kFloorCacheCellArea
+                + sampleY * kFloorCacheCellResolution + sampleX;
+            const unsigned char color = intensityColorTable[
+                cachedFloorColors[cacheIndex]][ambientIntensityIndex];
+            for (int blockY = y;
+                 blockY < blockBottom;
+                 blockY++) {
+                for (int blockX = x;
+                     blockX < blockRight;
+                     blockX++) {
+                    // Partially covered blocks retain the same sample, but
+                    // must not overwrite wall pixels drawn earlier.
+                    if (blockY > floorOcclusionBottoms[blockX]) {
+                        gTileWindowBuffer[blockY * gTileWindowPitch + blockX] = color;
+                    }
+                }
+            }
+            worldX += worldXStep;
+            worldY += worldYStep;
+        }
+    }
+
+    const unsigned int floorEnd = profileFrame ? getTicks() : 0;
     TileFirstPersonExitGridRenderContext exitGridContext = {
         gElevation,
         cameraX,
@@ -1636,7 +1782,7 @@ static void tileRenderFirstPersonPreview()
         horizonY,
         &wallDepths,
         &wallSillDepths,
-        &doorCapDepths,
+        hasDoorCaps ? &doorCapDepths : nullptr,
     };
     tileFirstPersonRenderExitGridMarkers(gFirstPersonPreviewExitGridTiles, &exitGridContext);
 
@@ -1652,8 +1798,7 @@ static void tileRenderFirstPersonPreview()
         horizonY,
         &wallDepths,
         &wallSillDepths,
-        &doorCapDepths,
-        hasDoorCaps,
+        hasDoorCaps ? &doorCapDepths : nullptr,
         &actorDepths,
         &actorDepthStamps,
         actorDepthStamp,
@@ -1667,8 +1812,24 @@ static void tileRenderFirstPersonPreview()
     tileRenderFirstPersonTopologyOverlay();
 
     if (profileFrame) {
+        const unsigned int frameEnd = getTicks();
+        const unsigned int totalMs = getTicksBetween(frameEnd, frameStart);
+        const unsigned int floorMs = getTicksBetween(floorEnd, floorStart);
+        const unsigned int wallMs = getTicksBetween(wallEnd, wallStart);
+        const unsigned int actorMs = getTicksBetween(actorEnd, actorStart);
+        // Averages hide isolated doorway hitches. Include setup/cache and
+        // overlay time, which are outside the three raster/submission stages.
+        if (totalMs >= 50) {
+            debugPrint("F11 slow frame: tick=%u tile=%d elevation=%d total=%u setup=%u cache=%u rebuilt=%d floor=%u wall=%u actors=%u overlay=%u ms\n",
+                frameEnd, gDude != nullptr ? gDude->tile : -1,
+                static_cast<int>(gElevation), totalMs,
+                getTicksBetween(wallStart, frameStart),
+                getTicksBetween(floorCacheEnd, floorCacheStart),
+                floorLayoutChanged ? 1 : 0, floorMs, wallMs, actorMs,
+                getTicksBetween(frameEnd, actorEnd));
+        }
         gFirstPersonPreviewProfileFrames++;
-        gFirstPersonPreviewProfileTotalMs += getTicksBetween(getTicks(), frameStart);
+        gFirstPersonPreviewProfileTotalMs += totalMs;
         gFirstPersonPreviewProfileFloorMs += getTicksBetween(floorEnd, floorStart);
         gFirstPersonPreviewProfileWallMs += getTicksBetween(wallEnd, wallStart);
         gFirstPersonPreviewProfileActorMs += getTicksBetween(actorEnd, actorStart);
@@ -1872,14 +2033,16 @@ static double tileFirstPersonGetWallDepthAt(
     int horizonY,
     const std::vector<double>* wallDepths,
     const std::vector<double>* wallSillDepths,
-    const std::vector<double>* doorCapDepths)
+    const std::vector<TileFirstPersonDoorCapSpan>* doorCapDepths)
 {
     double depth = y < horizonY
         ? (*wallDepths)[x]
         : std::min((*wallDepths)[x], (*wallSillDepths)[x]);
     if (doorCapDepths != nullptr) {
-        const size_t depthIndex = static_cast<size_t>(y) * gTileWindowWidth + x;
-        depth = std::min(depth, (*doorCapDepths)[depthIndex]);
+        const TileFirstPersonDoorCapSpan& cap = (*doorCapDepths)[x];
+        if (y >= cap.top && y < cap.bottom) {
+            depth = std::min(depth, cap.depth);
+        }
     }
     return depth;
 }
@@ -2124,51 +2287,9 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
             : ROTATION_NE;
     }
     if (objectType != OBJ_TYPE_CRITTER) {
-        static std::array<std::array<std::array<double, 2>, ROTATION_COUNT>, 2> facingDirections {};
-        static int facingDirectionsGridWidth = 0;
-        if (facingDirectionsGridWidth != gHexGridWidth) {
-            for (int parity = 0; parity < 2; parity++) {
-                const int referenceTile = gHexGridWidth * 2 + 2 + parity;
-                double referenceX;
-                double referenceY;
-                if (!tileFirstPersonGetWorldPosition(referenceTile, &referenceX, &referenceY)) {
-                    continue;
-                }
-                for (int rotationIndex = ROTATION_FIRST; rotationIndex < ROTATION_COUNT; rotationIndex++) {
-                    const Rotation rotation = static_cast<Rotation>(rotationIndex);
-                    const int adjacentTile = tileGetTileInDirection(referenceTile, rotation, 1);
-                    double adjacentX;
-                    double adjacentY;
-                    if (!tileFirstPersonGetWorldPosition(adjacentTile, &adjacentX, &adjacentY)) {
-                        continue;
-                    }
-
-                    const double directionX = adjacentX - referenceX;
-                    const double directionY = adjacentY - referenceY;
-                    const double directionLength = sqrt(directionX * directionX + directionY * directionY);
-                    if (directionLength > 0.0) {
-                        facingDirections[parity][rotationIndex] = {
-                            directionX / directionLength,
-                            directionY / directionLength,
-                        };
-                    }
-                }
-            }
-            facingDirectionsGridWidth = gHexGridWidth;
-        }
-
-        const double viewX = renderContext->cameraX - objectX;
-        const double viewY = renderContext->cameraY - objectY;
-        double bestDot = -std::numeric_limits<double>::infinity();
-        const int parity = (object->tile % gHexGridWidth) & 1;
-        for (int rotationIndex = ROTATION_FIRST; rotationIndex < ROTATION_COUNT; rotationIndex++) {
-            const double dot = facingDirections[parity][rotationIndex][0] * viewX
-                + facingDirections[parity][rotationIndex][1] * viewY;
-            if (dot > bestDot) {
-                bestDot = dot;
-                facingRotation = static_cast<Rotation>(rotationIndex);
-            }
-        }
+        facingRotation = tileFirstPersonGetRotationToward(object->tile,
+            renderContext->cameraX,
+            renderContext->cameraY);
     }
 
     const double projectionScale = gTileWindowHeight / transformY;
@@ -2215,9 +2336,19 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
             isTinyScenery = cachedProfile->second.tiny;
         } else {
         isTinyScenery = sceneryProtoId == SceneryProtoTypeId::SmallBowl
+        || sceneryProtoId == SceneryProtoTypeId::TempleRubble
         || sceneryProtoId == SceneryProtoTypeId::Rubble1
         || sceneryProtoId == SceneryProtoTypeId::Rocks
+        || sceneryProtoId == SceneryProtoTypeId::RocksAlt9
         || sceneryProtoId == static_cast<SceneryProtoTypeId>(91)
+        || sceneryProtoId == static_cast<SceneryProtoTypeId>(429)
+        || sceneryProtoId == static_cast<SceneryProtoTypeId>(430)
+        || sceneryProtoId == static_cast<SceneryProtoTypeId>(432)
+        
+        || sceneryProtoId == SceneryProtoTypeId::Unknown1;
+
+        isMediumScenery = sceneryProtoId == SceneryProtoTypeId::Mailbox
+        || sceneryProtoId == SceneryProtoTypeId::FireHydrant
         || sceneryProtoId == SceneryProtoTypeId::RocksAlt
         || sceneryProtoId == SceneryProtoTypeId::RocksAlt2
         || sceneryProtoId == SceneryProtoTypeId::RocksAlt3
@@ -2225,18 +2356,25 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         || sceneryProtoId == SceneryProtoTypeId::RocksAlt5
         || sceneryProtoId == SceneryProtoTypeId::RocksAlt6
         || sceneryProtoId == SceneryProtoTypeId::RocksAlt7
-        || sceneryProtoId == static_cast<SceneryProtoTypeId>(429)
-        || sceneryProtoId == static_cast<SceneryProtoTypeId>(430)
-        || sceneryProtoId == static_cast<SceneryProtoTypeId>(432)
+        || sceneryProtoId == SceneryProtoTypeId::RocksAlt8
+        || sceneryProtoId == SceneryProtoTypeId::RocksAlt11
+        || sceneryProtoId == SceneryProtoTypeId::BedAlt10
+        || sceneryProtoId == SceneryProtoTypeId::BedAlt9
+        || sceneryProtoId == SceneryProtoTypeId::OldMattressAlt
+        || sceneryProtoId == SceneryProtoTypeId::Bed
+
+
+        || sceneryProtoId == static_cast<SceneryProtoTypeId>(435)
         || sceneryProtoId == static_cast<SceneryProtoTypeId>(433)
-        || sceneryProtoId == static_cast<SceneryProtoTypeId>(435);
+        || sceneryProtoId == static_cast<SceneryProtoTypeId>(947)
+        || sceneryProtoId == static_cast<SceneryProtoTypeId>(278)
 
-        isMediumScenery = sceneryProtoId == SceneryProtoTypeId::Mailbox
-        || sceneryProtoId == SceneryProtoTypeId::FireHydrant;
 
-        isWideScenery = sceneryProtoId == SceneryProtoTypeId::Bed
+        || sceneryProtoId == SceneryProtoTypeId::RocksAlt12;
 
-        || sceneryProtoId == SceneryProtoTypeId::BucknerHouseSign
+
+
+        isWideScenery = sceneryProtoId == SceneryProtoTypeId::BucknerHouseSign
 
 
         || sceneryProtoId == SceneryProtoTypeId::Stove
@@ -2246,7 +2384,6 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         || sceneryProtoId == SceneryProtoTypeId::TableAlt12
         || sceneryProtoId == SceneryProtoTypeId::TableAlt13
 
-        || sceneryProtoId == SceneryProtoTypeId::OldMattressAlt
 
         || sceneryProtoId == SceneryProtoTypeId::Desk
         || sceneryProtoId == SceneryProtoTypeId::DeskAlt
@@ -2417,13 +2554,14 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
             std::max(1, static_cast<int>(gTileWindowHeight * 0.8)),
             projectedActorHeight)
         : projectedActorHeight;
+    const double critterBottomLeeway = isDeadCritter ? 0.5 : 0.2;
     const int projectedActorBottom = renderContext->horizonY
         + static_cast<int>(projectionScale * 0.5);
     const int actorBottom = isRock
         ? projectedActorBottom + std::max(20, actorHeight / 3)
         : objectType == OBJ_TYPE_CRITTER
             ? std::min(
-                gTileWindowHeight + static_cast<int>(actorHeight * 0.20),
+                gTileWindowHeight + static_cast<int>(actorHeight * critterBottomLeeway),
                 projectedActorBottom)
         : projectedActorBottom;
 
@@ -2548,19 +2686,23 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
             bool hasVisibleColumn = false;
             const int clippedOpaqueTop = std::max(0, opaqueTop);
             const int clippedOpaqueBottom = std::min(gTileWindowHeight, opaqueBottom);
+            // Within each horizon band, wall depth is constant vertically and
+            // a door cap is one contiguous interval. If neither endpoint is
+            // visible, the entire band is hidden; no per-pixel scan is needed.
+            const auto bandVisible = [&](int x, int top, int bottom) {
+                return top < bottom
+                    && (transformY < tileFirstPersonGetWallDepthAt(x, top,
+                            renderContext->horizonY, renderContext->wallDepths,
+                            renderContext->wallSillDepths, renderContext->doorCapDepths)
+                        || transformY < tileFirstPersonGetWallDepthAt(x, bottom - 1,
+                            renderContext->horizonY, renderContext->wallDepths,
+                            renderContext->wallSillDepths, renderContext->doorCapDepths));
+            };
             for (int x = firstOpaqueColumn; x < lastColumn; x++) {
-                for (int y = clippedOpaqueTop; y < clippedOpaqueBottom; y++) {
-                    if (transformY < tileFirstPersonGetWallDepthAt(
-                            x,
-                            y,
-                            renderContext->horizonY,
-                            renderContext->wallDepths,
-                            renderContext->wallSillDepths,
-                            renderContext->doorCapDepths)) {
-                        hasVisibleColumn = true;
-                        break;
-                    }
-                }
+                hasVisibleColumn = bandVisible(x, clippedOpaqueTop,
+                                       std::min(clippedOpaqueBottom, renderContext->horizonY))
+                    || bandVisible(x, std::max(clippedOpaqueTop, renderContext->horizonY),
+                        clippedOpaqueBottom);
                 if (hasVisibleColumn) {
                     break;
                 }
@@ -2582,20 +2724,65 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                 if (top >= bottom) {
                     return;
                 }
-                std::vector<SDL_Rect> activeClips;
-                for (int y = top; y < bottom; y++) {
-                    std::vector<SDL_Rect> nextClips;
-                    std::vector<bool> retained(activeClips.size(), false);
+                bool overlapsDoorCap = false;
+                static BillboardClipBands clipBands;
+                clipBands.reset(top, bottom);
+                if (renderContext->doorCapDepths != nullptr) {
+                    for (int x = firstOpaqueColumn; x < lastColumn; x++) {
+                        const TileFirstPersonDoorCapSpan& cap = (*renderContext->doorCapDepths)[x];
+                        if (cap.top < cap.bottom && cap.top < bottom && cap.bottom > top
+                            && transformY >= cap.depth) {
+                            overlapsDoorCap = true;
+                            clipBands.addOccluder(cap.top, cap.bottom);
+                        }
+                    }
+                }
+                if (!overlapsDoorCap) {
+                    // Each call stays on one side of the horizon. Visibility
+                    // therefore depends only on x; merge adjacent columns into
+                    // full-height clips without allocating vectors per row.
+                    int runStart = firstOpaqueColumn;
+                    bool inRun = false;
+                    for (int x = firstOpaqueColumn; x <= lastColumn; x++) {
+                        const bool visible = x < lastColumn
+                            && transformY < (top < renderContext->horizonY
+                                    ? (*renderContext->wallDepths)[x]
+                                    : std::min((*renderContext->wallDepths)[x],
+                                          (*renderContext->wallSillDepths)[x]));
+                        if (visible && !inRun) {
+                            runStart = x;
+                            inRun = true;
+                        } else if (!visible && inRun) {
+                            const SDL_Rect clip = { runStart, top, x - runStart, bottom - top };
+                            gpuBillboardSubmit(frame.data, frame.width, frame.height,
+                                destination, clip, transformY);
+                            inRun = false;
+                        }
+                    }
+                    return;
+                }
+                // Depth is unchanged between cap edges. Scan each distinct
+                // band once instead of repeating the same work on every row.
+                const std::vector<int>& boundaries = clipBands.boundaries();
+                static std::vector<SDL_Rect> activeClips;
+                static std::vector<SDL_Rect> nextClips;
+                static std::vector<bool> retained;
+                activeClips.clear();
+                for (size_t band = 0; band + 1 < boundaries.size(); band++) {
+                    const int y = boundaries[band];
+                    const int bandHeight = boundaries[band + 1] - y;
+                    nextClips.clear();
+                    retained.assign(activeClips.size(), false);
                     int runStart = firstOpaqueColumn;
                     bool inRun = false;
                     const auto finishRun = [&](int runEnd) {
-                        SDL_Rect clip = { runStart, y, runEnd - runStart, 1 };
+                        SDL_Rect clip = { runStart, y, runEnd - runStart, bandHeight };
                         for (size_t index = 0; index < activeClips.size(); index++) {
                             SDL_Rect& active = activeClips[index];
                             if (!retained[index]
                                 && active.x == clip.x && active.w == clip.w
                                 && active.y + active.h == y) {
-                                active.h++;
+                                active.h += bandHeight;
                                 nextClips.push_back(active);
                                 retained[index] = true;
                                 return;
@@ -2829,6 +3016,64 @@ static bool tileFirstPersonGetWorldPosition(int tile, double* x, double* y)
     *x = (gHexGridWidth - 1 - tile % gHexGridWidth) / 2.0 + 0.25;
     *y = (tile / gHexGridWidth) / 2.0 + 0.25;
     return true;
+}
+
+static Rotation tileFirstPersonGetRotationToward(int tile, double targetX, double targetY)
+{
+    static std::array<std::array<std::array<double, 2>, ROTATION_COUNT>, 2> facingDirections {};
+    static int facingDirectionsGridWidth = 0;
+    if (facingDirectionsGridWidth != gHexGridWidth) {
+        for (int parity = 0; parity < 2; parity++) {
+            const int referenceTile = gHexGridWidth * 2 + 2 + parity;
+            double referenceX;
+            double referenceY;
+            if (!tileFirstPersonGetWorldPosition(referenceTile, &referenceX, &referenceY)) {
+                continue;
+            }
+            for (int rotationIndex = ROTATION_FIRST; rotationIndex < ROTATION_COUNT; rotationIndex++) {
+                const Rotation rotation = static_cast<Rotation>(rotationIndex);
+                const int adjacentTile = tileGetTileInDirection(referenceTile, rotation, 1);
+                double adjacentX;
+                double adjacentY;
+                if (!tileFirstPersonGetWorldPosition(adjacentTile, &adjacentX, &adjacentY)) {
+                    continue;
+                }
+
+                const double directionX = adjacentX - referenceX;
+                const double directionY = adjacentY - referenceY;
+                const double directionLength = sqrt(directionX * directionX + directionY * directionY);
+                if (directionLength > 0.0) {
+                    facingDirections[parity][rotationIndex] = {
+                        directionX / directionLength,
+                        directionY / directionLength,
+                    };
+                }
+            }
+        }
+        facingDirectionsGridWidth = gHexGridWidth;
+    }
+
+    double objectX;
+    double objectY;
+    if (!tileFirstPersonGetWorldPosition(tile, &objectX, &objectY)) {
+        return ROTATION_NE;
+    }
+
+    const double viewX = targetX - objectX;
+    const double viewY = targetY - objectY;
+    double bestDot = -std::numeric_limits<double>::infinity();
+    Rotation facingRotation = ROTATION_NE;
+    const int parity = (tile % gHexGridWidth) & 1;
+    for (int rotationIndex = ROTATION_FIRST; rotationIndex < ROTATION_COUNT; rotationIndex++) {
+        const double dot = facingDirections[parity][rotationIndex][0] * viewX
+            + facingDirections[parity][rotationIndex][1] * viewY;
+        if (dot > bestDot) {
+            bestDot = dot;
+            facingRotation = static_cast<Rotation>(rotationIndex);
+        }
+    }
+
+    return facingRotation;
 }
 
 static double tileFirstPersonPreviewGetYaw()
@@ -3606,8 +3851,24 @@ bool tileFirstPersonPreviewIsEnabled()
     return gFirstPersonPreviewEnabled;
 }
 
+Rotation tileFirstPersonPreviewGetFacingRotation(int tile)
+{
+    if (!gFirstPersonPreviewEnabled
+        || gDude == nullptr
+        || !tileIsValid(gDude->tile)
+        || !tileIsValid(tile)) {
+        return ROTATION_NE;
+    }
+
+    double cameraX;
+    double cameraY;
+    tileFirstPersonGetCameraPosition(gDude->tile, gDude->elevation, &cameraX, &cameraY);
+    return tileFirstPersonGetRotationToward(tile, cameraX, cameraY);
+}
+
 static Object* tileFirstPersonPreviewPickCritterAtPosition(int x, int y)
 {
+    tileFirstPersonPreviewFlushRefresh();
     if (!gFirstPersonPreviewEnabled
         || x < 0
         || x >= gTileWindowWidth
@@ -3678,6 +3939,7 @@ Object* tileFirstPersonPreviewPickCritterAt(int screenX, int screenY)
 
 Object* tileFirstPersonPreviewPickObjectAt(int screenX, int screenY)
 {
+    tileFirstPersonPreviewFlushRefresh();
     if (!gFirstPersonPreviewEnabled
         || gFirstPersonPreviewWallDepths.size() != static_cast<size_t>(gTileWindowWidth)) {
         return nullptr;
@@ -3746,6 +4008,7 @@ Object* tileFirstPersonPreviewPickObjectAt(int screenX, int screenY)
 
 Object* tileFirstPersonPreviewPickDoorAt(int screenX, int screenY)
 {
+    tileFirstPersonPreviewFlushRefresh();
     if (!gFirstPersonPreviewEnabled
         || gFirstPersonPreviewWallDepths.size() != static_cast<size_t>(gTileWindowWidth)) {
         return nullptr;
@@ -3786,6 +4049,7 @@ Object* tileFirstPersonPreviewPickDoorAt(int screenX, int screenY)
 
 int tileFirstPersonPreviewPickGroundTileAt(int screenX, int screenY)
 {
+    tileFirstPersonPreviewFlushRefresh();
     constexpr double kPi = 3.14159265358979323846;
     constexpr double kFieldOfViewScale = 0.66;
     if (!gFirstPersonPreviewEnabled
@@ -3949,19 +4213,39 @@ void tileFirstPersonPreviewProcessPendingMove()
     tileFirstPersonPreviewMove(direction);
 }
 
+void tileFirstPersonPreviewRequestRefresh()
+{
+    if (gFirstPersonPreviewEnabled && !gFirstPersonPreviewTopologyRendering) {
+        gFirstPersonPreviewRefreshPending = true;
+    }
+}
+
+void tileFirstPersonPreviewFlushRefresh()
+{
+    if (gFirstPersonPreviewRefreshPending) {
+        tileFirstPersonPreviewRefresh();
+    }
+}
+
 void tileFirstPersonPreviewRefresh()
 {
     if (!gFirstPersonPreviewEnabled || gFirstPersonPreviewTopologyRendering
+        || gFirstPersonPreviewRefreshing
         || gTileWindowBuffer == nullptr || gTileWindowRefreshProc == nullptr) {
         return;
     }
 
+    // Consume before rendering so any new invalidation is retained. Guard
+    // against recursive flushes from window/cursor composition callbacks.
+    gFirstPersonPreviewRefreshPending = false;
+    gFirstPersonPreviewRefreshing = true;
     tileRenderFirstPersonPreview();
     gTileWindowRefreshProc(&gTileWindowRect);
     gpuBillboardMarkSceneComplete();
     if (!cursorIsHidden()) {
         mouseShowCursor();
     }
+    gFirstPersonPreviewRefreshing = false;
 }
 
 void tileFirstPersonPreviewRefreshCombat()
@@ -4018,7 +4302,7 @@ void tileFirstPersonPreviewLook(int deltaX)
     }
     gFirstPersonPreviewYawTurning = false;
 
-    tileFirstPersonPreviewRefresh();
+    tileFirstPersonPreviewRequestRefresh();
 }
 
 void tileFirstPersonPreviewTurnToTile(int tile)
@@ -4071,6 +4355,7 @@ void tileFirstPersonPreviewToggle()
         tileFirstPersonPreviewResetForModeRefresh();
         tileFirstPersonPreviewRefresh();
     } else {
+        gFirstPersonPreviewRefreshPending = false;
         gpuBillboardClear();
         tileRefreshGame(&gTileWindowRect, gElevation);
     }
@@ -4706,12 +4991,25 @@ static void roof_fill_off_process_task(std::stack<roof_fill_task>& tasks_stack, 
 // 0x4B23D4 tile_fill_roof
 void tile_fill_roof(int x, int y, MapElevation elevation, bool on)
 {
+    const bool profileRoof = gFirstPersonPreviewEnabled && settings.debug.show_fps;
+    const unsigned int start = profileRoof ? getTicks() : 0;
+    unsigned int visitedTasks = 0;
     std::stack<roof_fill_task> tasks_stack;
 
     roof_fill_push_task_if_in_bounds(tasks_stack, x, y);
 
     while (!tasks_stack.empty()) {
         roof_fill_off_process_task(tasks_stack, elevation, on);
+        if (profileRoof) {
+            visitedTasks++;
+        }
+    }
+    if (profileRoof) {
+        const unsigned int end = getTicks();
+        debugPrint("F11 roof fill: tick=%u tile=%d elevation=%d square=(%d,%d) visible=%d tasks=%u ms=%u\n",
+            end, gDude != nullptr ? gDude->tile : -1,
+            static_cast<int>(elevation), x, y, on ? 1 : 0,
+            visitedTasks, getTicksBetween(end, start));
     }
 }
 
