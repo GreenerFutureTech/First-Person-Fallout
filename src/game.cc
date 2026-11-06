@@ -557,7 +557,7 @@ void gameExit()
     sfallConfigExit();
 }
 
-void gameHandleFirstPersonPreviewInput(int eventCode)
+void gameHandleFirstPersonPreviewInput()
 {
     if (!tileFirstPersonPreviewIsEnabled()) {
         return;
@@ -584,16 +584,18 @@ void gameHandleFirstPersonPreviewInput(int eventCode)
         mouseHideCursor();
     }
 
+    const bool shiftHeld = gPressedPhysicalKeys[SDL_SCANCODE_LSHIFT] != KEY_STATE_UP
+        || gPressedPhysicalKeys[SDL_SCANCODE_RSHIFT] != KEY_STATE_UP;
+    if (gFirstPersonPreviewMouseReleased != shiftHeld) {
+        gameFirstPersonPreviewSetMouseReleased(shiftHeld);
+    }
+
     if (mouseDeviceUsesRelativeMode()) {
         int deltaX;
         int deltaY;
         mouseDeviceGetRelativeMotion(&deltaX, &deltaY);
         (void)deltaY;
         tileFirstPersonPreviewLook(static_cast<int>(deltaX * settings.preferences.mouse_sensitivity));
-    }
-
-    if (eventCode == INPUT_EVENT_FIRST_PERSON_RIGHT_CLICK) {
-        gameFirstPersonPreviewSetMouseReleased(!gFirstPersonPreviewMouseReleased);
     }
 }
 
@@ -904,7 +906,7 @@ private:
 
 int gameHandleKey(int eventCode, bool isInCombatMode)
 {
-    gameHandleFirstPersonPreviewInput(eventCode);
+    gameHandleFirstPersonPreviewInput();
 
     if (tileFirstPersonPreviewIsEnabled()
         && eventCode == -1

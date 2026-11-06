@@ -3242,7 +3242,8 @@ void _combat_turn_run()
         // first-person camera controls while their animations are playing.
         // Other events are intentionally discarded: the player cannot act
         // until COMBAT_STATE_PLAYER_TURN is set again.
-        gameHandleFirstPersonPreviewInput(inputGetInput());
+        inputGetInput();
+        gameHandleFirstPersonPreviewInput();
 
         if (tileFirstPersonPreviewIsEnabled()) {
             tileFirstPersonPreviewRequestRefresh();
@@ -3531,7 +3532,8 @@ static void waitForGorisAnimation(Object* critter)
 {
     while (animationIsBusy(critter)) {
         sharedFpsLimiter.mark();
-        gameHandleFirstPersonPreviewInput(inputGetInput());
+        inputGetInput();
+        gameHandleFirstPersonPreviewInput();
         renderPresent();
         sharedFpsLimiter.throttle();
     }

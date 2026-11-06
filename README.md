@@ -151,7 +151,7 @@ $ mv fallout2 /Applications/Fallout2
 > **NOTE**: Fallout 2 was designed with mouse in mind. There are many controls that require precise cursor positioning, which is not possible with fingers. Current control scheme resembles trackpad usage:
 - One finger moves mouse cursor around.
 - Tap one finger for left mouse click.
-- Tap two fingers for right mouse click (switches mouse cursor mode).
+- Tap two fingers for right mouse click (cycles cursor mode outside F11; hold Shift for cursor mode in F11).
 - Move two fingers to scroll current view (map view, worldmap view, inventory scrollers).
 
 > **NOTE**: From Android standpoint release and debug builds are different apps. Both apps require their own copy of game assets and have their own savegames. This is intentional. As a gamer just stick with release version and check for updates.
@@ -179,7 +179,8 @@ $ mv fallout2 /Applications/Fallout2
 **Controls on iPad:**
 
 - One-finger tap → left click; hold → left button held.
-- Two-finger tap → right click (cycles cursor mode between walk and attack).
+- Two-finger tap → right click (cycles cursor mode between walk and attack outside F11).
+- Hold Shift → cursor mode in F11; release Shift to return to viewing mode.
 - One-finger drag → scroll map / windows.
 - Two-finger drag → mouse wheel.
 - **Three-finger swipe down → ESC** (opens options / main menu).
