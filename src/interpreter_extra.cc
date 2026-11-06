@@ -1,3 +1,6 @@
+#include "presenter.h"
+#include "server_loop.h"
+#include "server_players.h"
 #include "interpreter_extra.h"
 
 #include <limits.h>
@@ -52,6 +55,9 @@
 #include "worldmap.h"
 
 namespace fallout {
+
+static void scriptRelocateOtherPlayerActors(Object* mover, int tile, int elevation);
+
 
 typedef enum ScriptError {
     SCRIPT_ERROR_NOT_IMPLEMENTED,
@@ -470,7 +476,33 @@ static void opGiveExpPoints(Program* program)
 {
     int xp = programStackPopInteger(program);
 
-    if (pcAddExperience(xp) != 0) {
+    // A destination map-enter is the completion edge for a group transition: all
+    // players captured as making that transition receive the authored story XP.
+    // This audience exists only during mapLoad's map-enter procs; dialog, skill,
+    // object-use and every other bare opcode retain their single acting subject.
+    unsigned int audience = mapTransitionXpAudienceMask();
+    if (audience != 0) {
+        bool failed = false;
+        for (int slot = 0; slot < playerActorCount(); slot++) {
+            if ((audience & (1u << slot)) == 0) {
+                continue;
+            }
+            Object* actor = playerActorAt(slot);
+            if (actor != nullptr && pcAddExperience(xp, nullptr, actor) != 0) {
+                failed = true;
+            }
+        }
+        if (failed) {
+            scriptError("\nScript Error: %s: op_give_exp_points: stat_pc_set failed", program->name);
+        }
+        return;
+    }
+
+    // THE one legitimate scriptContextDude site for XP (PLAYER_SHEET_DESIGN.md
+    // §4). A bare opcode has no object in scope, so "who did this" genuinely has
+    // to be the script's notion of the player — unlike the kill / skill-use /
+    // steal sites, which all hold the real actor and must not guess by geometry.
+    if (pcAddExperience(xp, nullptr, scriptContextDude(program)) != 0) {
         scriptError("\nScript Error: %s: op_give_exp_points: stat_pc_set failed", program->name);
     }
 }
@@ -490,7 +522,7 @@ static void opPlaySfx(Program* program)
 {
     char* name = programStackPopString(program);
 
-    soundPlayFile(name);
+    presenter()->sfxPlay(name);
 }
 
 // set_map_start
@@ -546,7 +578,7 @@ static void opOverrideMapStart(Program* program)
         }
 
         tileSetCenter(tile, TILE_SET_CENTER_REFRESH_WINDOW);
-        tileWindowRefresh();
+        presenter()->worldInvalidate();
     }
 
     program->flags &= ~PROGRAM_FLAG_CHILD_CALL;
@@ -583,8 +615,10 @@ static void opUsingSkill(Program* program)
     // SKILL_SNEAK as arguments.
     int result = 0;
 
-    if (skill == SKILL_SNEAK && object == gDude) {
-        result = dudeHasState(DUDE_STATE_SNEAKING);
+    // Asks about the OBJECT the script named, so a script checking whether the
+    // player creeping past it is sneaking gets that player's answer, not slot 0's.
+    if (skill == SKILL_SNEAK && playerActorIs(object)) {
+        result = dudeHasState(DUDE_STATE_SNEAKING, object);
     }
 
     programStackPushInteger(program, result);
@@ -841,8 +875,11 @@ static void opMoveTo(Program* program)
             newTile = objectSetLocation(object, tile, elevation, &after);
             if (newTile != -1) {
                 rectUnion(&before, &after, &before);
-                tileWindowRefreshRect(&before, gElevation);
+                presenter()->worldInvalidateRect(&before, gElevation);
             }
+        }
+        if (newTile != -1) {
+            scriptRelocateOtherPlayerActors(object, tile, elevation);
         }
     } else {
         scriptPredefinedError(program, "move_to", SCRIPT_ERROR_OBJECT_IS_NULL);
@@ -882,7 +919,7 @@ static void opCreateObject(Program* program)
 
             Rect rect;
             if (objectSetLocation(object, tile, elevation, &rect) != -1) {
-                tileWindowRefreshRect(&rect, object->elevation);
+                presenter()->worldInvalidateRect(&rect, object->elevation);
             }
         }
     } else {
@@ -979,7 +1016,7 @@ static void opDestroyObject(Program* program)
 
         if (owner == gDude) {
             bool animated = !gameUiIsDisabled();
-            interfaceUpdateItems(animated, INTERFACE_ITEM_ACTION_DEFAULT, INTERFACE_ITEM_ACTION_DEFAULT);
+            presenter()->hudItems(animated, INTERFACE_ITEM_ACTION_DEFAULT, INTERFACE_ITEM_ACTION_DEFAULT);
         }
 
         _obj_connect(object, 1, ELEVATION_FIRST, nullptr);
@@ -996,7 +1033,7 @@ static void opDestroyObject(Program* program)
 
         Rect rect;
         objectDestroy(object, &rect);
-        tileWindowRefreshRect(&rect, gElevation);
+        presenter()->worldInvalidateRect(&rect, gElevation);
     }
 
     program->flags &= ~PROGRAM_FLAG_CHILD_CALL;
@@ -1011,7 +1048,7 @@ static void opDestroyObject(Program* program)
 static void opDisplayMsg(Program* program)
 {
     char* string = programStackPopString(program);
-    displayMonitorAddMessage(string);
+    presenter()->consoleMessage(string);
 
     if (settings.debug.show_script_messages) {
         debugPrint("\n%s", string);
@@ -1123,7 +1160,12 @@ static void opGetTarget(Program* program)
 // 0x4556CC op_dude_obj
 static void opGetDude(Program* program)
 {
-    programStackPushPointer(program, gDude);
+    // dude_obj. NOT plain gDude any more: on a dedicated server with several
+    // player actors this is the single mint point every script keys both its
+    // query AND its effect off, so hijacking it here is what makes passive NPC
+    // notice see extras at all (MP_PROPOSAL Ch 10.4 / Ch 19 OPEN-Q #1).
+    // Resolves to gDude everywhere else, byte-identically.
+    programStackPushPointer(program, scriptContextDude(program));
 }
 
 // NOTE: The implementation is the same as in [opGetTarget].
@@ -1223,6 +1265,18 @@ static void opSetGlobalVar(Program* program)
     ProgramValue value = programStackPopValue(program);
     GameGlobalVar variable = programStackPopEnum<GameGlobalVar>(program);
 
+    // F2_TRACE_GVAR=<index>: name the script that writes this global, and what it
+    // wrote. Investigation aid for "who moves gvar N on load" -- fprintf, not
+    // debugPrint, because neither f2_server nor the probe registers a debug proc.
+    if (const char* traceVar = getenv("F2_TRACE_GVAR")) {
+        if (atoi(traceVar) == variable) {
+            fprintf(stderr, "f2-trace: set_global_var %d = %d  by '%s'\n",
+                variable,
+                value.opcode == VALUE_TYPE_PTR ? 0 : value.integerValue,
+                program->name != nullptr ? program->name : "(unnamed)");
+        }
+    }
+
     if (gGameGlobalVarsLength != 0) {
         if (value.opcode == VALUE_TYPE_PTR) {
             gameSetGlobalPointer(variable, value.pointerValue);
@@ -1316,7 +1370,12 @@ static void opSetCritterStat(Program* program)
 
     int result = 0;
     if (object != nullptr) {
-        if (object == gDude) {
+        // Vanilla restricts this to the player; the N-actor reading of that
+        // restriction is ANY player actor, not the host alone. The body already
+        // operates on `object` — only the gate was pinned, so a script setting an
+        // extra's stat failed outright with "Can't modify anyone except
+        // obj_dude!" rather than doing anything.
+        if (playerActorIs(object)) {
             int currentValue = critterGetBaseStatWithTraitModifier(object, stat);
             critterSetBaseStat(object, stat, currentValue + value);
         } else {
@@ -1636,7 +1695,7 @@ static void opAddObjectToInventory(Program* program)
         if (itemAdd(owner, item, 1) == 0) {
             Rect rect;
             _obj_disconnect(item, &rect);
-            tileWindowRefreshRect(&rect, item->elevation);
+            presenter()->worldInvalidateRect(&rect, item->elevation);
         }
     } else {
         scriptPredefinedError(program, "add_obj_to_inven", SCRIPT_ERROR_FOLLOWS);
@@ -1677,7 +1736,7 @@ static void opRemoveObjectFromInventory(Program* program)
     if (itemRemoveWithReason(owner, item, 1, RemoveInventoryObjectHookReason::ItemRemoved) == 0) {
         Rect rect;
         _obj_connect(item, 1, ELEVATION_FIRST, &rect);
-        tileWindowRefreshRect(&rect, item->elevation);
+        presenter()->worldInvalidateRect(&rect, item->elevation);
 
         if (updateFlags) {
             correctFidForRemovedItem(owner, item, flags);
@@ -1713,18 +1772,25 @@ static void opWieldItem(Program* program)
     bool shouldAdjustArmorClass = false;
     Object* oldArmor = nullptr;
     Object* newArmor = nullptr;
-    if (critter == gDude) {
-        if (interfaceGetCurrentHand() == HAND_LEFT) {
-            hand = HAND_LEFT;
-        }
 
-        if (itemGetType(item) == ITEM_TYPE_ARMOR) {
-            oldArmor = critterGetArmor(gDude);
+    // Worn armour grants AC / damage-resistance / damage-threshold as BONUS STATS
+    // on the wearer, so equipping it must re-run adjustCritterStatsOnArmorChange for EVERY player actor
+    // (mirror of the fixed move_obj_inven_to_obj give-back). Gating this on gDude
+    // left an EXTRA visibly wearing armour with zero protection until re-equipped
+    // through the inventory screen — a combat-math error, not a cosmetic one.
+    if (playerActorIs(critter) && itemGetType(item) == ITEM_TYPE_ARMOR) {
+        oldArmor = critterGetArmor(critter);
 
-            // SFALL
-            shouldAdjustArmorClass = true;
-            newArmor = item;
-        }
+        // SFALL
+        shouldAdjustArmorClass = true;
+        newArmor = item;
+    }
+
+    // The current-hand read is the LOCAL player's interface state, so it stays the
+    // host's; an extra defaults to the right hand (irrelevant for armour, which
+    // occupies the armour slot regardless).
+    if (critter == gDude && interfaceGetCurrentHand() == HAND_LEFT) {
+        hand = HAND_LEFT;
     }
 
     if (inventoryEquip(critter, item, hand) == -1) {
@@ -1733,16 +1799,20 @@ static void opWieldItem(Program* program)
         return;
     }
 
+    // Stat give-back is every player actor's; the HUD repaint below is the host's
+    // screen only.
+    if (shouldAdjustArmorClass) {
+        adjustCritterStatsOnArmorChange(critter, oldArmor, newArmor);
+    }
+
     if (critter == gDude) {
         if (shouldAdjustArmorClass) {
-            adjustCritterStatsOnArmorChange(critter, oldArmor, newArmor);
-
             // SFALL
-            interfaceRenderArmorClass(false);
+            presenter()->hudArmorClass(false);
         }
 
         bool animated = !gameUiIsDisabled();
-        interfaceUpdateItems(animated, INTERFACE_ITEM_ACTION_DEFAULT, INTERFACE_ITEM_ACTION_DEFAULT);
+        presenter()->hudItems(animated, INTERFACE_ITEM_ACTION_DEFAULT, INTERFACE_ITEM_ACTION_DEFAULT);
     }
 }
 
@@ -1821,6 +1891,21 @@ static void opObjectCanSeeObject(Program* program)
         }
     } else {
         scriptPredefinedError(program, "obj_can_see_obj", SCRIPT_ERROR_OBJECT_IS_NULL);
+    }
+
+    // F2_TRACE_AGGRO: the perception DECISION POINT for out-of-combat aggro.
+    // A wild critter's critter_p_proc calls obj_can_see_obj(self_obj, dude_obj)
+    // before attack_complex; this line breaks the "did it see me?" answer into
+    // its three gates (same-elevation / in-perception-range / LOS) so a co-op
+    // no-aggro repro tells us WHICH one failed, and what dude_obj resolved to
+    // (nearest online player vs host). Cheap: off unless the env var is set.
+    if (getenv("F2_TRACE_AGGRO") != nullptr && object1 != nullptr && object2 != nullptr) {
+        bool sameElev = object2->elevation == object1->elevation;
+        bool ranged = sameElev && object2->tile != -1 && object1->tile != -1
+            && isWithinPerception(object1, object2);
+        fprintf(stderr, "[aggro] can_see self=%p pid=%d -> target=%p pid=%d player=%d | sameElev=%d inPerc=%d dist=%d => %d\n",
+            (void*)object1, object1->pid, (void*)object2, object2->pid, playerActorIs(object2) ? 1 : 0,
+            sameElev ? 1 : 0, ranged ? 1 : 0, tileDistanceBetween(object1->tile, object2->tile), canSee ? 1 : 0);
     }
 
     programStackPushInteger(program, canSee);
@@ -2074,7 +2159,7 @@ static void opMetarule3(Program* program)
 
             Rect updatedRect;
             objectSetFrmId(obj, newFrmId, &updatedRect);
-            tileWindowRefreshRect(&updatedRect, gElevation);
+            presenter()->worldInvalidateRect(&updatedRect, gElevation);
         }
         break;
     case METARULE3_TILE_SET_CENTER:
@@ -2140,7 +2225,7 @@ static void opSetObjectVisibility(Program* program)
                     obj->flags |= OBJECT_NO_BLOCK;
                 }
 
-                tileWindowRefreshRect(&rect, obj->elevation);
+                presenter()->worldInvalidateRect(&rect, obj->elevation);
             }
         }
     } else {
@@ -2151,7 +2236,7 @@ static void opSetObjectVisibility(Program* program)
 
             Rect rect;
             if (objectShow(obj, &rect) != -1) {
-                tileWindowRefreshRect(&rect, obj->elevation);
+                presenter()->worldInvalidateRect(&rect, obj->elevation);
             }
         }
     }
@@ -2257,7 +2342,7 @@ static void opCritterHeal(Program* program)
     int rc = critterAdjustHitPoints(critter, amount);
 
     if (critter == gDude) {
-        interfaceRenderHitPoints(true);
+        presenter()->hudHitPoints(true);
     }
 
     programStackPushInteger(program, rc);
@@ -2486,7 +2571,7 @@ static void opKillCritterType(Program* program)
 
                     Rect rect;
                     objectDestroy(obj, &rect);
-                    tileWindowRefreshRect(&rect, gElevation);
+                    presenter()->worldInvalidateRect(&rect, gElevation);
                 }
 
                 previousObj = obj;
@@ -2638,7 +2723,7 @@ static void opHasTrait(Program* program)
             break;
         case CRITTER_TRAIT_TRAIT:
             if (param < TRAIT_COUNT) {
-                result = traitIsSelected(static_cast<Trait>(param));
+                result = traitIsSelected(static_cast<Trait>(param), object);
             } else {
                 scriptError("\nScript Error: %s: op_has_trait: Trait out of range", program->name);
             }
@@ -2803,6 +2888,14 @@ static void opGameTimeAdvance(Program* program)
     int days = data / GAME_TIME_TICKS_PER_DAY;
     int remainder = data % GAME_TIME_TICKS_PER_DAY;
 
+    // The world is about to advance UNWATCHED: every queued event and every NPC
+    // AI catches up synchronously inside this one call, and each tile step would
+    // otherwise be shipped as its own paced glide (measured: 320 MOVEs in one
+    // beat on denbus2). Coalesce to final positions — presenter.h TIME-SKIP MOVE
+    // COALESCING. Held across the whole op, including the day loop, so an NPC
+    // that wanders for three in-game days still costs exactly one snap.
+    presenterTimeSkipBegin();
+
     for (int day = 0; day < days; day++) {
         gameTimeAddTicks(GAME_TIME_TICKS_PER_DAY);
         queueProcessEvents();
@@ -2810,6 +2903,8 @@ static void opGameTimeAdvance(Program* program)
 
     gameTimeAddTicks(remainder);
     queueProcessEvents();
+
+    presenterTimeSkipEnd();
 }
 
 // radiation_inc
@@ -2865,6 +2960,13 @@ static void opCritterAttemptPlacement(Program* program)
     objectSetLocation(critter, 0, elevation, nullptr);
 
     int rc = objectAttemptPlacement(critter, tile, elevation, 1);
+
+    // Same reasoning as move_to above. Not gated on rc: the placement return convention
+    // here is the script's business, and if the initiator only half-landed, the others
+    // standing near the target is still closer to the script's intent than being left
+    // on the far side of the map.
+    scriptRelocateOtherPlayerActors(critter, tile, elevation);
+
     programStackPushInteger(program, rc);
 }
 
@@ -2922,7 +3024,7 @@ static void opCritterAddTrait(Program* program)
                     }
 
                     if (object == gDude) {
-                        interfaceRenderHitPoints(true);
+                        presenter()->hudHitPoints(true);
                     }
                 }
                 break;
@@ -3123,7 +3225,7 @@ static void opSetObjectLightLevel(Program* program)
             return;
         }
     }
-    tileWindowRefreshRect(&rect, object->elevation);
+    presenter()->worldInvalidateRect(&rect, object->elevation);
 }
 
 // world_map
@@ -3179,7 +3281,7 @@ static void opFloatMessage(Program* program)
 
     if (string == nullptr || *string == '\0') {
         textObjectsRemoveByOwner(obj);
-        tileWindowRefresh();
+        presenter()->worldInvalidate();
         return;
     }
 
@@ -3241,10 +3343,7 @@ static void opFloatMessage(Program* program)
         break;
     }
 
-    Rect rect;
-    if (textObjectAdd(obj, string, font, color, backgroundColor, &rect) != -1) {
-        tileWindowRefreshRect(&rect, obj->elevation);
-    }
+    presenter()->floatText(obj, string, font, color, backgroundColor);
 }
 
 // metarule
@@ -3259,7 +3358,14 @@ static void opMetarule(Program* program)
     switch (rule) {
     case METARULE_SIGNAL_END_GAME:
         result = 0;
-        _game_user_wants_to_quit = GAME_QUIT_REQUEST_MAIN_MENU;
+        if (serverDedicatedActive()) {
+            // Server survival (MP_PROPOSAL.md Ch 9.2-S3): any script can signal
+            // the endgame, and quit=2 stops the serve loop for everyone. A
+            // dedicated server outlives the story it is hosting — suppress+log.
+            debugPrint("server: METARULE_SIGNAL_END_GAME from a script — endgame suppressed\n");
+        } else {
+            _game_user_wants_to_quit = GAME_QUIT_REQUEST_MAIN_MENU;
+        }
         break;
     case METARULE_FIRST_RUN:
         result = (gMapHeader.flags & MAP_HEADER_SAVED) == MAP_HEADER_NONE;
@@ -3296,15 +3402,15 @@ static void opMetarule(Program* program)
         if (!skillIsValid(param.integerValue)) {
             debugPrint("\n%s: metarule: SKILL_CHECK_TAG invalid skill %d", program->name, param.integerValue);
         }
-        result = skillIsTagged(static_cast<Skill>(param.integerValue));
+        result = skillIsTagged(static_cast<Skill>(param.integerValue), scriptContextDude(program));
         break;
     case METARULE_DROP_ALL_INVEN:
         if (1) {
             Object* object = static_cast<Object*>(param.pointerValue);
             result = itemDropAll(object, object->tile);
             if (gDude == object) {
-                interfaceUpdateItems(false, INTERFACE_ITEM_ACTION_DEFAULT, INTERFACE_ITEM_ACTION_DEFAULT);
-                interfaceRenderArmorClass(false);
+                presenter()->hudItems(false, INTERFACE_ITEM_ACTION_DEFAULT, INTERFACE_ITEM_ACTION_DEFAULT);
+                presenter()->hudArmorClass(false);
             }
         }
         break;
@@ -3323,7 +3429,7 @@ static void opMetarule(Program* program)
 
             if (object == gDude) {
                 bool animated = !gameUiIsDisabled();
-                interfaceUpdateItems(animated, INTERFACE_ITEM_ACTION_DEFAULT, INTERFACE_ITEM_ACTION_DEFAULT);
+                presenter()->hudItems(animated, INTERFACE_ITEM_ACTION_DEFAULT, INTERFACE_ITEM_ACTION_DEFAULT);
             } else {
                 Object* item = critterGetItem1(object);
                 if (itemGetType(item) == ITEM_TYPE_WEAPON) {
@@ -3483,12 +3589,12 @@ static void opAnim(Program* program)
         if (frame < ROTATION_COUNT) {
             Rect rect;
             objectSetRotation(obj, static_cast<Rotation>(frame), &rect);
-            tileWindowRefreshRect(&rect, gElevation);
+            presenter()->worldInvalidateRect(&rect, gElevation);
         }
     } else if (animOrInt == 1010) {
         Rect rect;
         objectSetFrame(obj, frame, &rect);
-        tileWindowRefreshRect(&rect, gElevation);
+        presenter()->worldInvalidateRect(&rect, gElevation);
     } else {
         scriptError("\nScript Error: %s: op_anim: anim out of range %d", program->name, animOrInt);
     }
@@ -3709,7 +3815,7 @@ static void opAddMultipleObjectsToInventory(Program* program)
     if (itemAdd(object, item, quantity) == 0) {
         Rect rect;
         _obj_disconnect(item, &rect);
-        tileWindowRefreshRect(&rect, item->elevation);
+        presenter()->worldInvalidateRect(&rect, item->elevation);
     }
 }
 
@@ -3741,7 +3847,7 @@ static void opRemoveMultipleObjectsFromInventory(Program* program)
             if (itemWasEquipped) {
                 if (owner == gDude) {
                     bool animated = !gameUiIsDisabled();
-                    interfaceUpdateItems(animated, INTERFACE_ITEM_ACTION_DEFAULT, INTERFACE_ITEM_ACTION_DEFAULT);
+                    presenter()->hudItems(animated, INTERFACE_ITEM_ACTION_DEFAULT, INTERFACE_ITEM_ACTION_DEFAULT);
                 }
             }
         }
@@ -4071,7 +4177,7 @@ static void opCritterInjure(Program* program)
             InterfaceItemAction leftItemAction;
             InterfaceItemAction rightItemAction;
             interfaceGetItemActions(&leftItemAction, &rightItemAction);
-            interfaceUpdateItems(true, leftItemAction, rightItemAction);
+            presenter()->hudItems(true, leftItemAction, rightItemAction);
         }
     }
 }
@@ -4212,14 +4318,20 @@ static void opObjectClose(Program* program)
 // 0x45B3D0 op_game_ui_disable
 static void opGameUiDisable(Program* program)
 {
-    gameUiDisable(0);
+    // The cutscene lock belongs to the player the script is acting on, matching the
+    // gfade_out/gfade_in pair right below — a script issues them together and they
+    // must aim at the same person. Routed through the presenter so a dedicated
+    // server, whose own gameUiDisable is a no-op stub, still tells the viewers.
+    Object* actor = scriptContextDude(program);
+    presenter()->screenInputLock(true, actor != nullptr ? actor->netId : 0);
 }
 
 // game_ui_enable
 // 0x45B3D8 op_game_ui_enable
 static void opGameUiEnable(Program* program)
 {
-    gameUiEnable();
+    Object* actor = scriptContextDude(program);
+    presenter()->screenInputLock(false, actor != nullptr ? actor->netId : 0);
 }
 
 // game_ui_is_disabled
@@ -4236,7 +4348,11 @@ static void opGameFadeOut(Program* program)
     int data = programStackPopInteger(program);
 
     if (data != 0) {
-        paletteFadeTo(gPaletteBlack);
+        // The fade belongs to the player the script is acting on — grave digging is the
+        // canonical case. Broadcasting it would black out the whole party for one
+        // person's shovel work.
+        Object* actor = scriptContextDude(program);
+        presenter()->screenFadeOut(actor != nullptr ? actor->netId : 0);
     } else {
         scriptPredefinedError(program, "gfade_out", SCRIPT_ERROR_OBJECT_IS_NULL);
     }
@@ -4249,7 +4365,8 @@ static void opGameFadeIn(Program* program)
     int data = programStackPopInteger(program);
 
     if (data != 0) {
-        paletteFadeTo(_cmap);
+        Object* actor = scriptContextDude(program);
+        presenter()->screenFadeIn(actor != nullptr ? actor->netId : 0);
     } else {
         scriptPredefinedError(program, "gfade_in", SCRIPT_ERROR_OBJECT_IS_NULL);
     }
@@ -4342,9 +4459,9 @@ static void opCritterModifySkill(Program* program)
 
     if (critter != nullptr && points != 0) {
         if (ProtoId(critter).objectType() == OBJ_TYPE_CRITTER) {
-            if (critter == gDude) {
+            if (playerActorIs(critter)) {
                 int normalizedPoints = abs(points);
-                if (skillIsTagged(skill)) {
+                if (skillIsTagged(skill, critter)) {
                     // Halve number of skill points. Increment/decrement skill
                     // points routines handle that.
                     normalizedPoints /= 2;
@@ -4353,12 +4470,12 @@ static void opCritterModifySkill(Program* program)
                 if (points > 0) {
                     // Increment skill points one by one.
                     for (int it = 0; it < normalizedPoints; it++) {
-                        skillAddForce(gDude, skill);
+                        skillAddForce(critter, skill);
                     }
                 } else {
                     // Decrement skill points one by one.
                     for (int it = 0; it < normalizedPoints; it++) {
-                        skillSubForce(gDude, skill);
+                        skillSubForce(critter, skill);
                     }
                 }
 
@@ -4368,7 +4485,7 @@ static void opCritterModifySkill(Program* program)
                     InterfaceItemAction leftItemAction;
                     InterfaceItemAction rightItemAction;
                     interfaceGetItemActions(&leftItemAction, &rightItemAction);
-                    interfaceUpdateItems(false, leftItemAction, rightItemAction);
+                    presenter()->hudItems(false, leftItemAction, rightItemAction);
                 }
             } else {
                 scriptPredefinedError(program, "critter_mod_skill", SCRIPT_ERROR_FOLLOWS);
@@ -4562,7 +4679,7 @@ static void opDestroyMultipleObjects(Program* program)
 
         if (owner == gDude) {
             bool animated = !gameUiIsDisabled();
-            interfaceUpdateItems(animated, INTERFACE_ITEM_ACTION_DEFAULT, INTERFACE_ITEM_ACTION_DEFAULT);
+            presenter()->hudItems(animated, INTERFACE_ITEM_ACTION_DEFAULT, INTERFACE_ITEM_ACTION_DEFAULT);
         }
 
         _obj_connect(object, 1, ELEVATION_FIRST, nullptr);
@@ -4581,7 +4698,7 @@ static void opDestroyMultipleObjects(Program* program)
 
         Rect rect;
         objectDestroy(object, &rect);
-        tileWindowRefreshRect(&rect, gElevation);
+        presenter()->worldInvalidateRect(&rect, gElevation);
     }
 
     programStackPushInteger(program, result);
@@ -4664,9 +4781,16 @@ static void opMoveObjectInventoryToObject(Program* program)
         return;
     }
 
+    // Worn ARMOUR grants its AC / damage-resistance / damage-threshold as BONUS
+    // STATS on the wearer, so stripping it has to hand those back (below). That
+    // was gated on the host, while an extra took the else-branch and kept the
+    // bonuses of armour it no longer owns — permanently invisible armour, and a
+    // combat-math error rather than a cosmetic one. Extras equip through the
+    // player inventory screen, which DOES call adjustCritterStatsOnArmorChange, so the two directions
+    // were asymmetric.
     Object* oldArmor = nullptr;
     Object* oldWeapon = nullptr;
-    if (object1 == gDude) {
+    if (playerActorIs(object1)) {
         oldArmor = critterGetArmor(object1);
         if (interfaceGetCurrentHand() == HAND_RIGHT) {
             oldWeapon = critterGetItem2(object1);
@@ -4677,7 +4801,7 @@ static void opMoveObjectInventoryToObject(Program* program)
         oldWeapon = critterGetItem2(object1);
     }
 
-    if (object1 == gDude) {
+    if (playerActorIs(object1)) {
         if (oldWeapon != nullptr) {
             InvenSlot invenSlot = interfaceGetCurrentHand() == HAND_RIGHT
                 ? InvenSlot::RightHand
@@ -4706,15 +4830,18 @@ static void opMoveObjectInventoryToObject(Program* program)
 
     itemMoveAll(object1, object2);
 
-    if (object1 == gDude) {
-        if (oldArmor != nullptr) {
-            adjustCritterStatsOnArmorChange(gDude, oldArmor, nullptr);
-        }
+    // The stat give-back is EVERY player actor's; the gender/HUD fixups below
+    // stay the host's, because they repaint one screen and rewrite the dude
+    // proto's art, neither of which an extra owns.
+    if (playerActorIs(object1) && oldArmor != nullptr) {
+        adjustCritterStatsOnArmorChange(object1, oldArmor, nullptr);
+    }
 
+    if (object1 == gDude) {
         _proto_dude_update_gender();
 
         bool animated = !gameUiIsDisabled();
-        interfaceUpdateItems(animated, INTERFACE_ITEM_ACTION_DEFAULT, INTERFACE_ITEM_ACTION_DEFAULT);
+        presenter()->hudItems(animated, INTERFACE_ITEM_ACTION_DEFAULT, INTERFACE_ITEM_ACTION_DEFAULT);
     }
 }
 
@@ -4944,7 +5071,7 @@ static void opGetPcStat(Program* program)
 {
     PcStat pcStat = programStackPopEnum<PcStat>(program);
 
-    int value = pcGetStat(pcStat);
+    int value = pcGetStat(pcStat, scriptContextDude(program));
     programStackPushInteger(program, value);
 }
 
@@ -5154,6 +5281,27 @@ void intExtraUpdate()
 // 0x45D878
 void intExtraRemoveProgramReferences(Program* program)
 {
+}
+
+
+
+static void scriptRelocateOtherPlayerActors(Object* mover, int tile, int elevation)
+{
+    if (mover == nullptr || !playerActorIs(mover)) {
+        return;
+    }
+
+    for (int slot = 0; slot < playerActorCount(); slot++) {
+        Object* actor = playerActorAt(slot);
+        if (actor == nullptr || actor == mover || !playerActorOnline(slot)) {
+            continue;
+        }
+        // Placement, NOT a teleport onto the same hex: objectAttemptPlacementPartyMember is what
+        // _partyMemberSyncPosition already uses — it finds a free tile near the target
+        // and leaves the actor where it was if it cannot, so a cramped destination
+        // degrades to "did not move" instead of stacking bodies.
+        objectAttemptPlacementPartyMember(actor, tile, elevation);
+    }
 }
 
 } // namespace fallout

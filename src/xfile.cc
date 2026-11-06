@@ -1,3 +1,4 @@
+
 #include "xfile.h"
 
 #include <assert.h>
@@ -15,6 +16,19 @@
 #include "file_find.h"
 
 namespace fallout {
+
+XFile* xfileOpenMemory(const void* data, size_t size);
+
+XFile* xfileOpenMemoryWrite();
+
+const unsigned char* xfileMemoryData(XFile* stream);
+
+long xfileMemorySize(XFile* stream);
+
+static bool xfileMemoryReserve(XFile* stream, long needed);
+
+static size_t xfileMemoryWrite(const void* ptr, size_t size, size_t count, XFile* stream);
+
 
 typedef enum XFileEnumerationEntryType {
     XFILE_ENUMERATION_ENTRY_TYPE_FILE,
@@ -57,6 +71,10 @@ int xfileClose(XFile* stream)
         break;
     case XFILE_TYPE_GZFILE:
         rc = gzclose(stream->gzfile);
+        break;
+    case XFILE_TYPE_MEMORY:
+        free(stream->memoryBuffer);
+        rc = 0;
         break;
     default:
         rc = fclose(stream->file);
@@ -193,6 +211,20 @@ int xfilePrintFormattedArgs(XFile* stream, const char* format, va_list args)
     case XFILE_TYPE_GZFILE:
         rc = gzvprintf(stream->gzfile, format, args);
         break;
+    case XFILE_TYPE_MEMORY: {
+        // Format into a bounded scratch then write it. Nothing in this codebase formats
+        // anything near this size into a stream; a longer line is truncated rather than
+        // silently dropped, and vsnprintf reports the length it WANTED.
+        char formatted[4096];
+        int wanted = vsnprintf(formatted, sizeof(formatted), format, args);
+        if (wanted < 0) {
+            rc = -1;
+            break;
+        }
+        size_t length = (size_t)wanted < sizeof(formatted) ? (size_t)wanted : sizeof(formatted) - 1;
+        rc = (length == 0 || xfileMemoryWrite(formatted, 1, length, stream) == length) ? wanted : -1;
+        break;
+    }
     default:
         rc = vfprintf(stream->file, format, args);
         break;
@@ -214,6 +246,11 @@ int xfileReadChar(XFile* stream)
         break;
     case XFILE_TYPE_GZFILE:
         ch = gzgetc(stream->gzfile);
+        break;
+    case XFILE_TYPE_MEMORY:
+        ch = stream->memoryPosition < stream->memorySize
+            ? stream->memoryBuffer[stream->memoryPosition++]
+            : -1;
         break;
     default:
         ch = fgetc(stream->file);
@@ -239,6 +276,22 @@ char* xfileReadString(char* string, int size, XFile* stream)
     case XFILE_TYPE_GZFILE:
         result = compat_gzgets(stream->gzfile, string, size);
         break;
+    case XFILE_TYPE_MEMORY:
+        if (stream->memoryPosition >= stream->memorySize || size <= 1) {
+            result = nullptr;
+        } else {
+            int i = 0;
+            while (i < size - 1 && stream->memoryPosition < stream->memorySize) {
+                char c = (char)stream->memoryBuffer[stream->memoryPosition++];
+                string[i++] = c;
+                if (c == '\n') {
+                    break;
+                }
+            }
+            string[i] = '\0';
+            result = string;
+        }
+        break;
     default:
         result = compat_fgets(string, size, stream->file);
         break;
@@ -261,6 +314,11 @@ int xfileWriteChar(int ch, XFile* stream)
     case XFILE_TYPE_GZFILE:
         rc = gzputc(stream->gzfile, ch);
         break;
+    case XFILE_TYPE_MEMORY: {
+        unsigned char byte = (unsigned char)ch;
+        rc = xfileMemoryWrite(&byte, 1, 1, stream) == 1 ? ch : -1;
+        break;
+    }
     default:
         rc = fputc(ch, stream->file);
         break;
@@ -284,6 +342,11 @@ int xfileWriteString(const char* string, XFile* stream)
     case XFILE_TYPE_GZFILE:
         rc = gzputs(stream->gzfile, string);
         break;
+    case XFILE_TYPE_MEMORY: {
+        size_t length = strlen(string);
+        rc = (length == 0 || xfileMemoryWrite(string, 1, length, stream) == length) ? 0 : -1;
+        break;
+    }
     default:
         rc = fputs(string, stream->file);
         break;
@@ -318,6 +381,18 @@ size_t xfileRead(void* ptr, size_t size, size_t count, XFile* stream)
             elementsRead = bytesRead > 0 ? static_cast<size_t>(bytesRead) / size : 0;
         }
         break;
+    case XFILE_TYPE_MEMORY: {
+        size_t bytesWanted = size * count;
+        long remaining = stream->memorySize - stream->memoryPosition;
+        size_t bytesAvailable = remaining > 0 ? (size_t)remaining : 0;
+        size_t bytesToCopy = bytesWanted < bytesAvailable ? bytesWanted : bytesAvailable;
+        if (bytesToCopy != 0) {
+            memcpy(ptr, stream->memoryBuffer + stream->memoryPosition, bytesToCopy);
+            stream->memoryPosition += (long)bytesToCopy;
+        }
+        elementsRead = size != 0 ? bytesToCopy / size : 0;
+        break;
+    }
     default:
         elementsRead = fread(ptr, size, count, stream->file);
         break;
@@ -346,6 +421,9 @@ size_t xfileWrite(const void* ptr, size_t size, size_t count, XFile* stream)
         // parameters this function can return wrong result.
         elementsWritten = gzwrite(stream->gzfile, ptr, size * count);
         break;
+    case XFILE_TYPE_MEMORY:
+        elementsWritten = xfileMemoryWrite(ptr, size, count, stream);
+        break;
     default:
         elementsWritten = fwrite(ptr, size, count, stream->file);
         break;
@@ -368,6 +446,27 @@ int xfileSeek(XFile* stream, long offset, int origin)
     case XFILE_TYPE_GZFILE:
         result = gzseek(stream->gzfile, offset, origin);
         break;
+    case XFILE_TYPE_MEMORY: {
+        long base = 0;
+        bool okOrigin = true;
+        if (origin == SEEK_SET) {
+            base = 0;
+        } else if (origin == SEEK_CUR) {
+            base = stream->memoryPosition;
+        } else if (origin == SEEK_END) {
+            base = stream->memorySize;
+        } else {
+            okOrigin = false;
+        }
+        long newPosition = base + offset;
+        if (!okOrigin || newPosition < 0 || newPosition > stream->memorySize) {
+            result = -1;
+        } else {
+            stream->memoryPosition = newPosition;
+            result = 0;
+        }
+        break;
+    }
     default:
         result = fseek(stream->file, offset, origin);
         break;
@@ -390,6 +489,9 @@ long xfileTell(XFile* stream)
     case XFILE_TYPE_GZFILE:
         pos = gztell(stream->gzfile);
         break;
+    case XFILE_TYPE_MEMORY:
+        pos = stream->memoryPosition;
+        break;
     default:
         pos = ftell(stream->file);
         break;
@@ -410,6 +512,9 @@ void xfileRewind(XFile* stream)
     case XFILE_TYPE_GZFILE:
         gzrewind(stream->gzfile);
         break;
+    case XFILE_TYPE_MEMORY:
+        stream->memoryPosition = 0;
+        break;
     default:
         rewind(stream->file);
         break;
@@ -429,6 +534,9 @@ int xfileEof(XFile* stream)
         break;
     case XFILE_TYPE_GZFILE:
         rc = gzeof(stream->gzfile);
+        break;
+    case XFILE_TYPE_MEMORY:
+        rc = stream->memoryPosition >= stream->memorySize ? 1 : 0;
         break;
     default:
         rc = feof(stream->file);
@@ -451,6 +559,9 @@ long xfileGetSize(XFile* stream)
         break;
     case XFILE_TYPE_GZFILE:
         fileSize = 0;
+        break;
+    case XFILE_TYPE_MEMORY:
+        fileSize = stream->memorySize;
         break;
     default:
         fileSize = getFileSize(stream->file);
@@ -889,6 +1000,111 @@ static bool xlistAppend(XList* xlist, const char* name)
     xlist->fileNamesLength++;
 
     return true;
+}
+
+
+
+XFile* xfileOpenMemory(const void* data, size_t size)
+{
+    if (data == nullptr) {
+        return nullptr;
+    }
+
+    XFile* stream = (XFile*)malloc(sizeof(*stream));
+    if (stream == nullptr) {
+        return nullptr;
+    }
+
+    memset(stream, 0, sizeof(*stream));
+
+    stream->type = XFILE_TYPE_MEMORY;
+    stream->memoryBuffer = (unsigned char*)malloc(size != 0 ? size : 1);
+    if (stream->memoryBuffer == nullptr) {
+        free(stream);
+        return nullptr;
+    }
+
+    if (size != 0) {
+        memcpy(stream->memoryBuffer, data, size);
+    }
+    stream->memorySize = (long)size;
+    stream->memoryPosition = 0;
+
+    return stream;
+}
+
+XFile* xfileOpenMemoryWrite()
+{
+    XFile* stream = (XFile*)malloc(sizeof(*stream));
+    if (stream == nullptr) {
+        return nullptr;
+    }
+
+    memset(stream, 0, sizeof(*stream));
+    stream->type = XFILE_TYPE_MEMORY;
+    stream->memoryCapacity = 8192; // a join blob is tens of KB; this grows anyway
+    stream->memoryBuffer = (unsigned char*)malloc((size_t)stream->memoryCapacity);
+    if (stream->memoryBuffer == nullptr) {
+        free(stream);
+        return nullptr;
+    }
+    stream->memoryWritable = true;
+    return stream;
+}
+
+const unsigned char* xfileMemoryData(XFile* stream)
+{
+    if (stream == nullptr || stream->type != XFILE_TYPE_MEMORY) {
+        return nullptr;
+    }
+    return stream->memoryBuffer;
+}
+
+long xfileMemorySize(XFile* stream)
+{
+    if (stream == nullptr || stream->type != XFILE_TYPE_MEMORY) {
+        return 0;
+    }
+    return stream->memorySize;
+}
+
+static bool xfileMemoryReserve(XFile* stream, long needed)
+{
+    long required = stream->memoryPosition + needed;
+    if (required <= stream->memoryCapacity) {
+        return true;
+    }
+    long capacity = stream->memoryCapacity > 0 ? stream->memoryCapacity : 8192;
+    while (capacity < required) {
+        capacity *= 2;
+    }
+    unsigned char* grown = (unsigned char*)realloc(stream->memoryBuffer, (size_t)capacity);
+    if (grown == nullptr) {
+        return false;
+    }
+    stream->memoryBuffer = grown;
+    stream->memoryCapacity = capacity;
+    return true;
+}
+
+static size_t xfileMemoryWrite(const void* ptr, size_t size, size_t count, XFile* stream)
+{
+    if (!stream->memoryWritable) {
+        return 0; // a read-only memory stream (xfileOpenMemory)
+    }
+    size_t bytes = size * count;
+    if (bytes == 0) {
+        return 0;
+    }
+    if (!xfileMemoryReserve(stream, (long)bytes)) {
+        return 0;
+    }
+    memcpy(stream->memoryBuffer + stream->memoryPosition, ptr, bytes);
+    stream->memoryPosition += (long)bytes;
+    if (stream->memoryPosition > stream->memorySize) {
+        stream->memorySize = stream->memoryPosition;
+    }
+    return size != 0 ? bytes / size : 0;
 }
 
 } // namespace fallout

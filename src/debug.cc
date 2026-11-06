@@ -1,3 +1,4 @@
+
 #include "debug.h"
 
 #include <SDL.h>
@@ -181,6 +182,9 @@ int debugPrint(const char* format, ...)
         if (!debugBufferDisabled && debugBuffer.size() + strlen(string) <= kDebugBufferMaxSize) {
             debugBuffer += string;
         }
+#ifndef NDEBUG
+        fputs(string, stderr);
+#endif
         rc = -1;
     }
 

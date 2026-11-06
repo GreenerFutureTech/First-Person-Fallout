@@ -1,3 +1,4 @@
+#include <string.h>
 #include "dbox.h"
 
 #include <functional>
@@ -27,6 +28,15 @@
 #include "word_wrap.h"
 
 namespace fallout {
+
+static const char* gDialogBoxTraceTag = nullptr;
+
+static const char* gDialogBoxTraceOpenTag = nullptr;
+
+void dialogBoxTraceNext(const char* tag);
+
+const char* dialogBoxTraceActiveTag();
+
 
 static void fileDialogRenderFileList(unsigned char* buffer, char** fileList, int pageOffset, int fileListLength, int selectedIndex, int pitch);
 
@@ -535,6 +545,10 @@ const char* showInputDialog(const char* currentInput, int x, int y, const char* 
 int showDialogBox(const char* title, const char** body, int bodyLength, int x, int y, ColorWithFlags titleColor, const char* secondaryButtonText, ColorWithFlags bodyColor, int flags)
 {
     using namespace fallout::dbox;
+    // TEMP [wmenc]: take the arming here, before any early return, so a box that
+    // fails to open cannot leave it armed for someone else's dialog.
+    const char* traceTag = gDialogBoxTraceTag;
+    gDialogBoxTraceTag = nullptr;
 
     MessageList messageList;
     MessageListItem messageListItem;
@@ -733,13 +747,25 @@ int showDialogBox(const char* title, const char** body, int bodyLength, int x, i
 
     windowRefresh(window.get());
 
+    // TEMP [wmenc]: armed only for the duration of the input loop, so the producer
+    // prints cannot fire against an unrelated frame.
+    gDialogBoxTraceOpenTag = traceTag;
+
     int rc = -1;
     while (rc == -1) {
         sharedFpsLimiter.mark();
 
         int keyCode = inputGetInput();
 
-        if (keyCode == btnId::done) { // First button (Done/Yes)
+        // TEMP DIAGNOSTIC [wmenc]: every code this box sees, in order. -1 is "nothing
+        // happened this frame" and is the overwhelming majority, so it is skipped; -2
+        // is a raw mouse event the box ignores. Anything else either closes the box or
+        // is discarded by the branches below, and which it was is the whole question.
+        if (traceTag != nullptr && keyCode != -1) {
+            fprintf(stderr, "[%s] dbox input keyCode=%d\n", traceTag, keyCode);
+        }
+
+        if (keyCode == btnId::done) {
             rc = 1;
         } else if (keyCode == KEY_RETURN) {
             soundPlayFile("ib1p1xx1");
@@ -764,6 +790,7 @@ int showDialogBox(const char* title, const char** body, int bodyLength, int x, i
         sharedFpsLimiter.throttle();
     }
 
+    gDialogBoxTraceOpenTag = nullptr;
     if (initializedButtons) {
         messageListFree(&messageList);
     }
@@ -1147,6 +1174,18 @@ static void fileDialogRenderFileList(unsigned char* buffer, char** fileList, int
             y += lineHeight;
         }
     }
+}
+
+
+
+void dialogBoxTraceNext(const char* tag)
+{
+    gDialogBoxTraceTag = tag;
+}
+
+const char* dialogBoxTraceActiveTag()
+{
+    return gDialogBoxTraceOpenTag;
 }
 
 } // namespace fallout

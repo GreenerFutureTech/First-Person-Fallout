@@ -312,6 +312,10 @@ void scriptsRequestWorldMap();
 int scriptsRequestElevator(Object* obj, int elevatorType);
 int scriptsRequestExplosion(int tile, MapElevation elevation, int minDamage, int maxDamage);
 void scriptsRequestDialog(Object* obj);
+// The player who pressed the elevator button, captured at REQUEST time (the drain
+// runs a beat later, outside that player's ServerActorScope). Never null — falls
+// back to gDude.
+Object* scriptsRequestedElevatorRider();
 void scriptsRequestEndgame();
 int scriptsRequestLooting(Object* looter, Object* container);
 int scriptsRequestStealing(Object* thief, Object* target);
@@ -344,6 +348,11 @@ int scriptGetSpatialRadius(Object* obj);
 int scriptsGetFileName(int scriptIndex, char* name, size_t size);
 int scriptsGetListLength();
 bool scriptsIsValidScriptIndex(int scriptIndex);
+
+// F2_TRACE_LVAR=1: report a script allocating its local-var block. Only fires
+// when the script was freshly added rather than restored with a saved offset,
+// so on a load it names exactly what is being re-instantiated. No-op unenv'd.
+void scriptTraceLvarAlloc(const char* how, Script* script);
 int scriptRemove(int index);
 int _scr_remove_all();
 int _scr_remove_all_force();

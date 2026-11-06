@@ -1,3 +1,5 @@
+#include <unordered_map>
+#include <vector>
 #include "interpreter.h"
 
 #include <assert.h>
@@ -18,6 +20,28 @@
 #include "svga.h"
 
 namespace fallout {
+
+static bool gInterpreterHooksActive = false;
+
+static std::unordered_map<int, std::vector<OpcodeHookFn>> gInterpreterPreHooks;
+
+static std::unordered_map<int, std::vector<OpcodeHookFn>> gInterpreterPostHooks;
+
+static std::vector<OpcodeHookFn> gInterpreterPreHooksAll;
+
+static std::vector<OpcodeHookFn> gInterpreterPostHooksAll;
+
+static void interpreterFireHooks(std::unordered_map<int, std::vector<OpcodeHookFn>>& byOpcode,
+    std::vector<OpcodeHookFn>& forAll, int opcodeIndex, int opcode, Program* program);
+
+void interpreterAddOpcodePreHook(int opcode, OpcodeHookFn hook);
+
+void interpreterAddOpcodePostHook(int opcode, OpcodeHookFn hook);
+
+void interpreterClearOpcodeHooks();
+
+bool programStackPeekValue(Program* program, int depth, ProgramValue* out);
+
 
 typedef struct ProgramListNode {
     Program* program;
@@ -2729,7 +2753,15 @@ void programInterpret(Program* program, int numInstructions)
             programFatalError("Undefined opcode %x.", opcode);
         }
 
-        handler(program);
+        // The ONE dispatch site, hence the one place hooks fire (interpreter.h).
+        // Guarded by a single bool so an un-hooked build keeps its original path.
+        if (gInterpreterHooksActive) {
+            interpreterFireHooks(gInterpreterPreHooks, gInterpreterPreHooksAll, opcodeIndex, opcode, program);
+            handler(program);
+            interpreterFireHooks(gInterpreterPostHooks, gInterpreterPostHooksAll, opcodeIndex, opcode, program);
+        } else {
+            handler(program);
+        }
     }
 
     if ((program->flags & PROGRAM_FLAG_EXITED) != 0) {
@@ -3465,6 +3497,67 @@ ProgramValue programMakeInt(Program* program, int val)
 int Program::procedureCount() const
 {
     return stackReadInt32(procedures, 0);
+}
+
+
+
+static void interpreterFireHooks(std::unordered_map<int, std::vector<OpcodeHookFn>>& byOpcode,
+    std::vector<OpcodeHookFn>& forAll, int opcodeIndex, int opcode, Program* program)
+{
+    for (auto& hook : forAll) {
+        hook(opcode, program);
+    }
+
+    auto it = byOpcode.find(opcodeIndex);
+    if (it != byOpcode.end()) {
+        for (auto& hook : it->second) {
+            hook(opcode, program);
+        }
+    }
+}
+
+void interpreterAddOpcodePreHook(int opcode, OpcodeHookFn hook)
+{
+    if (opcode < 0) {
+        gInterpreterPreHooksAll.push_back(std::move(hook));
+    } else {
+        gInterpreterPreHooks[opcode & 0x3FF].push_back(std::move(hook));
+    }
+    gInterpreterHooksActive = true;
+}
+
+void interpreterAddOpcodePostHook(int opcode, OpcodeHookFn hook)
+{
+    if (opcode < 0) {
+        gInterpreterPostHooksAll.push_back(std::move(hook));
+    } else {
+        gInterpreterPostHooks[opcode & 0x3FF].push_back(std::move(hook));
+    }
+    gInterpreterHooksActive = true;
+}
+
+void interpreterClearOpcodeHooks()
+{
+    gInterpreterPreHooks.clear();
+    gInterpreterPostHooks.clear();
+    gInterpreterPreHooksAll.clear();
+    gInterpreterPostHooksAll.clear();
+    gInterpreterHooksActive = false;
+}
+
+bool programStackPeekValue(Program* program, int depth, ProgramValue* out)
+{
+    // Non-destructive read for pre-hooks: no pop, and deliberately no string
+    // ref-count adjustment (that belongs to whoever actually consumes the value).
+    if (program == nullptr || program->stackValues == nullptr || out == nullptr) {
+        return false;
+    }
+    if (depth < 0 || (size_t)depth >= program->stackValues->size()) {
+        return false;
+    }
+
+    *out = (*program->stackValues)[program->stackValues->size() - 1 - (size_t)depth];
+    return true;
 }
 
 } // namespace fallout

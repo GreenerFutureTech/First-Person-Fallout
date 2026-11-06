@@ -1,3 +1,5 @@
+#include <stdlib.h>
+#include "server_players.h" // kMaxPlayerActors — per-actor sheet rows
 #include "proto.h"
 
 #include <stdio.h>
@@ -25,6 +27,21 @@
 #include "trait.h"
 
 namespace fallout {
+
+static CritterProto gPlayerActorProtos[kMaxPlayerActors - 1];
+
+void protoPlayerActorSheetsSeed();
+
+void protoPlayerActorSheetSeedSlot(int slot);
+
+static CritterProtoData* protoPlayerActorSheetData(int slot);
+
+int protoPlayerActorRowWrite(File* stream, int slot);
+
+int protoPlayerActorRowRead(File* stream, int slot);
+
+void protoPlayerActorsUpdateLook();
+
 
 static int objectCritterCombatDataRead(CritterCombatData* data, File* stream);
 static int objectCritterCombatDataWrite(CritterCombatData* data, File* stream);
@@ -358,6 +375,20 @@ char* protoGetName(const ProtoId& protoId)
 {
     if (protoId == CritterProtoTypeId::Dude) {
         return critterGetName(gDude);
+    }
+
+    // Extra player actors. Their pids are NOT in protos/critters.lst, so without
+    // this they fall into protoGetMessage with a messageId copied off the dude
+    // proto and read the WRONG entry (or none) — a nameless body on every hover
+    // and combat line.
+    //
+    // ⚠ Read the name ROW directly. Forwarding to critterGetName(playerActorAt
+    // (slot)) is the obvious-looking version and it recurses forever whenever the
+    // row lookup misses: an extra has no script, so critterGetName's fallback is
+    // protoGetName(obj->protoId.pid()) — straight back into here. critterGetNameForSlot is
+    // the storage accessor precisely so this site never re-enters that path.
+    if (playerActorIsSheetPid(protoId.pid())) {
+        return critterGetNameForSlot(protoId.pid() - kPlayerActorSheetPidBase);
     }
 
     return protoGetMessage(protoId, PROTOTYPE_MESSAGE_NAME);
@@ -2168,7 +2199,62 @@ int protoGetProto(const ProtoId& protoId, Proto** protoPtr)
         return 0;
     }
 
-    ProtoList* protoList = &(_protoLists[protoId.objectType()]);
+    // Extra player actors' character sheets (PLAYER_SHEET_DESIGN.md §2): skills
+    // and base/bonus SPECIAL live in the dude proto, so N actors sharing one protoId.pid()
+    // means N actors sharing one sheet. Slot k > 0 gets protoId.pid() kPlayerActorSheetPidBase+k
+    // and its own row here.
+    //
+    // ⚠ SLOT 0 IS DELIBERATELY NOT IN THIS ARRAY — it is gDudeProto itself, the
+    // same static struct at the same address, matched by the branch above which
+    // is left VERBATIM. That aliasing is the degeneracy argument (an empty
+    // registry can never reach this branch, so single-player / the client / the
+    // golden probe are byte-identical), and it is also risk #1 in the design: a
+    // dispatch bug that lets an extra fall through to gDudeProto corrupts the
+    // HOST's live character, silently. So the slot is derived from the protoId.pid() and
+    // nothing else — protoId.pid() arithmetic is stateless and cannot go stale the way a
+    // cached Proto* can.
+    if (playerActorIsSheetPid(protoId.pid())) {
+        CritterProto* sheet = &(gPlayerActorProtos[protoId.pid() - kPlayerActorSheetPidBase - 1]);
+
+        // Risk #1's mitigation, made real rather than argued: the row must be
+        // the one this protoId.pid() names. A zero here means the row was never seeded and
+        // the actor is about to read an all-zero sheet (no name, fid 0, every
+        // stat 0); any other mismatch means the dispatch itself is off by a slot,
+        // which is the silent host-corruption case. Neither is survivable state
+        // to continue from.
+        //
+        // NOT assert(): every build this project actually runs is NDEBUG
+        // (check.sh gates RelWithDebInfo, for golden-timeout reasons), so an
+        // assert here would be a comment. Same reason it is not debugPrint —
+        // that too compiles to nothing without a registered proc. The
+        // serverStubAbort idiom is what stays audible.
+        if (sheet->protoId.pid() != protoId.pid()) {
+            fprintf(stderr, "FATAL — player-actor sheet row for protoId.pid() 0x%X holds protoId.pid() 0x%X "
+                            "(row unseeded, or the slot dispatch is off by one).\n",
+                protoId.pid(), sheet->protoId.pid());
+            abort();
+        }
+
+        *protoPtr = (Proto*)sheet;
+        return 0;
+    }
+
+    // Bounds-check the object type BEFORE indexing the fixed _protoLists[11] array.
+    // PID_TYPE is the top byte of a protoId.pid(), and pids reach here from wire/blob-loaded
+    // objects (onSpawn, the inventory reconcile, blob object load) — a trust boundary.
+    // A corrupt/out-of-range type byte (or a negative protoId.pid(), since PID_TYPE is an
+    // arithmetic >>24) would index _protoLists out of bounds and then walk a garbage
+    // extent chain. This is the twin of the scriptGetScript guard and the ROOT under
+    // critterGetStat and the item.cc weapon/ammo/armor getters — they all already
+    // honor a -1 return, so one check here hardens the whole family. *protoPtr is
+    // nullptr from the top of the function. Valid pids always carry an in-range type,
+    // so SP/golden paths never trip this.
+    int protoType = protoId.objectType();
+    if (protoType < 0 || protoType >= OBJ_TYPE_COUNT) {
+        return -1;
+    }
+
+    ProtoList* protoList = &(_protoLists[protoType]);
     ProtoListExtent* protoListExtent = protoList->head;
     while (protoListExtent != nullptr) {
         for (int index = 0; index < protoListExtent->length; index++) {
@@ -2240,6 +2326,93 @@ int _ResetPlayer()
     traitsReset();
     critterUpdateDerivedStats(gDude);
     return 0;
+}
+
+
+
+void protoPlayerActorSheetsSeed()
+{
+    for (int slot = 1; slot < kMaxPlayerActors; slot++) {
+        protoPlayerActorSheetSeedSlot(slot);
+    }
+}
+
+void protoPlayerActorSheetSeedSlot(int slot)
+{
+    if (slot < 1 || slot >= kMaxPlayerActors) {
+        return;
+    }
+
+    CritterProto* sheet = &(gPlayerActorProtos[slot - 1]);
+    memcpy(sheet, &gDudeProto, sizeof(*sheet));
+    sheet->pid = playerActorSheetPid(slot);
+}
+
+static CritterProtoData* protoPlayerActorSheetData(int slot)
+{
+    if (slot == 0) {
+        return &(gDudeProto.data);
+    }
+
+    if (slot < 1 || slot >= kMaxPlayerActors) {
+        return nullptr;
+    }
+
+    return &(gPlayerActorProtos[slot - 1].data);
+}
+
+int protoPlayerActorRowWrite(File* stream, int slot)
+{
+    CritterProtoData* data = protoPlayerActorSheetData(slot);
+    if (data == nullptr) {
+        return -1;
+    }
+
+    return protoCritterDataWrite(stream, data);
+}
+
+int protoPlayerActorRowRead(File* stream, int slot)
+{
+    CritterProtoData* data = protoPlayerActorSheetData(slot);
+    if (data == nullptr) {
+        return -1;
+    }
+
+    return protoCritterDataRead(stream, data);
+}
+
+void protoPlayerActorsUpdateLook()
+{
+    int nativeLook = gameMovieIsSeen(MOVIE_VSUIT) ? DUDE_NATIVE_LOOK_JUMPSUIT : DUDE_NATIVE_LOOK_TRIBAL;
+
+    for (int slot = 1; slot < playerActorCount(); slot++) {
+        Object* actor = playerActorAt(slot);
+        if (actor == nullptr) {
+            continue;
+        }
+
+        Proto* proto;
+        if (protoGetProto(actor->pid, &proto) == -1) {
+            continue;
+        }
+
+        int gender = critterGetStat(actor, STAT_GENDER) == GENDER_MALE ? GENDER_MALE : GENDER_FEMALE;
+        int frmId = _art_vault_person_nums[nativeLook][gender];
+
+        if (critterGetArmor(actor) == nullptr) {
+            int weaponCode = 0;
+            if (critterGetItem2(actor) != nullptr || critterGetItem1(actor) != nullptr) {
+                weaponCode = (actor->fid & 0xF000) >> 12;
+            }
+            objectSetFid(actor, buildFid(OBJ_TYPE_CRITTER, frmId, 0, weaponCode, 0), nullptr);
+            // frame-index-render-gotcha: objectSetFid does NOT reset obj->frame; a
+            // tribal->jumpsuit swap can leave frame >= the new art's frame count,
+            // which renders NOTHING (the "invisible after equip/load" symptom).
+            objectSetFrame(actor, 0, nullptr);
+        }
+
+        proto->fid = buildFid(OBJ_TYPE_CRITTER, frmId, 0, 0, 0);
+    }
 }
 
 } // namespace fallout

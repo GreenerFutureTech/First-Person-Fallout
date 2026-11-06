@@ -1,3 +1,4 @@
+#include "combat_ui.h" // gCombatMessageList — reload "Out of ammo." feedback
 #include "interface.h"
 
 #include "platform/ios/quick_toolbar.h"
@@ -744,6 +745,18 @@ void interfaceFree()
         _inventoryButtonPressedFrmImage.unlock();
         _inventoryButtonNormalFrmImage.unlock();
 
+        // Release the end-turn AND end-combat buttons here too. They are normally
+        // freed on combat EXIT (interfaceBarEndButtonsHide), but if the client quits
+        // while they are still shown — e.g. exit during/around combat, which a
+        // network viewer hits easily — their static FrmImages stay locked, and their
+        // dtors then run at process exit AFTER artExit() has freed the cache: a
+        // heap-use-after-free in cacheUnlock. interfaceBarEndButtonsShow creates BOTH
+        // buttons, so both must be released here (the end-turn one was the second
+        // instance of this crash). Freeing inside interface teardown (before the
+        // cache is torn down) closes it. No-op if never shown (both self-guard).
+        endTurnButtonFree();
+        endCombatButtonFree();
+
         if (gInterfaceBarWindow != -1) {
             windowDestroy(gInterfaceBarWindow);
             gInterfaceBarWindow = -1;
@@ -1214,6 +1227,21 @@ int interfaceUpdateItems(bool animated, InterfaceItemAction leftItemAction, Inte
                 rightItemState->action = oldAction;
             }
         }
+    }
+
+    // ►► WIELD-ON-REJOIN TRACE ([[coop-open-issues]]): P1 wields armor+rocket, quits,
+    // rejoins → weapon not shown (intermittent). This brackets the client self-view
+    // rebuild: does gDude->fid still carry the 0xF000 weapon-anim nibble after the
+    // rejoin blob load, and do the hand items still hold their IN_*_HAND flags? If the
+    // fid nibble is 0 but item2 is present, the body-fid lost the code; if item2 is
+    // null but the launcher is in inventory, the hand flag was dropped by the load.
+    if (getenv("F2_TRACE_EVENTS") != nullptr) {
+        fprintf(stderr,
+            "[wield-rejoin] curHand=%d fid=0x%08x weaponNibble=%d "
+            "item1=%d(flags=0x%x) item2=%d(flags=0x%x)\n",
+            gInterfaceCurrentHand, gDude->fid, (gDude->fid & 0xF000) >> 12,
+            item1 != nullptr ? item1->pid : -1, item1 != nullptr ? item1->flags : 0,
+            item2 != nullptr ? item2->pid : -1, item2 != nullptr ? item2->flags : 0);
     }
 
     if (animated) {
@@ -2262,6 +2290,15 @@ static int _intface_item_reload()
     interfaceUpdateItems(false, INTERFACE_ITEM_ACTION_DEFAULT, INTERFACE_ITEM_ACTION_DEFAULT);
 
     if (!wasReloaded) {
+        // Nothing was loaded (no compatible ammo in inventory). Vanilla is silent
+        // here; surface it like the attack path does for an empty weapon. Local
+        // (solo/host) path — the co-op viewer reload path is a separate wire gap
+        // tracked in coop-open-issues.
+        MessageListItem messageListItem;
+        messageListItem.num = 101; // Out of ammo.
+        if (messageListGetItem(&gCombatMessageList, &messageListItem)) {
+            displayMonitorAddMessage(messageListItem.text);
+        }
         return -1;
     }
 

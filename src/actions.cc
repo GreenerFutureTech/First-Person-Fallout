@@ -1,3 +1,11 @@
+#include <stdint.h>
+#include "client_net.h" // clientViewerActive — suppress AI chatter during wire replay (§3.c)
+#include "combat_ap.h"
+#include "server_players.h"
+#include "pres_record.h"
+#include "presenter.h"
+#include "server_loop.h"
+#include "sfall_config.h"
 #include "actions.h"
 
 #include <limits.h>
@@ -42,6 +50,35 @@
 #include "trait.h"
 
 namespace fallout {
+
+int _knockback_dest_tile(Object* obj, int maxDistance, int rotation);
+
+static int _knockback_headless_dest(Object* critter, int flags, int knockbackDistance, int attackerTile);
+
+int _combat_compute_knockback(Attack* attack, Object** victims, int* dests);
+
+void _combat_commit_knockback(Object** victims, const int* dests, int count);
+
+void _combat_apply_knockback(Attack* attack);
+
+void* actionTalkToCallbackPtr();
+
+void actionDeathDropItems(Object* obj, int anim);
+
+void* actionShowDeathCallbackPtr();
+
+void actionPresReplayShowDeath(Object* obj, int anim);
+
+void actionThrowConsumeHeadless(Attack* attack);
+
+void actionExplodeReplay(int tile, int elevation, Attack* attack);
+
+void actionResolveDroppedExplosive(Object* dropper);
+
+int actionUseItemOnObjectWithApCost(Object* user, Object* targetObj, Object* item);
+
+void* actionHideProjectileCallbackPtr();
+
 
 #define MAX_KNOCKDOWN_DISTANCE 20
 
@@ -144,41 +181,14 @@ int actionKnockdown(Object* obj, AnimationType* anim, int maxDistance, Rotation 
         }
     }
 
-    // SFALL: Fix to limit the maximum distance for the knockback animation.
-    if (maxDistance > MAX_KNOCKDOWN_DISTANCE) {
-        maxDistance = MAX_KNOCKDOWN_DISTANCE;
-    }
-
-    int distance;
-    int tile;
-    for (distance = 1; distance <= maxDistance; distance++) {
-        tile = tileGetTileInDirection(obj->tile, rotation, distance);
-        if (_obj_blocking_at(obj, tile, obj->elevation) != nullptr) {
-            distance--;
-            break;
-        }
-
-        // CE: Fix to prevent critters (including player) cross an exit grid as
-        // a result of knockback. Sfall has similar fix done differently and it
-        // affects the player only. This approach is better since it also
-        // prevents unreachable (=unlootable) corpses on exit grids.
-        if (isExitGridAt(tile, obj->elevation)) {
-            distance--;
-            break;
-        }
-    }
-
     const char* soundEffectName = sfxBuildCharName(obj, *anim, CharacterSoundEffect::KnockDown);
     animationRegisterPlaySoundEffect(obj, soundEffectName, delay);
 
-    // TODO: Check, probably step back because we've started with 1?
-    distance--;
+    int tile = _knockback_dest_tile(obj, maxDistance, rotation);
 
-    if (distance <= 0) {
-        tile = obj->tile;
+    if (tile == obj->tile) {
         animationRegisterAnimate(obj, *anim, 0);
     } else {
-        tile = tileGetTileInDirection(obj->tile, rotation, distance);
         animationRegisterMoveToTileStraightAndWaitForComplete(obj, tile, obj->elevation, *anim, 0);
     }
 
@@ -238,7 +248,7 @@ AnimationType pickDeathAnim(Object* attacker, Object* defender, Object* weapon, 
         attackerAnimation = ANIM_FIRE_SINGLE;
     }
 
-    if (attacker == gDude && perkHasRank(attacker, PERK_PYROMANIAC) && damageType == DAMAGE_TYPE_FIRE) {
+    if (playerActorIs(attacker) && perkHasRank(attacker, PERK_PYROMANIAC) && damageType == DAMAGE_TYPE_FIRE) {
         normalViolenceLevelDamageThreshold = 1;
         maximumBloodViolenceLevelDamageThreshold = 1;
     }
@@ -255,7 +265,7 @@ AnimationType pickDeathAnim(Object* attacker, Object* defender, Object* weapon, 
     }
 
     bool hasBloodyMess = false;
-    if (attacker == gDude && traitIsSelectedAndActive(TRAIT_BLOODY_MESS)) {
+    if (playerActorIs(attacker) && traitIsSelectedAndActive(TRAIT_BLOODY_MESS, attacker)) {
         hasBloodyMess = true;
     }
 
@@ -534,11 +544,23 @@ int _show_death(Object* obj, AnimationType anim)
         rectUnion(&dirtyRect, &tempRect, &dirtyRect);
     }
 
-    if (anim >= ANIM_ELECTRIFIED_TO_NOTHING && anim <= ANIM_EXPLODED_TO_NOTHING && !critterFlagCheck(obj, CRITTER_SPECIAL_DEATH) && !critterFlagCheck(obj, CRITTER_NO_DROP)) {
-        itemDropAll(obj, obj->tile);
+    // ►► STATE, not presentation — and on the dedicated server _show_death never
+    // runs at all (server_anim.cc animationRegisterCallbackForced RECORDS the
+    // callback and returns without invoking it). The viewer, which DOES replay it,
+    // must therefore not perform the drop: doing so dropped the corpse's inventory
+    // into the CLIENT'S world only, producing ground items the server had never
+    // heard of. Clicking one sent `get <netId>`, and the server — where those items
+    // were still inside the corpse — answered "bad target ... ignored". Nobody could
+    // ever loot an annihilated critter.
+    //
+    // The authoritative drop is applied server-side at the record site instead; see
+    // actionDeathDropItems below. pres_record.h:193 always specified this half as
+    // "guarded"; this is that guard, finally written.
+    if (!clientViewerActive()) {
+        actionDeathDropItems(obj, anim);
     }
 
-    tileWindowRefreshRect(&dirtyRect, obj->elevation);
+    presenter()->worldInvalidateRect(&dirtyRect, obj->elevation);
 
     return 0;
 }
@@ -667,7 +689,12 @@ int _action_melee(Attack* attack, AnimationType anim)
 
     strcpy(sfx_name_temp, sfx_name);
 
-    _combatai_msg(attack->attacker, attack, AI_MESSAGE_TYPE_ATTACK, 0);
+    // The viewer replays this sequence from a wire ATTACK_RESULT; the server already
+    // streams the real AI taunts as floatText, and the mirror does not faithfully
+    // hold the AI packet _combatai_msg reads — so suppress the local chatter (§3.c).
+    if (!clientViewerActive()) {
+        _combatai_msg(attack->attacker, attack, AI_MESSAGE_TYPE_ATTACK, 0);
+    }
 
     if (attack->attackerFlags & 0x0300) {
         animationRegisterPlaySoundEffect(attack->attacker, sfx_name_temp, 0);
@@ -711,12 +738,14 @@ int _action_melee(Attack* attack, AnimationType anim)
         }
     }
 
-    if ((attack->attackerFlags & DAM_HIT) != DAM_NONE) {
-        if ((attack->defenderFlags & DAM_DEAD) == DAM_NONE) {
-            _combatai_msg(attack->attacker, attack, AI_MESSAGE_TYPE_HIT, -1);
+    if (!clientViewerActive()) { // wire replay: server streams the real taunts (§3.c)
+        if ((attack->attackerFlags & DAM_HIT) != 0) {
+            if ((attack->defenderFlags & DAM_DEAD) == 0) {
+                _combatai_msg(attack->attacker, attack, AI_MESSAGE_TYPE_HIT, -1);
+            }
+        } else {
+            _combatai_msg(attack->attacker, attack, AI_MESSAGE_TYPE_MISS, -1);
         }
-    } else {
-        _combatai_msg(attack->attacker, attack, AI_MESSAGE_TYPE_MISS, -1);
     }
 
     if (reg_anim_end() == -1) {
@@ -771,7 +800,9 @@ int _action_ranged(Attack* attack, AnimationType anim)
         animationRegisterAnimate(attack->attacker, ANIM_POINT, -1);
     }
 
-    _combatai_msg(attack->attacker, attack, AI_MESSAGE_TYPE_ATTACK, 0);
+    if (!clientViewerActive()) { // wire replay: server streams the real taunts (§3.c)
+        _combatai_msg(attack->attacker, attack, AI_MESSAGE_TYPE_ATTACK, 0);
+    }
 
     const char* sfx;
     if ((FrmId(attack->attacker).weaponAnimation()) != WeaponAnimation::None) {
@@ -790,7 +821,7 @@ int _action_ranged(Attack* attack, AnimationType anim)
             const ProtoId projectileProtoId = weaponGetProjectileProtoId(weapon);
             Proto* projectileProto;
             if (protoGetProto(projectileProtoId, &projectileProto) != -1 && FrmId(projectileProto).valid()) {
-                if (anim == ANIM_THROW_ANIM) {
+                if (anim == ANIM_THROW_ANIM && !presRecordActive()) {
                     projectile = weapon;
                     weaponFrmId = FrmId(weapon);
                     ObjectFlags weaponFlags = weapon->flags;
@@ -819,12 +850,47 @@ int _action_ranged(Attack* attack, AnimationType anim)
                                 rightItemAction = INTERFACE_ITEM_ACTION_DEFAULT;
                             }
                         }
-                        interfaceUpdateItems(false, leftItemAction, rightItemAction);
+                        presenter()->hudItems(false, leftItemAction, rightItemAction);
                     }
 
                     _obj_connect(weapon, attack->attacker->tile, attack->attacker->elevation, nullptr);
                 } else {
+                    // Non-throw ranged, OR a RECORDED throw. For a recorded throw the
+                    // authoritative consumption + landed ground weapon are applied by
+                    // actionThrowConsumeHeadless on the STATE arm (combat.cc) — so we must
+                    // NOT mutate the attacker's inventory here; we only build the flight
+                    // PRESENTATION with a transient projectile, exactly like a non-throw
+                    // ranged shot (the common flight/explosion code below then streams it,
+                    // and the leak-fix destroys it after the section). weaponFid feeds the
+                    // tail's land-as-weapon setFid for a thrown weapon; it stays -1 for
+                    // bullets, where the tail never reads it.
+                    if (anim == ANIM_THROW_ANIM) {
+                        weaponFrmId = FrmId(weapon);
+                    }
                     objectCreateWithFrmIdProtoId(&projectile, FrmId(projectileProto), ProtoId::Empty());
+
+                    // PRESENTATION-RECORD: resolveRef runs DURING the record section and
+                    // needs NO_SAVE (+ created-this-beat) to classify the projectile as a
+                    // transient and ship it as OBJ_CREATE; vanilla sets NO_SAVE only later
+                    // in hideProjectile, too late for the recorder. Mark it now so its pose
+                    // streams (record-server only; SP is untouched — presRecordActive() is
+                    // false there). Destroyed after the section closes (below, leak fix).
+                    if (presRecordActive()) {
+                        projectile->flags |= OBJECT_NO_SAVE;
+                        // A NON-explosive thrown weapon becomes a ground item: the STATE arm
+                        // (actionThrowConsumeHeadless) _obj_connects the real weapon by netId,
+                        // and the AI later picks it up (disconnect). Map that netId onto this
+                        // flight transient so the disconnect removes it on the viewer — else
+                        // the spear phantoms and accumulates. Explosive throws (grenades) are
+                        // destroyed by the blast, not connected, so they must NOT adopt.
+                        if (anim == ANIM_THROW_ANIM) {
+                            bool explosive = damageType == explosionGetDamageType()
+                                || damageType == DAMAGE_TYPE_PLASMA || damageType == DAMAGE_TYPE_EMP;
+                            if (!explosive) {
+                                presRecordSetAdoptNetId(projectile, weapon->netId);
+                            }
+                        }
+                    }
                 }
 
                 objectHide(projectile, nullptr);
@@ -960,11 +1026,13 @@ int _action_ranged(Attack* attack, AnimationType anim)
 
     showDamage(attack, anim, delay);
 
-    if ((attack->attackerFlags & DAM_HIT) == DAM_NONE) {
-        _combatai_msg(attack->defender, attack, AI_MESSAGE_TYPE_MISS, -1);
-    } else {
-        if ((attack->defenderFlags & DAM_DEAD) == DAM_NONE) {
-            _combatai_msg(attack->defender, attack, AI_MESSAGE_TYPE_HIT, -1);
+    if (!clientViewerActive()) { // wire replay: server streams the real taunts (§3.c)
+        if ((attack->attackerFlags & DAM_HIT) == 0) {
+            _combatai_msg(attack->defender, attack, AI_MESSAGE_TYPE_MISS, -1);
+        } else {
+            if ((attack->defenderFlags & DAM_DEAD) == 0) {
+                _combatai_msg(attack->defender, attack, AI_MESSAGE_TYPE_HIT, -1);
+            }
         }
     }
 
@@ -1027,6 +1095,27 @@ int _action_ranged(Attack* attack, AnimationType anim)
 
     showDamageToExtras(attack);
 
+    // PRESENTATION-RECORD leak fix: under record the animate branch's completion
+    // callbacks are DROPped server-side (the viewer destroys the projectile via its own
+    // anim completion; the record server has no completion), so the transient projectile
+    // + any explosion clouds created above would leak on the record server (no_save
+    // count grows → run_record_purity FAIL). Their OBJ_CREATE poses are already captured
+    // in the stream, so free them now that the section has recorded. NON-THROW ONLY by
+    // construction — a throw is never recorded (combat.cc opens no section for it), so
+    // presRecordActive() is false and the real inventory weapon used as a throw
+    // projectile is never touched here. Mirrors the reg_anim_end()==-1 cleanup and
+    // actionExplode's STATE-block cloud destroy.
+    if (presRecordActive()) {
+        if (projectile != nullptr) {
+            objectDestroy(projectile, nullptr);
+        }
+        for (int rotation = 0; rotation < ROTATION_COUNT; rotation++) {
+            if (adjacentObjects[rotation] != nullptr) {
+                objectDestroy(adjacentObjects[rotation], nullptr);
+            }
+        }
+    }
+
     return 0;
 }
 
@@ -1039,7 +1128,7 @@ int _is_next_to(Object* obj1, Object* obj2)
             // You cannot get there.
             messageListItem.num = 2000;
             if (messageListGetItem(&gMiscMessageList, &messageListItem)) {
-                displayMonitorAddMessage(messageListItem.text);
+                presenter()->consoleMessage(messageListItem.text);
             }
         }
         return -1;
@@ -1127,6 +1216,33 @@ int _action_use_an_item_on_object(Object* user, Object* targetObj, Object* item)
         }
 
         sceneryType = proto->scenery.type;
+    }
+
+    if (serverLoopActive()) {
+        // Headless: the outcome (objectUse for use-object/ladder/stairs/door, or
+        // objectUseItemOn for use-item-on-object) is only reached via a
+        // reg_anim completion callback that never fires — no animation drives
+        // it — so this action was a silent no-op on the server path. Both
+        // handlers run synchronously in-call, so invoke them directly; mirrors
+        // objectUseDoor / actionPickUp. objectUse itself dispatches ladders and
+        // stairs to useLadder*/useStairs (the SCENERY_TYPE_LADDER_UP special
+        // case that the legacy path routes through _action_climb_ladder), and
+        // doors to objectUseDoor. objectUse ignores adjacency, which is the
+        // intended headless behavior (no walk-to).
+        if (item != nullptr) {
+            return objectUseItemOn(user, targetObj, item);
+        }
+        // Charge scenery AP as the legacy item==nullptr path does. HONOR the
+        // result: a refusal (not enough AP — it streams proto msg 700 itself)
+        // means the use does not happen. This return was discarded while the
+        // comment here could still say "a no-op out of combat, which the headless
+        // dude always is" — true until in-combat interaction became reachable
+        // over the wire, at which point ignoring it meant a player with 0 AP
+        // still opened the door, for free, on someone else's turn.
+        if (checkSceneryUseActionPointCost(user, targetObj) == -1) {
+            return -1;
+        }
+        return objectUse(user, targetObj);
     }
 
     if (sceneryType != SCENERY_TYPE_LADDER_UP || item != nullptr) {
@@ -1219,6 +1335,47 @@ int actionPickUp(Object* critter, Object* item)
         return -1;
     }
 
+    Proto* itemProto;
+    protoGetProto(ProtoId(item), &itemProto);
+    bool canPickup = itemProto->item.type != ITEM_TYPE_CONTAINER || _proto_action_can_pickup(ProtoId(item));
+
+    // PRESENTATION-RECORD (pickup gesture): on the dedicated server IN COMBAT, RUN the
+    // normally-skipped animate branch — the walk to the item + the crouch-and-grab
+    // ANIM_MAGIC_HANDS_GROUND — inside a record section so it streams as EVENT_PRES_SEQ,
+    // then apply the pickup outcome authoritatively below (the animate branch's objectPickup
+    // callback DROPs under record). Ground items only (a container pickup opens a modal not
+    // driven here). Flag off / SP / out of combat → the state-only fast path below (goldens
+    // unchanged). See COMBAT_MOVE_RECORD_DESIGN.md.
+    // The adopt-mapping (throw transient -> real netId) now registers at the seq's DECODE
+    // pass (client_net.cc OBJ_CREATE), so the thrown weapon is in _net before this pickup's
+    // state-lane DISCONNECT arrives regardless of pump lag — the phantom-spear regression
+    // that forced this off is fixed. Ground items only (a container pickup opens a modal not
+    // driven here). Flag off / SP / out of combat -> the state-only fast path below.
+    bool recording = serverLoopActive() && presRecordEnabled() && isInCombat()
+        && !presRecordActive() && canPickup;
+
+    if (serverLoopActive() && !recording) {
+        // Headless: the reg_anim completion callbacks that carry the pickup outcome never
+        // fire (no animation drives them), so apply the outcome directly. Container pickup
+        // opens the loot UI (a modal not driven headless) — decline rather than hang.
+        if (canPickup) {
+            // ►► The AP result is DELIBERATELY IGNORED here, and must stay that
+            // way until the asymmetry below is fixed. See the record-purity note
+            // in the `recording` branch: this path does not walk and that one
+            // does, so the two do not agree on the critter's AP by the time the
+            // pickup is decided. Honoring the refusal on either side alone makes
+            // record mode observable in the simulation, which the record-purity
+            // melee gate catches immediately (verified 2026-07-20).
+            checkSceneryUseActionPointCost(critter, item);
+            return objectPickup(critter, item);
+        }
+        return -1;
+    }
+
+    if (recording) {
+        presRecordAmbientBegin();
+    }
+
     if (critter == gDude) {
         AnimationType animationCode = FrmId(gDude).animationType();
         if (animationCode == ANIM_WALK || animationCode == ANIM_RUNNING) {
@@ -1241,10 +1398,7 @@ int actionPickUp(Object* critter, Object* item)
     animationRegisterCallbackForced(critter, item, (AnimationCallback*)_is_next_to, -1);
     animationRegisterCallback(critter, item, (AnimationCallback*)checkSceneryUseActionPointCost, -1);
 
-    Proto* itemProto;
-    protoGetProto(item, &itemProto);
-
-    if (itemProto->item.type != ITEM_TYPE_CONTAINER || _proto_action_can_pickup(item)) {
+    if (canPickup) {
         animationRegisterAnimate(critter, ANIM_MAGIC_HANDS_GROUND, 0);
 
         const FrmId frmId = FrmId(critter, ANIM_MAGIC_HANDS_GROUND, critter->rotation + 1);
@@ -1304,7 +1458,36 @@ int actionPickUp(Object* critter, Object* item)
         }
     }
 
-    return reg_anim_end();
+    int rc = reg_anim_end();
+
+    if (recording) {
+        presRecordAmbientEnd();
+        if (presRecordOpCount() > 2) {
+            presenter()->presSeq(presRecordData(), presRecordSize(), presRecordOpCount(), critter->netId);
+        }
+        presRecordCommitDeferred(); // the MoveToObject walk to the item
+        // Apply the pickup outcome authoritatively — the recorded objectPickup /
+        // checkSceneryUseActionPointCost callbacks DROP under record (the server never runs a
+        // recorded reg_anim's callbacks), so the state must be applied here.
+        //
+        // ►► KNOWN PRE-EXISTING ASYMMETRY, do not "fix" by honoring this return.
+        // This path registers an approach walk before charging; the non-record
+        // path above charges without walking. The two therefore disagree about
+        // the critter's AP at this point. While both sides IGNORE the refusal the
+        // divergence stays invisible (the pickup happens either way), which is
+        // why the record-purity gate has always passed. Honoring it on either
+        // side alone makes record mode observable in the sim and fails that gate
+        // (verified 2026-07-20). Making pickup respect AP properly means removing
+        // the walk asymmetry first — banked, not done here.
+        checkSceneryUseActionPointCost(critter, item);
+        bool traceP = getenv("F2_TRACE_EVENTS") != nullptr;
+        if (traceP) fprintf(stderr, "[cpickup] critter=%d item_net=%d item_tile=%d ops=%d\n",
+            critter->netId, item->netId, item->tile, presRecordOpCount());
+        int pr = objectPickup(critter, item);
+        if (traceP) fprintf(stderr, "[cpickup] done rc=%d item_tile_now=%d\n", pr, item->tile);
+    }
+
+    return rc;
 }
 
 // This is primarily used to loot critters, namely corpses.  I don't believe it can
@@ -1367,10 +1550,12 @@ static int _action_use_skill_in_combat_error(Object* critter)
 {
     MessageListItem messageListItem;
 
-    if (critter == gDude) {
+    // Any player actor, addressed to them — see checkSceneryUseActionPointCost for why
+    // the gDude test had to be generalized and why a refusal is not broadcast.
+    if (playerActorIs(critter)) {
         messageListItem.num = 902;
         if (messageListGetItem(&gProtoMessageList, &messageListItem) == 1) {
-            displayMonitorAddMessage(messageListItem.text);
+            presenter()->consoleMessageFor(critter->netId, messageListItem.text);
         }
     }
 
@@ -1471,20 +1656,22 @@ int actionUseSkill(Object* user, Object* target, Skill skill)
 
         return -1;
     case SKILL_SNEAK:
-        dudeToggleState(DUDE_STATE_SNEAKING);
+        // The user's own state — this is reached from the server's `skill` verb too,
+        // where `user` is the acting player and not necessarily the host.
+        dudeToggleState(DUDE_STATE_SNEAKING, user);
         return 0;
     default:
         debugPrint("\nskill_use: invalid skill used.");
     }
 
-    // Performer is either dude, or party member who's best at the specified
-    // skill in entire party, and this skill is his/her own best.
-    Object* performer = hookResult.userOverridden ? user : gDude;
+    // Performer is either the acting player, or the party member who's best at the
+    // specified skill in the entire party, and this skill is his/her own best.
+    Object* performer = user != nullptr ? user : gDude;
 
-    if (user == gDude && !hookResult.userOverridden) {
-        Object* partyMember = partyMemberGetBestInSkill(skill);
+    if (playerActorIs(user) && !hookResult.userOverridden) {
+        Object* partyMember = partyMemberGetBestInSkill(skill, user);
 
-        if (partyMember == gDude) {
+        if (partyMember == user) {
             partyMember = nullptr;
         }
 
@@ -1504,7 +1691,7 @@ int actionUseSkill(Object* user, Object* target, Skill skill)
             AnimationType anim = FrmId(partyMember).animationType();
             if (anim != ANIM_WALK && anim != ANIM_RUNNING) {
                 if (anim != ANIM_STAND) {
-                    performer = gDude;
+                    performer = user;
                     partyMember = nullptr;
                 }
             } else {
@@ -1513,20 +1700,19 @@ int actionUseSkill(Object* user, Object* target, Skill skill)
         }
 
         if (partyMember != nullptr) {
+            // "Is the acting player already standing on it?" — if so they do it
+            // themselves rather than sending a companion over.
             bool isDude = false;
-            if (objectGetDistanceBetween(gDude, target) <= 1) {
+            if (objectGetDistanceBetween(user, target) <= 1) {
                 isDude = true;
             }
 
             char* msg = skillsGetGenericResponse(partyMember, isDude);
 
-            Rect rect;
-            if (textObjectAdd(partyMember, msg, 101, COLOR_LIGHT_YELLOW, COLOR_BLACK, &rect) == 0) {
-                tileWindowRefreshRect(&rect, gElevation);
-            }
+            presenter()->floatText(partyMember, msg, 101, COLOR_LIGHT_YELLOW, COLOR_BLACK);
 
             if (isDude) {
-                performer = gDude;
+                performer = user;
                 partyMember = nullptr;
             }
         }
@@ -1537,6 +1723,20 @@ int actionUseSkill(Object* user, Object* target, Skill skill)
                 reg_anim_clear(performer);
             }
         }
+    }
+
+    if (serverLoopActive()) {
+        // Headless: the skill outcome (objectUseSkillOn) is welded to a reg_anim
+        // completion callback (animationRegisterCallback3 at the tail of this
+        // function) that never fires with no animation to drive it, so on the
+        // server path actionUseSkill was a silent no-op. Apply the outcome
+        // directly with the selected performer, mirroring the doors/pickup/
+        // use-object fast-paths and _combat_apply_attack_results. objectUseSkillOn
+        // runs the target's SCRIPT_PROC_USE_SKILL_ON (lockpick/science/traps lock +
+        // gvar effects) and then skillUse (first-aid/doctor/repair HP + cripple
+        // clears) in the correct order, so it is the single call to make. Adjacency
+        // (_is_next_to) is intentionally not gated, matching actionPickUp / objectUse.
+        return objectUseSkillOn(performer, target, skill);
     }
 
     if (isInCombat()) {
@@ -1718,7 +1918,25 @@ int actionExplode(int tile, MapElevation elevation, int minDamage, int maxDamage
 
     attackComputeDeathFlags(attack);
 
-    if (animate) {
+    // Headless: the animated branch welds damage/death/XP/scenery-destruction to
+    // reg_anim callbacks (_report_explosion / _finished_explosion) whose sequence
+    // is rejected by reg_anim_end under the server loop, dropping the whole
+    // outcome. Force the non-animated branch, which applies the identical outcome
+    // directly. Covers both the op_explosion opcode and the EXPLOSION queue event
+    // (both funnel through here). Mirror of the actionDamage gate below.
+    //
+    // PRESENTATION-RECORD POC (PRESENTATION_RECORD_REPLAY_SPEC.md §11): on the
+    // dedicated server with F2_SERVER_PRES_RECORD set, RUN this animate branch
+    // (normally skipped by !serverLoopActive) inside a record section so its LEAVES
+    // record a command stream (server_anim.cc + pres_record.cc), then ship it as
+    // EVENT_PRES_SEQ instead of the bespoke explosionFx cue. The state branch below
+    // still applies the outcome (the callbacks here are DROPped by the recorder).
+    // Gate OFF (or any non-server build) → this is false → today's path exactly.
+    bool recording = serverLoopActive() && presRecordEnabled();
+    if (animate && (!serverLoopActive() || recording)) {
+        if (recording) {
+            presRecordSectionBegin();
+        }
         _action_in_explode = true;
 
         reg_anim_begin(ANIMATION_REQUEST_RESERVED);
@@ -1744,6 +1962,9 @@ int actionExplode(int tile, MapElevation elevation, int minDamage, int maxDamage
         animationRegisterCallbackForced(nullptr, nullptr, (AnimationCallback*)_finished_explosion, -1);
         if (reg_anim_end() == -1) {
             _action_in_explode = false;
+            if (recording) {
+                presRecordSectionAbort();
+            }
 
             objectDestroy(explosion, nullptr);
 
@@ -1758,6 +1979,58 @@ int actionExplode(int tile, MapElevation elevation, int minDamage, int maxDamage
         }
 
         showDamageToExtras(attack);
+
+        if (recording) {
+            // Close the section (restore RNG so the sim stream is untouched) and
+            // ship the recorded stream. Clear the _action_in_explode latch the
+            // DROPped _finished_explosion would have cleared. Then fall through to
+            // the STATE block, which applies the outcome server-authoritatively.
+            presRecordSectionEnd();
+            _action_in_explode = false;
+            presenter()->presSeq(presRecordData(), presRecordSize(), presRecordOpCount());
+        } else {
+            // SP client: the reg_anim callbacks (run for real) applied the outcome
+            // and destroyed the transients — done, do not run the STATE block.
+            return 0;
+        }
+    }
+
+    if (serverLoopActive()) {
+        // Server equivalent of the animated path: report/apply FIRST so XP is
+        // awarded (mainTargetWasDead/extrasWasDead are false pre-kill) and each
+        // victim's destroy_p_proc runs, THEN finalize corpses with critterKill
+        // (the _show_death animation's job). Running critterKill first (as the
+        // legacy branch does) sets DAM_DEAD + strips the script before
+        // _apply_damage, dropping both the XP and the destroy procs. Mirrors
+        // the _combat_apply_attack_results ordering. (_report_explosion frees
+        // attack, so capture the dead targets first; max 1 defender + 6 extras.)
+        Object* deadTargets[7];
+        int deadTargetsLength = 0;
+        if (critter != nullptr && (attack->defenderFlags & DAM_DEAD) != 0) {
+            deadTargets[deadTargetsLength++] = critter;
+        }
+        for (int index = 0; index < attack->extrasLength; index++) {
+            if ((attack->extrasFlags[index] & DAM_DEAD) != 0) {
+                deadTargets[deadTargetsLength++] = attack->extras[index];
+            }
+        }
+
+        // Displace surviving critters (away from the blast center = the
+        // explosion object's tile) BEFORE _report_explosion, which runs
+        // _apply_damage. The animated path completes the actionKnockdown tile
+        // moves before _apply_damage, so the knockback/prone decision must see
+        // each critter's PRE-damage state; running it after _report_explosion
+        // would let the freshly-ORed DAM_KNOCKED_DOWN make critterIsProne
+        // suppress the knockback. Death flags were set by attackComputeDeathFlags
+        // above; _combat_apply_knockback skips DAM_DEAD victims itself.
+        // Mirror of the _combat_apply_attack_results knockback block.
+        _combat_apply_knockback(attack);
+
+        _report_explosion(attack, sourceObj);
+
+        for (int index = 0; index < deadTargetsLength; index++) {
+            critterKill(deadTargets[index], ANIM_INVALID, false);
+        }
     } else {
         // SFALL: Fix for destroy_p_proc not being called if the critter is
         // killed by explosives when you leave the map: run it before
@@ -1777,14 +2050,18 @@ int actionExplode(int tile, MapElevation elevation, int minDamage, int maxDamage
         }
 
         _report_explosion(attack, sourceObj);
+    }
 
-        _combat_explode_scenery(explosion, nullptr);
+    // Common cloud tail (was the outer else-branch tail): destroy the transient
+    // blast objects + run scenery damage. Runs for every state path (record and
+    // non-record server, and the non-animate path); the SP animate branch returned
+    // above (its reg_anim callbacks own teardown).
+    _combat_explode_scenery(explosion, nullptr);
 
-        objectDestroy(explosion, nullptr);
+    objectDestroy(explosion, nullptr);
 
-        for (Rotation rotation = ROTATION_FIRST; rotation < ROTATION_COUNT; rotation++) {
-            objectDestroy(adjacentExplosions[rotation], nullptr);
-        }
+    for (Rotation rotation = ROTATION_FIRST; rotation < ROTATION_COUNT; rotation++) {
+        objectDestroy(adjacentExplosions[rotation], nullptr);
     }
 
     return 0;
@@ -1806,7 +2083,7 @@ int _report_explosion(Attack* attack, Object* sourceObj)
     }
 
     attackComputeDeathFlags(attack);
-    _combat_display(attack);
+    combatNarrateAttack(attack);
     _apply_damage(attack, false);
 
     Object* anyDefender = nullptr;
@@ -1859,8 +2136,10 @@ int _report_explosion(Attack* attack, Object* sourceObj)
     internal_free(attack);
     gameUiEnable();
 
-    if (sourceObj == gDude) {
-        _combat_give_exps(xp);
+    // Any player actor earns here, not just the host — and it earns as ITSELF.
+    // playerActorIs IS `sourceObj == gDude` with an empty registry.
+    if (playerActorIs(sourceObj)) {
+        _combat_give_exps(xp, sourceObj);
     }
 
     return 0;
@@ -1936,7 +2215,7 @@ int _can_talk_to(Object* obj, Object* critter)
             MessageListItem messageListItem;
             messageListItem.num = 2000;
             if (messageListGetItem(&gMiscMessageList, &messageListItem)) {
-                displayMonitorAddMessage(messageListItem.text);
+                presenter()->consoleMessage(messageListItem.text);
             }
         }
 
@@ -1994,7 +2273,32 @@ void actionDamage(int tile, MapElevation elevation, int minDamage, int maxDamage
 
     attackComputeDeathFlags(attack);
 
-    if (animated) {
+    // Headless: the animated path welds _apply_damage/critterKill to the
+    // _report_dmg reg_anim callback, which never fires under the server loop
+    // (the sequence's reg_anim_end is rejected). Force the non-animated branch,
+    // which applies the identical outcome directly (mirror of
+    // _combat_apply_attack_results / actionExplode(animate=false)).
+    //
+    // PRESENTATION-RECORD (PRESENTATION_RECORD_REPLAY_SPEC.md §8, receive-damage /
+    // hit-react): on the dedicated server with F2_SERVER_PRES_RECORD set, RUN this
+    // animate branch (normally skipped by !serverLoopActive) inside a record section
+    // so its LEAVES record a command stream, then ship it as EVENT_PRES_SEQ. The
+    // STATE block below still applies the outcome (the _report_dmg callback here is
+    // DROPped by the recorder). Gate OFF (or the client/golden binary) → recording
+    // is false → today's path exactly. Mirror of the actionExplode gate above.
+    //
+    // The visible reaction (SFX + ANIM_HIT_FROM_* / death anim) rides the DEFENDER,
+    // a persistent object the viewer resolves by netId. The synthetic `attacker`
+    // (FID_0x20001F5, NO_SAVE, created THIS beat) is classified transient by
+    // resolveRef (created-this-beat && NO_SAVE) → ships as OBJ_CREATE, so its
+    // whc1xxx1 SFX + hide replay from a viewer-minted local transient. (This is the
+    // first family to exercise OBJ_CREATE end-to-end for a synthetic attacker.)
+    bool recording = serverLoopActive() && presRecordEnabled();
+    if (animated && (!serverLoopActive() || recording)) {
+        if (recording) {
+            presRecordSectionBegin();
+        }
+
         reg_anim_begin(ANIMATION_REQUEST_RESERVED);
         animationRegisterPlaySoundEffect(attacker, "whc1xxx1", 0);
         showDamage(attack, gMaximumBloodDeathAnimations[damageType], 0);
@@ -2002,10 +2306,47 @@ void actionDamage(int tile, MapElevation elevation, int minDamage, int maxDamage
         animationRegisterHideObjectForced(attacker);
 
         if (reg_anim_end() == -1) {
+            if (recording) {
+                presRecordSectionAbort();
+            }
             objectDestroy(attacker, nullptr);
             internal_free(attack);
             return;
         }
+
+        if (!recording) {
+            // SP client: the reg_anim callbacks (_report_dmg) apply the outcome and
+            // free `attack`; the attacker is hidden by the sequence. Done — do NOT
+            // run the STATE block below.
+            gameUiEnable();
+            return;
+        }
+
+        // Recording: close the section (restore RNG so the sim stream is untouched)
+        // and ship the recorded stream, then fall through to the STATE block, which
+        // applies the outcome server-authoritatively.
+        presRecordSectionEnd();
+        presenter()->presSeq(presRecordData(), presRecordSize(), presRecordOpCount());
+    }
+
+    if (serverLoopActive()) {
+        // Server equivalent of the animated path: apply damage FIRST (via
+        // _report_dmg -> _apply_damage) so the victim's destroy_p_proc runs and
+        // all death consequences fire, THEN finalize the corpse physically with
+        // critterKill (the _show_death animation's job). The legacy branch below
+        // runs critterKill first, which sets DAM_DEAD + strips the script before
+        // _apply_damage, silently dropping the destroy proc. Mirrors the
+        // _combat_apply_attack_results ordering. (_report_dmg frees attack, so
+        // capture the death decision first.)
+        Object* deadDefender = (defender != nullptr && (attack->defenderFlags & DAM_DEAD) != 0) ? defender : nullptr;
+
+        _report_dmg(attack, nullptr);
+
+        if (deadDefender != nullptr) {
+            critterKill(deadDefender, ANIM_INVALID, true);
+        }
+
+        objectDestroy(attacker, nullptr);
     } else {
         if (defender != nullptr) {
             if ((attack->defenderFlags & DAM_DEAD) != DAM_NONE) {
@@ -2025,7 +2366,7 @@ void actionDamage(int tile, MapElevation elevation, int minDamage, int maxDamage
 // 0x41363C
 int _report_dmg(Attack* attack, Object* _)
 {
-    _combat_display(attack);
+    combatNarrateAttack(attack);
     _apply_damage(attack, false);
     internal_free(attack);
     gameUiEnable();
@@ -2199,12 +2540,328 @@ static int hideProjectile(void* _, void* projectile)
 
     Rect rect;
     if (objectHide(proj, &rect) == 0) {
-        tileWindowRefreshRect(&rect, proj->elevation);
+        presenter()->worldInvalidateRect(&rect, proj->elevation);
     }
 
     proj->flags |= OBJECT_NO_SAVE;
 
     return 0;
+}
+
+
+
+int _knockback_dest_tile(Object* obj, int maxDistance, int rotation)
+{
+    // SFALL: Fix to limit the maximum distance for the knockback animation.
+    if (maxDistance > MAX_KNOCKDOWN_DISTANCE) {
+        maxDistance = MAX_KNOCKDOWN_DISTANCE;
+    }
+
+    int distance;
+    int tile;
+    for (distance = 1; distance <= maxDistance; distance++) {
+        tile = tileGetTileInDirection(obj->tile, static_cast<Rotation>(rotation), distance);
+        if (_obj_blocking_at(obj, tile, obj->elevation) != nullptr) {
+            distance--;
+            break;
+        }
+
+        // CE: Fix to prevent critters (including player) cross an exit grid as
+        // a result of knockback. Sfall has similar fix done differently and it
+        // affects the player only. This approach is better since it also
+        // prevents unreachable (=unlootable) corpses on exit grids.
+        if (isExitGridAt(tile, obj->elevation)) {
+            distance--;
+            break;
+        }
+    }
+
+    // TODO: Check, probably step back because we've started with 1?
+    distance--;
+
+    if (distance <= 0) {
+        return obj->tile;
+    }
+
+    return tileGetTileInDirection(obj->tile, static_cast<Rotation>(rotation), distance);
+}
+
+static int _knockback_headless_dest(Object* critter, int flags, int knockbackDistance, int attackerTile)
+{
+    if (critter == nullptr || knockbackDistance == 0) {
+        return critter != nullptr ? critter->tile : -1;
+    }
+
+    if ((flags & DAM_DEAD) != 0) {
+        return critter->tile;
+    }
+
+    if (critterFlagCheck(ProtoId(critter), CRITTER_NO_KNOCKBACK)) {
+        return critter->tile;
+    }
+
+    // Already-prone critters are not displaced: showDamageToObject's whole
+    // knockback block is gated on !critterIsProne(defender).
+    if (critterIsProne(critter)) {
+        return critter->tile;
+    }
+
+    // The fire-dance branch of showDamageToObject burns the critter in place
+    // and never calls actionKnockdown, so neither do we — otherwise the server
+    // would displace a critter the client leaves put.
+    if ((flags & (DAM_KNOCKED_OUT | DAM_KNOCKED_DOWN)) == 0
+        && (flags & DAM_ON_FIRE) != 0
+        && FrmId(critter, ANIM_FIRE_DANCE, FrmId(critter).weaponAnimation(), critter->rotation + 1).exist()) {
+        return critter->tile;
+    }
+
+    int rotation = tileGetRotationTo(attackerTile, critter->tile);
+    return _knockback_dest_tile(critter, knockbackDistance, rotation);
+}
+
+int _combat_compute_knockback(Attack* attack, Object** victims, int* dests)
+{
+    if (attack->attacker == nullptr) {
+        return 0;
+    }
+
+    int attackerTile = attack->attacker->tile;
+    int count = 0;
+
+    if (attack->defender != nullptr) {
+        victims[count] = attack->defender;
+        dests[count] = _knockback_headless_dest(attack->defender, attack->defenderFlags, attack->defenderKnockback, attackerTile);
+        count++;
+    }
+
+    for (int index = 0; index < attack->extrasLength; index++) {
+        victims[count] = attack->extras[index];
+        dests[count] = _knockback_headless_dest(attack->extras[index], attack->extrasFlags[index], attack->extrasKnockback[index], attackerTile);
+        count++;
+    }
+
+    return count;
+}
+
+void _combat_commit_knockback(Object** victims, const int* dests, int count)
+{
+    for (int index = 0; index < count; index++) {
+        if (dests[index] != victims[index]->tile) {
+            objectSetLocation(victims[index], dests[index], victims[index]->elevation, nullptr);
+        }
+    }
+}
+
+void _combat_apply_knockback(Attack* attack)
+{
+    // Compute + commit together — the explosion caller (actionExplode) already emits this
+    // AFTER its recorded presSeq, so no reorder is needed there. Only the melee/ranged path
+    // (_combat_apply_attack_results) splits the two halves around attackResult().
+    Object* victims[1 + EXPLOSION_TARGET_COUNT];
+    int dests[1 + EXPLOSION_TARGET_COUNT];
+    int count = _combat_compute_knockback(attack, victims, dests);
+    _combat_commit_knockback(victims, dests, count);
+}
+
+void* actionTalkToCallbackPtr()
+{
+    return (void*)(AnimationCallback*)_talk_to;
+}
+
+void actionDeathDropItems(Object* obj, int anim)
+{
+    if (anim >= ANIM_ELECTRIFIED_TO_NOTHING && anim <= ANIM_EXPLODED_TO_NOTHING
+        && !critterFlagCheck(ProtoId(obj), CRITTER_SPECIAL_DEATH)
+        && !critterFlagCheck(ProtoId(obj), CRITTER_NO_DROP)) {
+        itemDropAll(obj, obj->tile);
+    }
+}
+
+void* actionShowDeathCallbackPtr()
+{
+    return (void*)(AnimationCallback*)_show_death;
+}
+
+void actionPresReplayShowDeath(Object* obj, int anim)
+{
+    animationRegisterCallbackForced(obj, (void*)(intptr_t)anim, (AnimationCallback*)_show_death, -1);
+}
+
+void actionThrowConsumeHeadless(Attack* attack)
+{
+    int anim = critterGetAnimationForHitMode(attack->attacker, attack->hitMode);
+    if (anim != ANIM_THROW_ANIM) {
+        return;
+    }
+
+    // Same entry gate as _action_ranged: the throw branch (and thus consumption) is skipped
+    // on a critical miss that did not hit (line 886: DAM_HIT != 0 || DAM_CRITICAL == 0).
+    if ((attack->attackerFlags & DAM_HIT) == 0 && (attack->attackerFlags & DAM_CRITICAL) != 0) {
+        return;
+    }
+
+    Object* weapon = attack->weapon;
+    if (weapon == nullptr) {
+        return;
+    }
+
+    // A throw only consumes when the weapon actually has a projectile proto (matches the
+    // _action_ranged guard); otherwise the throw branch was never entered.
+    ProtoId projectilePid = weaponGetProjectileProtoId(weapon);
+    Proto* projectileProto;
+    if (protoGetProto(projectilePid, &projectileProto) == -1 || projectileProto->fid == -1) {
+        return;
+    }
+
+    ObjectFlags weaponFlags = weapon->flags;
+    int damageType = weaponGetDamageType(attack->attacker, weapon);
+    // SFALL isGrenade test (actions.cc:864): explosive throwables are consumed by the blast.
+    bool explosive = damageType == explosionGetDamageType()
+        || damageType == DAMAGE_TYPE_PLASMA
+        || damageType == DAMAGE_TYPE_EMP;
+
+    itemRemove(attack->attacker, weapon, 1);
+    itemReplace(attack->attacker, weapon, weaponFlags & OBJECT_IN_ANY_HAND);
+    _cAIPrepWeaponItem(attack->attacker, weapon);
+
+    // itemRemove detaches `weapon` (owner cleared) but does NOT free it — reconnect it to
+    // the world (spear) or destroy it (grenade), else it orphans.
+    if (explosive) {
+        objectDestroy(weapon, nullptr);
+    } else {
+        int landTile = (attack->attackerFlags & DAM_HIT) != 0 ? attack->defender->tile : attack->tile;
+        weapon->flags &= ~OBJECT_HIDDEN; // the animated path leaves it visible on the ground
+        _obj_connect(weapon, landTile, attack->defender->elevation, nullptr);
+    }
+}
+
+void actionExplodeReplay(int tile, int elevation, Attack* attack)
+{
+    const FrmId fid(MiscFrameId::RocketExplosion);
+    const MapElevation mapElevation = static_cast<MapElevation>(elevation);
+
+    Object* explosion = nullptr;
+    if (objectCreateWithFrmIdProtoId(&explosion, fid, ProtoId::Empty()) == -1) {
+        return;
+    }
+    objectHide(explosion, nullptr);
+    explosion->flags |= OBJECT_NO_SAVE;
+    objectSetLocation(explosion, tile, mapElevation, nullptr);
+
+    Object* adjacentExplosions[ROTATION_COUNT];
+    int adjacentCount = 0;
+    for (int rotation = 0; rotation < ROTATION_COUNT; rotation++) {
+        Object* obj = nullptr;
+        if (objectCreateWithFrmIdProtoId(&obj, fid, ProtoId::Empty()) == -1) {
+            break;
+        }
+        objectHide(obj, nullptr);
+        obj->flags |= OBJECT_NO_SAVE;
+        objectSetLocation(obj, tileGetTileInDirection(tile, static_cast<Rotation>(rotation), 1), mapElevation, nullptr);
+        adjacentExplosions[adjacentCount++] = obj;
+    }
+
+    // The center cloud is the attacker (its explosion fid drives the gib-anim choice).
+    attack->attacker = explosion;
+    attack->tile = tile;
+
+    reg_anim_begin(ANIMATION_REQUEST_RESERVED);
+    _register_priority(1);
+    animationRegisterPlaySoundEffect(explosion, "whn1xxx1", 0);
+    animationRegisterUnsetFlag(explosion, OBJECT_HIDDEN, 0);
+    animationRegisterAnimateAndHide(explosion, ANIM_STAND, 0);
+    showDamage(attack, ANIM_STAND, 1); // defender reaction (no-op when attack->defender == null)
+
+    for (int rotation = 0; rotation < adjacentCount; rotation++) {
+        animationRegisterUnsetFlag(adjacentExplosions[rotation], OBJECT_HIDDEN, 0);
+        animationRegisterAnimateAndHide(adjacentExplosions[rotation], ANIM_STAND, 0);
+    }
+
+    animationRegisterHideObjectForced(explosion);
+    for (int rotation = 0; rotation < adjacentCount; rotation++) {
+        animationRegisterHideObjectForced(adjacentExplosions[rotation]);
+    }
+    if (reg_anim_end() == -1) {
+        // Rejected (should not happen for brand-new objects) — tear the transients down
+        // directly so nothing leaks, and skip the extras (their own sequences).
+        objectDestroy(explosion, nullptr);
+        for (int rotation = 0; rotation < adjacentCount; rotation++) {
+            objectDestroy(adjacentExplosions[rotation], nullptr);
+        }
+        return;
+    }
+
+    showDamageToExtras(attack); // ring victims (each its own reg_anim sequence)
+}
+
+void actionResolveDroppedExplosive(Object* dropper)
+{
+    Attack attack;
+    attackInit(&attack, dropper, nullptr, HIT_MODE_PUNCH, HIT_LOCATION_TORSO);
+    attack.attackerFlags = DAM_HIT;
+    attack.tile = dropper->tile;
+    _compute_explosion_on_extras(&attack, 0, 0, 1);
+
+    Object* watcher = nullptr;
+    for (int index = 0; index < attack.extrasLength; index++) {
+        Object* critter = attack.extras[index];
+        if (critter != dropper
+            && critter->data.critter.combat.team != dropper->data.critter.combat.team
+            && statRoll(critter, STAT_PERCEPTION, 0, nullptr) >= ROLL_SUCCESS) {
+            critterSetWhoHitMe(critter, dropper);
+
+            if (watcher == nullptr) {
+                watcher = critter;
+            }
+        }
+    }
+
+    if (watcher != nullptr) {
+        if (!isInCombat()) {
+            CombatStartData combat;
+            combat.attacker = watcher;
+            combat.defender = dropper;
+            combat.actionPointsBonus = 0;
+            combat.accuracyBonus = 0;
+            combat.damageBonus = 0;
+            combat.minDamage = 0;
+            combat.maxDamage = INT_MAX;
+            combat.overrideAttackResults = 0;
+            scriptsRequestCombat(&combat);
+        }
+    }
+}
+
+int actionUseItemOnObjectWithApCost(Object* user, Object* targetObj, Object* item)
+{
+    // Policy switch, combat_ap.h: charging off → fall through to the untaxed
+    // pass-through below. One of the three interaction charge points.
+    if (isInCombat() && kCombatApChargeEnabled) {
+        if (user->data.critter.combat.ap < 2) {
+            return -1;
+        }
+
+        int rc = _action_use_an_item_on_object(user, targetObj, item);
+        if (rc != -1) {
+            int actionPoints = user->data.critter.combat.ap;
+            if (actionPoints < 2) {
+                user->data.critter.combat.ap = 0;
+            } else {
+                user->data.critter.combat.ap = actionPoints - 2;
+            }
+
+            presenter()->hudActionPoints(user->data.critter.combat.ap, _combat_free_move);
+        }
+
+        return rc;
+    }
+
+    return _action_use_an_item_on_object(user, targetObj, item);
+}
+
+void* actionHideProjectileCallbackPtr()
+{
+    return (void*)(AnimationCallback*)hideProjectile;
 }
 
 } // namespace fallout

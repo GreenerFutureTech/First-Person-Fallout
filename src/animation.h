@@ -1,12 +1,15 @@
 #ifndef ANIMATION_H
 #define ANIMATION_H
 
+#include "path.h"
+
 #include "animation_defs.h"
 #include "art.h"
 #include "art_defs.h"
 #include "combat_defs.h"
 #include "map_defs.h"
 #include "obj_types.h"
+#include "path.h"
 
 namespace fallout {
 
@@ -15,15 +18,6 @@ typedef int(AnimationCallback)(void* a1, void* a2);
 
 // Signature of animation callback accepting 3 parameters.
 typedef int(AnimationCallback3)(void* a1, void* a2, void* a3);
-
-typedef struct StraightPathNode {
-    int tile;
-    MapElevation elevation;
-    int x;
-    int y;
-} StraightPathNode;
-
-typedef Object* PathBuilderCallback(Object* object, int tile, MapElevation elevation);
 
 void animationInit();
 void animationReset();

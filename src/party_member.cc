@@ -1,3 +1,6 @@
+#include "presenter.h"
+#include "server_loop.h" // serverDedicatedActive — skip dialog-window UI on the headless server
+#include "server_players.h" // playerActorAt/Count — rest heals every player actor (co-op)
 #include "party_member.h"
 
 #include <stdio.h>
@@ -36,6 +39,47 @@
 #include "worldmap.h"
 
 namespace fallout {
+
+static bool partySkillPlayerEligible(Object* actor, int slot);
+
+static int gRestHealAccumulatedMinutes = 0;
+
+void restHealReset();
+
+bool restHealCheck(int minutes);
+
+bool restHealApply();
+
+void restSimPacing(int hours, int minutes, double* minutesPhaseFrames, double* hoursPhaseFrames);
+
+int restSimMinutesTick(unsigned int startTime, int frame, double frameCount, int minutes);
+
+void restSimMinutesFinish(unsigned int startTime, int minutes);
+
+int restSimHoursTick(unsigned int startTime, int frame, double frameCount, int hours);
+
+void restSimHoursFinish(unsigned int startTime, int hours);
+
+bool restSimOverdueEvents();
+
+int restUntilHealedDuration();
+
+void restUntilHourDuration(int* hours, int* minutes, int wakeUpHour);
+
+void restOptionDecode(int option, int* hours, int* minutes, int* kind);
+
+int partyGroupSize();
+
+bool partyHasRecruitedMembers();
+
+static bool partySkillPlayerEligible(Object* actor, int slot);
+
+static int partyCompanionBestSkillValue(Skill skill);
+
+int partyGetBestSkillValueFor(Skill skill, Object* actor);
+
+Object* partyGetBestSkillPlayerActor(Skill skill);
+
 
 // SFALL: Increase the maximum party member level from vanilla's 5 to 10.
 #define PARTY_MEMBER_MAX_LEVEL 10
@@ -377,7 +421,12 @@ int partyMemberAdd(Object* object)
     critterSetTeam(object, 0);
     queueRemoveEventsByType(object, EVENT_TYPE_SCRIPT);
 
-    if (_gdialogActive()) {
+    // _gdialogUpdatePartyStatus() lays out the dialog window's party-status control
+    // with screenGetWidth — pure client UI that aborts on the core-only server. The
+    // party change already landed above; a viewer updates its own dialog window from
+    // the stream. Skip the UI on the dedicated server (recruiting/dismissing a
+    // companion mid-dialog, e.g. Sulik, otherwise SIGABRTs f2_server).
+    if (_gdialogActive() && !serverDedicatedActive()) {
         if (object == gGameDialogSpeaker) {
             _gdialogUpdatePartyStatus();
         }
@@ -430,7 +479,12 @@ int partyMemberRemove(Object* object)
 
     queueRemoveEventsByType(object, EVENT_TYPE_SCRIPT);
 
-    if (_gdialogActive()) {
+    // _gdialogUpdatePartyStatus() lays out the dialog window's party-status control
+    // with screenGetWidth — pure client UI that aborts on the core-only server. The
+    // party change already landed above; a viewer updates its own dialog window from
+    // the stream. Skip the UI on the dedicated server (recruiting/dismissing a
+    // companion mid-dialog, e.g. Sulik, otherwise SIGABRTs f2_server).
+    if (_gdialogActive() && !serverDedicatedActive()) {
         if (object == gGameDialogSpeaker) {
             _gdialogUpdatePartyStatus();
         }
@@ -449,6 +503,18 @@ int _partyMemberPrepSave()
 
         if (index > 0) {
             ptr->object->flags &= ~(OBJECT_NO_REMOVE | OBJECT_NO_SAVE);
+            // ►► WARN WHILE IT IS STILL RECOVERABLE. Clearing NO_SAVE only gets this
+            // object written if it is part of the map body being saved; one sitting in
+            // limbo (tile -1) is in no save at all, and partyMembersLoad will delete it
+            // from the roster on the way back in (see the note there). Vanilla notices
+            // this one beat too late — at LOAD, when the object is already unreachable.
+            // Saying it at SAVE time is the difference between "go collect your car"
+            // and "your trunk and everything in it are gone".
+            if (ptr->object->tile == -1) {
+                fprintf(stderr, "f2_server: party member id=%d (proto index %d) is OFF-MAP"
+                                " at save — it will be dropped when this save is loaded\n",
+                    ptr->object->id, ptr->object->id - 18000);
+            }
         }
 
         Script* script;
@@ -551,7 +617,7 @@ static int _partyMemberPrepLoadInstance(PartyMemberListItem* a1)
 
     a1->script = (Script*)internal_malloc(sizeof(*script));
     if (a1->script == nullptr) {
-        showMessageBox("\n  Error!: partyMemberPrepLoad: Out of memory!");
+        presenter()->errorBox("\n  Error!: partyMemberPrepLoad: Out of memory!");
         exit(1);
     }
 
@@ -560,7 +626,7 @@ static int _partyMemberPrepLoadInstance(PartyMemberListItem* a1)
     if (script->localVarsCount != 0 && script->localVarsOffset != -1) {
         a1->vars = (int*)internal_malloc(sizeof(*a1->vars) * script->localVarsCount);
         if (a1->vars == nullptr) {
-            showMessageBox("\n  Error!: partyMemberPrepLoad: Out of memory!");
+            presenter()->errorBox("\n  Error!: partyMemberPrepLoad: Out of memory!");
             exit(1);
         }
 
@@ -632,7 +698,7 @@ int _partyMemberRecoverLoad()
 static int _partyMemberRecoverLoadInstance(PartyMemberListItem* a1)
 {
     if (a1->script == nullptr) {
-        debugPrint("\n  Error!: partyMemberRecoverLoadInstance: No script!");
+        presenter()->errorBox("\n  Error!: partyMemberRecoverLoadInstance: No script!");
         return 0;
     }
 
@@ -643,13 +709,13 @@ static int _partyMemberRecoverLoadInstance(PartyMemberListItem* a1)
 
     int v1 = -1;
     if (scriptAdd(&v1, scriptType) == -1) {
-        showMessageBox("\n  Error!: partyMemberRecoverLoad: Can't create script!");
+        presenter()->errorBox("\n  Error!: partyMemberRecoverLoad: Can't create script!");
         exit(1);
     }
 
     Script* script;
     if (scriptGetScript(v1, &script) == -1) {
-        showMessageBox("\n  Error!: partyMemberRecoverLoad: Can't find script!");
+        presenter()->errorBox("\n  Error!: partyMemberRecoverLoad: Can't find script!");
         exit(1);
     }
 
@@ -709,6 +775,23 @@ int partyMembersLoad(File* stream)
                 gPartyMembers[index].object = object;
             } else {
                 debugPrint("Couldn't find party member on map...trying to load anyway.\n");
+                // ►► THIS IS SILENT DATA LOSS, AND IT MUST NOT BE. The id resolved
+                // against nothing on the loaded map, so the block below DROPS this
+                // member from the party for good — and if it was a CONTAINER (the
+                // Highwayman's trunk, pid 455) its contents go with it. That is the
+                // known vanilla "car trunk disappeared" bug: a party object must be on
+                // the map you save, because _partyMemberPrepSave clears its NO_SAVE
+                // only for the CURRENT map body; one stranded elsewhere is in no save
+                // at all, and this loop then deletes it from the roster.
+                //
+                // Vanilla's only complaint is the debugPrint above, which reaches
+                // nobody unless DEBUGACTIVE is set — so on a dedicated server the loss
+                // is completely invisible. Say it on stderr instead. partyMemberAdd
+                // stamps id = (pid & 0xFFFFFF) + 18000, so the id names the proto that
+                // just vanished: 18455 = the car trunk.
+                fprintf(stderr, "f2_server: party member id=%d (proto index %d) DROPPED"
+                                " — not on the loaded map; its inventory is lost\n",
+                    objectId, objectId - 18000);
 
                 partyMemberObjectIds.erase(partyMemberObjectIds.begin() + index);
                 // Amend original alloc size just in case
@@ -841,6 +924,19 @@ int _partyMemberRestingHeal(int hours)
         if (ProtoId(partyMember->object).objectType() == OBJ_TYPE_CRITTER) {
             int healingRate = critterGetStat(partyMember->object, STAT_HEALING_RATE);
             critterAdjustHitPoints(partyMember->object, healingTicks * healingRate);
+        }
+    }
+
+    // Co-op: extra players are first-class actors, NOT gPartyMembers, so the loop
+    // above misses them. Rest heals ALL players (owner ruling 2026-07-24) — slot 0
+    // is gDude, already healed via the party list, so heal the other player actors
+    // on their own healing rate. SP (playerActorCount()==1) skips this entirely, so
+    // the behaviour and goldens are unchanged.
+    for (int slot = 1; slot < playerActorCount(); slot++) {
+        Object* actor = playerActorAt(slot);
+        if (actor != nullptr && ProtoId(actor).objectType() == OBJ_TYPE_CRITTER) {
+            int healingRate = critterGetStat(actor, STAT_HEALING_RATE);
+            critterAdjustHitPoints(actor, hours * healingRate);
         }
     }
 
@@ -1008,7 +1104,7 @@ static int _partyMemberPrepItemSave(Object* object)
     if (object->sid != -1) {
         Script* script;
         if (scriptGetScript(object->sid, &script) == -1) {
-            showMessageBox("\n  Error!: partyMemberPrepItemSaveAll: Can't find script!");
+            presenter()->errorBox("\n  Error!: partyMemberPrepItemSaveAll: Can't find script!");
             exit(1);
         }
 
@@ -1030,7 +1126,7 @@ static int _partyMemberItemSave(Object* object)
     if (object->sid != -1) {
         Script* script;
         if (scriptGetScript(object->sid, &script) == -1) {
-            showMessageBox("\n  Error!: partyMemberItemSave: Can't find script!");
+            presenter()->errorBox("\n  Error!: partyMemberItemSave: Can't find script!");
             exit(1);
         }
 
@@ -1041,7 +1137,7 @@ static int _partyMemberItemSave(Object* object)
 
         PartyMemberListItem* node = (PartyMemberListItem*)internal_malloc(sizeof(*node));
         if (node == nullptr) {
-            showMessageBox("\n  Error!: partyMemberItemSave: Out of memory!");
+            presenter()->errorBox("\n  Error!: partyMemberItemSave: Out of memory!");
             exit(1);
         }
 
@@ -1049,7 +1145,7 @@ static int _partyMemberItemSave(Object* object)
 
         node->script = (Script*)internal_malloc(sizeof(*script));
         if (node->script == nullptr) {
-            showMessageBox("\n  Error!: partyMemberItemSave: Out of memory!");
+            presenter()->errorBox("\n  Error!: partyMemberItemSave: Out of memory!");
             exit(1);
         }
 
@@ -1058,7 +1154,7 @@ static int _partyMemberItemSave(Object* object)
         if (script->localVarsCount != 0 && script->localVarsOffset != -1) {
             node->vars = (int*)internal_malloc(sizeof(*node->vars) * script->localVarsCount);
             if (node->vars == nullptr) {
-                showMessageBox("\n  Error!: partyMemberItemSave: Out of memory!");
+                presenter()->errorBox("\n  Error!: partyMemberItemSave: Out of memory!");
                 exit(1);
             }
 
@@ -1087,13 +1183,13 @@ static int _partyMemberItemRecover(PartyMemberListItem* a1)
 {
     int sid = -1;
     if (scriptAdd(&sid, SCRIPT_TYPE_ITEM) == -1) {
-        showMessageBox("\n  Error!: partyMemberItemRecover: Can't create script!");
+        presenter()->errorBox("\n  Error!: partyMemberItemRecover: Can't create script!");
         exit(1);
     }
 
     Script* script;
     if (scriptGetScript(sid, &script) == -1) {
-        showMessageBox("\n  Error!: partyMemberItemRecover: Can't find script!");
+        presenter()->errorBox("\n  Error!: partyMemberItemRecover: Can't find script!");
         exit(1);
     }
 
@@ -1170,7 +1266,7 @@ Skill partyMemberGetBestSkill(Object* object)
 // Returns party member with highest skill level.
 //
 // 0x495560 partyMemberWithHighestSkill
-Object* partyMemberGetBestInSkill(Skill skill)
+Object* partyMemberGetBestInSkill(Skill skill, Object* actor)
 {
     int bestValue = 0;
     Object* bestPartyMember = nullptr;
@@ -1186,6 +1282,20 @@ Object* partyMemberGetBestInSkill(Skill skill)
         }
     }
 
+    // The acting player is a candidate for their OWN skill use. Without this an extra
+    // who is the best in the group at Doctor gets silently replaced by a worse companion
+    // — or by the host — because the only player in the list is slot 0.
+    if (actor != nullptr && playerActorIs(actor)) {
+        int slot = playerActorSlotOf(actor);
+        if (partySkillPlayerEligible(actor, slot)) {
+            int value = skillGetValue(actor, skill);
+            if (value > bestValue) {
+                bestValue = value;
+                bestPartyMember = actor;
+            }
+        }
+    }
+
     return bestPartyMember;
 }
 
@@ -1194,15 +1304,17 @@ Object* partyMemberGetBestInSkill(Skill skill)
 // 0x4955C8 partyMemberHighestSkillLevel
 int partyGetBestSkillValue(Skill skill)
 {
-    int bestValue = 0;
+    int bestValue = partyCompanionBestSkillValue(skill);
 
-    for (int index = 0; index < gPartyMembersLength; index++) {
-        Object* object = gPartyMembers[index].object;
-        if ((object->flags & OBJECT_HIDDEN) == OBJECT_NONE && ProtoId(object).objectType() == OBJ_TYPE_CRITTER) {
-            int value = skillGetValue(object, skill);
-            if (value > bestValue) {
-                bestValue = value;
-            }
+    int count = playerActorCount();
+    for (int slot = 0; slot < count; slot++) {
+        Object* actor = playerActorAt(slot);
+        if (!partySkillPlayerEligible(actor, slot)) {
+            continue;
+        }
+        int value = skillGetValue(actor, skill);
+        if (value > bestValue) {
+            bestValue = value;
         }
     }
 
@@ -1478,7 +1590,6 @@ int _partyMemberIncLevels()
     char* text;
     MessageListItem msg;
     char str[260];
-    Rect levelUpMessageRect;
 
     memberIndex = -1;
     for (i = 1; i < gPartyMembersLength; i++) {
@@ -1558,7 +1669,7 @@ int _partyMemberIncLevels()
         // %s has gained in some abilities.
         text = getmsg(&gMiscMessageList, &msg, 9000);
         snprintf(str, sizeof(str), text, name);
-        displayMonitorAddMessage(str);
+        presenter()->consoleMessage(str);
 
         debugPrint("%s", str);
 
@@ -1567,8 +1678,7 @@ int _partyMemberIncLevels()
         if (messageListGetItem(&gMiscMessageList, &msg)) {
             name = critterGetName(obj);
             snprintf(str, sizeof(str), msg.text, name);
-            textObjectAdd(obj, str, 101, COLOR_WHITE, COLOR_BLACK, &levelUpMessageRect);
-            tileWindowRefreshRect(&levelUpMessageRect, obj->elevation);
+            presenter()->floatText(obj, str, 101, COLOR_WHITE, COLOR_BLACK);
         }
     }
 
@@ -1725,6 +1835,293 @@ std::vector<Object*> get_all_party_members_objects(bool include_hidden)
         }
     }
     return value;
+}
+
+
+
+void restHealReset()
+{
+    gRestHealAccumulatedMinutes = 0;
+}
+
+bool restHealCheck(int minutes)
+{
+    gRestHealAccumulatedMinutes += minutes;
+
+    if (gRestHealAccumulatedMinutes < 180) {
+        return false;
+    }
+
+    debugPrint("\n health added!\n");
+    gRestHealAccumulatedMinutes = 0;
+
+    return true;
+}
+
+bool restHealApply()
+{
+    _partyMemberRestingHeal(3);
+
+    int currentHp = critterGetHitPoints(gDude);
+    int maxHp = critterGetStat(gDude, STAT_MAXIMUM_HIT_POINTS);
+    return currentHp == maxHp;
+}
+
+void restSimPacing(int hours, int minutes, double* minutesPhaseFrames, double* hoursPhaseFrames)
+{
+    int hoursInMinutes = hours * 60;
+    double v1 = (double)hoursInMinutes + (double)minutes;
+    double v2 = v1 * (1.0 / 1440.0) * 3.5 + 0.25;
+    double v3 = (double)minutes / v1 * v2;
+
+    *minutesPhaseFrames = v3 * 20.0;
+    *hoursPhaseFrames = (v2 - v3) * 20.0;
+}
+
+int restSimMinutesTick(unsigned int startTime, int frame, double frameCount, int minutes)
+{
+    unsigned int target = (unsigned int)((double)frame / frameCount * ((double)minutes * 600.0) + (double)startTime);
+    unsigned int nextEventTime = queueGetNextEventTime();
+    if (target >= nextEventTime) {
+        gameTimeSetTime(nextEventTime + 1);
+        if (queueProcessEvents()) {
+            return REST_SIM_TICK_EVENT;
+        }
+
+        if (_game_user_wants_to_quit != 0) {
+            return REST_SIM_TICK_QUIT;
+        }
+    }
+
+    gameTimeSetTime(target);
+
+    return REST_SIM_TICK_ADVANCED;
+}
+
+void restSimMinutesFinish(unsigned int startTime, int minutes)
+{
+    gameTimeSetTime(startTime + 600 * minutes);
+
+    if (restHealCheck(minutes)) {
+        // NOTE: Uninline.
+        restHealApply();
+    }
+}
+
+int restSimHoursTick(unsigned int startTime, int frame, double frameCount, int hours)
+{
+    unsigned int target = (unsigned int)((double)frame / frameCount * (hours * GAME_TIME_TICKS_PER_HOUR) + startTime);
+    unsigned int nextEventTime = queueGetNextEventTime();
+    if (target >= nextEventTime) {
+        gameTimeSetTime(nextEventTime + 1);
+
+        if (queueProcessEvents()) {
+            return REST_SIM_TICK_EVENT;
+        }
+
+        if (_game_user_wants_to_quit != 0) {
+            return REST_SIM_TICK_QUIT;
+        }
+    }
+
+    gameTimeSetTime(target);
+
+    int hoursInMinutes = hours * 60;
+    int healthToAdd = (int)((double)hoursInMinutes / frameCount);
+    if (restHealCheck(healthToAdd)) {
+        // NOTE: Uninline.
+        restHealApply();
+    }
+
+    return REST_SIM_TICK_ADVANCED;
+}
+
+void restSimHoursFinish(unsigned int startTime, int hours)
+{
+    gameTimeSetTime(startTime + GAME_TIME_TICKS_PER_HOUR * hours);
+}
+
+bool restSimOverdueEvents()
+{
+    if (gameTimeGetTime() > queueGetNextEventTime()) {
+        if (queueProcessEvents()) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+int restUntilHealedDuration()
+{
+    int currentHp = critterGetHitPoints(gDude);
+    int maxHp = critterGetStat(gDude, STAT_MAXIMUM_HIT_POINTS);
+    int hpToHeal = maxHp - currentHp;
+    int healingRate = critterGetStat(gDude, STAT_HEALING_RATE);
+    return (int)((double)hpToHeal / (double)healingRate * 3.0);
+}
+
+void restUntilHourDuration(int* hours, int* minutes, int wakeUpHour)
+{
+    int gameTimeHour = gameTimeGetHour();
+
+    *hours = gameTimeHour / 100;
+    *minutes = gameTimeHour % 100;
+
+    if (*hours != wakeUpHour || *minutes != 0) {
+        *hours = wakeUpHour - *hours;
+        if (*hours < 0) {
+            *hours += 24;
+            if (*minutes != 0) {
+                *hours -= 1;
+                *minutes = 60 - *minutes;
+            }
+        } else {
+            if (*minutes != 0) {
+                *hours -= 1;
+                *minutes = 60 - *minutes;
+                if (*hours < 0) {
+                    *hours = 23;
+                }
+            }
+        }
+    } else {
+        *hours = 24;
+    }
+}
+
+void restOptionDecode(int option, int* hours, int* minutes, int* kind)
+{
+    *hours = 0;
+    *minutes = 0;
+    *kind = 0;
+
+    switch (option) {
+    case PIPBOY_REST_DURATION_TEN_MINUTES:
+        *minutes = 10;
+        break;
+    case PIPBOY_REST_DURATION_THIRTY_MINUTES:
+        *minutes = 30;
+        break;
+    case PIPBOY_REST_DURATION_ONE_HOUR:
+    case PIPBOY_REST_DURATION_TWO_HOURS:
+    case PIPBOY_REST_DURATION_THREE_HOURS:
+    case PIPBOY_REST_DURATION_FOUR_HOURS:
+    case PIPBOY_REST_DURATION_FIVE_HOURS:
+    case PIPBOY_REST_DURATION_SIX_HOURS:
+        *hours = option - 1;
+        break;
+    case PIPBOY_REST_DURATION_UNTIL_MORNING:
+        restUntilHourDuration(hours, minutes, 8);
+        break;
+    case PIPBOY_REST_DURATION_UNTIL_NOON:
+        restUntilHourDuration(hours, minutes, 12);
+        break;
+    case PIPBOY_REST_DURATION_UNTIL_EVENING:
+        restUntilHourDuration(hours, minutes, 18);
+        break;
+    case PIPBOY_REST_DURATION_UNTIL_MIDNIGHT:
+        restUntilHourDuration(hours, minutes, 0);
+        break;
+    case PIPBOY_REST_DURATION_UNTIL_HEALED:
+    case PIPBOY_REST_DURATION_UNTIL_PARTY_HEALED:
+        *kind = option;
+        break;
+    }
+}
+
+int partyGroupSize()
+{
+    int count = _getPartyMemberCount();
+
+    // Slot 0 is skipped: it is gPartyMembers[0], already counted above.
+    int actorCount = playerActorCount();
+    for (int slot = 1; slot < actorCount; slot++) {
+        if (partySkillPlayerEligible(playerActorAt(slot), slot)) {
+            count++;
+        }
+    }
+
+    return count;
+}
+
+bool partyHasRecruitedMembers()
+{
+    return gPartyMembersLength > 1;
+}
+
+static bool partySkillPlayerEligible(Object* actor, int slot)
+{
+    return actor != nullptr
+        && playerActorOnline(slot)
+        && (actor->flags & OBJECT_HIDDEN) == 0
+        && ProtoId(actor).objectType() == OBJ_TYPE_CRITTER
+        && !critterIsDead(actor);
+}
+
+static int partyCompanionBestSkillValue(Skill skill)
+{
+    int bestValue = 0;
+
+    for (int index = 0; index < gPartyMembersLength; index++) {
+        Object* object = gPartyMembers[index].object;
+        if ((object->flags & OBJECT_HIDDEN) == 0 && ProtoId(object).objectType() == OBJ_TYPE_CRITTER) {
+            int value = skillGetValue(object, skill);
+            if (value > bestValue) {
+                bestValue = value;
+            }
+        }
+    }
+
+    return bestValue;
+}
+
+int partyGetBestSkillValueFor(Skill skill, Object* actor)
+{
+    int bestValue = 0;
+
+    // Companions only — index 0 is the HOST BODY, and for an extra's solo act the host
+    // is another player, not a companion helping out.
+    for (int index = 1; index < gPartyMembersLength; index++) {
+        Object* object = gPartyMembers[index].object;
+        if ((object->flags & OBJECT_HIDDEN) == 0 && ProtoId(object).objectType() == OBJ_TYPE_CRITTER) {
+            int value = skillGetValue(object, skill);
+            if (value > bestValue) {
+                bestValue = value;
+            }
+        }
+    }
+
+    if (actor != nullptr && (actor->flags & OBJECT_HIDDEN) == 0
+        && ProtoId(actor).objectType() == OBJ_TYPE_CRITTER) {
+        int value = skillGetValue(actor, skill);
+        if (value > bestValue) {
+            bestValue = value;
+        }
+    }
+
+    return bestValue;
+}
+
+Object* partyGetBestSkillPlayerActor(Skill skill)
+{
+    int bestValue = -1;
+    Object* best = nullptr;
+
+    int count = playerActorCount();
+    for (int slot = 0; slot < count; slot++) {
+        Object* actor = playerActorAt(slot);
+        if (!partySkillPlayerEligible(actor, slot)) {
+            continue;
+        }
+        int value = skillGetValue(actor, skill);
+        if (value > bestValue) {
+            bestValue = value;
+            best = actor;
+        }
+    }
+
+    return best;
 }
 
 } // namespace fallout

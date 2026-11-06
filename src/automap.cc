@@ -1,3 +1,4 @@
+#include "db.h"
 #include "automap.h"
 
 #include <stdio.h>
@@ -255,7 +256,7 @@ static constexpr InterfaceFrmId kAutomapFrmIds[AUTOMAP_FRM_COUNT] = {
 };
 
 // 0x5108C4 autoflags
-static AutomapFlags gAutomapFlags = AUTOMAP_NONE;
+
 
 // 0x56CB18 amdbhead
 static AutomapHeader gAutomapHeader;
@@ -289,16 +290,10 @@ void automapExit()
 }
 
 // 0x41B87C automap_load
-int automapLoad(File* stream)
-{
-    return fileReadInt32Enum<AutomapFlags>(stream, &gAutomapFlags);
-}
+
 
 // 0x41B898 automap_save
-int automapSave(File* stream)
-{
-    return fileWriteInt32Enum<AutomapFlags>(stream, gAutomapFlags);
-}
+
 
 // 0x41B8B4 automapDisplayMap
 int _automapDisplayMap(int map)

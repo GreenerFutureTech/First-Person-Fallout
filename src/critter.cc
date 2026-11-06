@@ -1,3 +1,9 @@
+#include "msg_channel.h"
+#include "player_sheet.h" // the DUDE_STATE_* flags ride the actor's sheet row
+#include "pres_record.h" // record the stand-up so viewers see it
+#include "presenter.h"
+#include "server_loop.h"
+#include "server_players.h"
 #include "critter.h"
 
 #include <assert.h>
@@ -39,8 +45,34 @@
 
 namespace fallout {
 
+
+
+static char* critterNameRow(int slot);
+
+char* critterGetNameForSlot(int slot);
+
+int critterSetNameForSlot(int slot, const char* name);
+
+void critterPlayerActorSeedNames();
+
+void critterPlayerActorSeedNameSlot(int slot);
+
+int critterPlayerActorNameRowWrite(File* stream, int slot);
+
+int critterPlayerActorNameRowRead(File* stream, int slot);
+
+bool critterRevive(Object* critter);
+
+static Proto* dudeStateProto(Object* subject);
+
+void _dude_stand(Object* obj, Rotation rotation, const FrmId& frmId);
+
+void _dude_standup(Object* a1);
+
+
 // Maximum length of dude's name length.
 #define DUDE_NAME_MAX_LENGTH (32)
+static char gPlayerActorNames[kMaxPlayerActors - 1][DUDE_NAME_MAX_LENGTH];
 
 // The number of effects caused by radiation.
 //
@@ -126,7 +158,7 @@ static MessageList gCritterMessageList;
 static char gDudeName[DUDE_NAME_MAX_LENGTH];
 
 // 0x56D77C sneak_working
-static int _sneak_working;
+static int _sneak_working[kMaxPlayerActors];
 
 // 0x56D780 pc_kill_counts
 static int gKillsByType[KILL_TYPE_DEFAULT_COUNT];
@@ -182,7 +214,7 @@ void critterExit()
 // 0x42D01C critter_load
 int critterLoad(File* stream)
 {
-    if (fileReadInt32(stream, &_sneak_working) == -1) {
+    if (fileReadInt32(stream, &_sneak_working[0]) == -1) {
         return -1;
     }
 
@@ -195,7 +227,7 @@ int critterLoad(File* stream)
 // 0x42D058 critter_save
 int critterSave(File* stream)
 {
-    if (fileWriteInt32(stream, _sneak_working) == -1) {
+    if (fileWriteInt32(stream, _sneak_working[0]) == -1) {
         return -1;
     }
 
@@ -214,8 +246,17 @@ void critterProtoDataCopy(CritterProtoData* dest, CritterProtoData* src)
 // 0x42D0A8 critter_name
 char* critterGetName(Object* obj)
 {
-    if (obj == gDude) {
-        return gDudeName;
+    // EVERY player actor answers from its own name row, not just the host.
+    // playerActorSlotOf IS `obj == gDude ? 0 : -1` with an empty registry, so
+    // single-player, the client and the golden probe are unchanged.
+    //
+    // This must come before the script-name lookup below for the same reason the
+    // old `obj == gDude` check did: an extra carries a sheet pid that names no
+    // real proto, so falling through would hand it protoGetName's answer for a
+    // pid that is not in critters.lst.
+    int playerSlot = playerActorSlotOf(obj);
+    if (playerSlot >= 0) {
+        return critterGetNameForSlot(playerSlot);
     }
 
     char* overrideName = sfallObjectNameGet(obj);
@@ -314,7 +355,7 @@ int critterAdjustPoison(Object* critter, int amount)
 {
     MessageListItem messageListItem;
 
-    if (critter != gDude) {
+    if (!playerActorIs(critter)) {
         return -1;
     }
 
@@ -322,7 +363,7 @@ int critterAdjustPoison(Object* critter, int amount)
         // Take poison resistance into account.
         amount -= amount * critterGetStat(critter, STAT_POISON_RESISTANCE) / 100;
     } else {
-        if (gDude->data.critter.poison <= 0) {
+        if (critter->data.critter.poison <= 0) {
             // Critter is not poisoned and we're want to decrease it even
             // further, which makes no sense.
             return 0;
@@ -334,7 +375,7 @@ int critterAdjustPoison(Object* critter, int amount)
         critter->data.critter.poison = newPoison;
 
         queueClearByEventType(EVENT_TYPE_POISON, nullptr);
-        queueAddEvent(10 * (505 - 5 * newPoison), gDude, nullptr, EVENT_TYPE_POISON);
+        queueAddEvent(10 * (505 - 5 * newPoison), critter, nullptr, EVENT_TYPE_POISON);
 
         // You have been poisoned!
         messageListItem.num = 3000;
@@ -350,11 +391,11 @@ int critterAdjustPoison(Object* critter, int amount)
     }
 
     if (messageListGetItem(&gMiscMessageList, &messageListItem)) {
-        displayMonitorAddMessage(messageListItem.text);
+        presenter()->consoleMessageFor(critter->netId, messageListItem.text);
     }
 
     if (critter == gDude) {
-        indicatorBarRefresh();
+        presenter()->hudIndicatorBar();
     }
 
     return 0;
@@ -363,20 +404,20 @@ int critterAdjustPoison(Object* critter, int amount)
 // 0x42D318 critter_check_poison
 int poisonEventProcess(Object* obj, void* data)
 {
-    if (obj != gDude) {
+    if (!playerActorIs(obj)) {
         return 0;
     }
 
     critterAdjustPoison(obj, -2);
     critterAdjustHitPoints(obj, -1);
 
-    interfaceRenderHitPoints(false);
+    presenter()->hudHitPoints(false);
 
     MessageListItem messageListItem;
     // You take damage from poison.
     messageListItem.num = 3001;
     if (messageListGetItem(&gMiscMessageList, &messageListItem)) {
-        displayMonitorAddMessage(messageListItem.text);
+        presenter()->consoleMessageFor(obj->netId, messageListItem.text);
     }
 
     // NOTE: Uninline.
@@ -399,14 +440,14 @@ int critterAdjustRadiation(Object* obj, int amount)
 {
     MessageListItem messageListItem;
 
-    if (obj != gDude) {
+    if (!playerActorIs(obj)) {
         return -1;
     }
 
     amount = scriptHooks_AdjustRads(obj, amount);
 
     Proto* proto;
-    protoGetProto(gDude, &proto);
+    protoGetProto(obj, &proto);
 
     if (amount > 0) {
         amount -= critterGetStat(obj, STAT_RADIATION_RESISTANCE) * amount / 100;
@@ -419,13 +460,13 @@ int critterAdjustRadiation(Object* obj, int amount)
     if (amount > 0) {
         Object* geigerCounter = nullptr;
 
-        Object* item1 = critterGetItem1(gDude);
+        Object* item1 = critterGetItem1(obj);
         const ProtoId item1ProtoId = ProtoId(item1);
         if (item1ProtoId == ItemProtoTypeId::GeigerCounter || item1ProtoId == ItemProtoTypeId::ActivatedGeigerCounter) {
             geigerCounter = item1;
         }
 
-        Object* item2 = critterGetItem2(gDude);
+        Object* item2 = critterGetItem2(obj);
         const ProtoId item2ProtoId = ProtoId(item2);
         if (item2ProtoId == ItemProtoTypeId::GeigerCounter || item2ProtoId == ItemProtoTypeId::ActivatedGeigerCounter) {
             geigerCounter = item2;
@@ -442,7 +483,7 @@ int critterAdjustRadiation(Object* obj, int amount)
                 }
 
                 if (messageListGetItem(&gMiscMessageList, &messageListItem)) {
-                    displayMonitorAddMessage(messageListItem.text);
+                    presenter()->consoleMessageFor(obj->netId, messageListItem.text);
                 }
             }
         }
@@ -453,7 +494,7 @@ int critterAdjustRadiation(Object* obj, int amount)
         messageListItem.num = 1007;
 
         if (messageListGetItem(&gMiscMessageList, &messageListItem)) {
-            displayMonitorAddMessage(messageListItem.text);
+            presenter()->consoleMessageFor(obj->netId, messageListItem.text);
         }
     }
 
@@ -463,7 +504,7 @@ int critterAdjustRadiation(Object* obj, int amount)
     }
 
     if (obj == gDude) {
-        indicatorBarRefresh();
+        presenter()->hudIndicatorBar();
     }
 
     return 0;
@@ -473,7 +514,7 @@ int critterAdjustRadiation(Object* obj, int amount)
 // note: original ASM always returned 0
 int critterCheckRadiationEvent(Object* obj)
 {
-    if (obj != gDude) {
+    if (!playerActorIs(obj)) {
         return 0;
     }
 
@@ -561,7 +602,11 @@ void radiationProcess(Object* obj, RadiationLevel radiationLevel, bool isHealing
     int radiationLevelIndex = radiationLevel - 1;
     int modifier = isHealing ? -1 : 1;
 
-    if (obj == gDude) {
+    // The sickness report goes to the actor who is sick — it is written in the
+    // second person ("You feel a bit nauseous"), so a broadcast copy would tell
+    // every player that THEY are the one vomiting. Per-actor since the radiation
+    // DAMAGE became per-actor; this warning was the half left on the host.
+    if (playerActorIs(obj)) {
         // Radiation level message, higher is worse.
         messageListItem.num = 1000 + radiationLevelIndex;
 
@@ -572,7 +617,7 @@ void radiationProcess(Object* obj, RadiationLevel radiationLevel, bool isHealing
         }
 
         if (messageListGetItem(&gMiscMessageList, &messageListItem)) {
-            displayMonitorAddMessage(messageListItem.text);
+            presenter()->consoleMessageFor(obj->netId, messageListItem.text);
         }
     }
 
@@ -599,12 +644,28 @@ void radiationProcess(Object* obj, RadiationLevel radiationLevel, bool isHealing
     }
 
     if ((obj->data.critter.combat.results & DAM_DEAD) != DAM_NONE) {
-        if (obj == gDude) {
+        if (playerActorIs(obj)) {
             // You have died from radiation sickness.
             messageListItem.num = 1006;
             if (messageListGetItem(&gMiscMessageList, &messageListItem)) {
-                // SFALL: Display a pop-up message box about death from radiation.
-                gameShowDeathDialog(messageListItem.text);
+                // ►► THIS KILLED THE WHOLE SERVER. gameShowDeathDialog is a full-screen
+                // modal message box, so on the core-only server it resolves to the
+                // aborting client stub — and radiation death is not an edge case, it is
+                // ordinary Fallout 2 (Toxic Caves goo, the Gecko reactor, Broken Hills).
+                // One player letting their rad counter run out took every other player's
+                // session down with the process.
+                //
+                // The dedicated server has no screen to put a modal on, so the news is
+                // delivered the way every other piece of per-actor news is: addressed to
+                // the actor it happened to. Death itself is already handled and already
+                // survivable — critterKill routes a player death through playerActorDied
+                // instead of the endgame, and a teammate can revive the body.
+                if (serverDedicatedActive()) {
+                    presenter()->consoleMessageStyled(obj->netId, kMsgChannelSystem, messageListItem.text);
+                } else {
+                    // SFALL: Display a pop-up message box about death from radiation.
+                    gameShowDeathDialog(messageListItem.text);
+                }
             }
         }
     }
@@ -894,12 +955,27 @@ void critterKill(Object* critter, AnimationType anim, bool refreshRect)
     itemDestroyAllHidden(critter);
 
     if (refreshRect) {
-        tileWindowRefreshRect(&updatedRect, elevation);
+        presenter()->worldInvalidateRect(&updatedRect, elevation);
     }
 
-    if (critter == gDude) {
-        endgameSetupDeathEnding(ENDGAME_DEATH_ENDING_REASON_DEATH);
-        _game_user_wants_to_quit = GAME_QUIT_REQUEST_MAIN_MENU;
+    if (playerActorIs(critter)) {
+        if (serverDedicatedActive()) {
+            // THE dedicated-server survival rule (MP_PROPOSAL.md Ch 9): a player
+            // dying must NEVER terminate the server. This is the sole finalizer
+            // for combat deaths, HP-zero deaths (critterAdjustHitPoints) and
+            // radiation collapse, so writing quit=2 here means "any player death
+            // shuts the world down" — which is exactly what it used to do.
+            //
+            // No endgame, no quit: the world keeps beating and the corpse keeps
+            // streaming. What SHOULD happen instead (respawn/permadeath/
+            // spectate) is deliberately undesigned — playerActorDied is the
+            // policy seam, no-op by default (Ch 9.5).
+            playerActorDied(critter);
+        } else {
+            // Vanilla single-player: byte-identical to the original.
+            endgameSetupDeathEnding(ENDGAME_DEATH_ENDING_REASON_DEATH);
+            _game_user_wants_to_quit = GAME_QUIT_REQUEST_MAIN_MENU;
+        }
     }
 }
 
@@ -1156,8 +1232,9 @@ int protoCritterDataWrite(File* stream, CritterProtoData* critterData)
 }
 
 // 0x42E220 pc_flag_off
-void dudeDisableState(DudeState state)
+void dudeDisableState(DudeState state, Object* subject)
 {
+    Object* actor = subject != nullptr ? subject : gDude;
     CritterFlags flags;
     switch (state) {
     case DUDE_STATE_SNEAKING:
@@ -1173,23 +1250,28 @@ void dudeDisableState(DudeState state)
         return;
     }
 
-    Proto* proto;
-    if (protoGetProto(gDude, &proto) == -1) {
+    Proto* proto = dudeStateProto(actor);
+    if (proto == nullptr) {
         return;
     }
 
     proto->critter.data.flags &= ~flags;
 
     if (state == DUDE_STATE_SNEAKING) {
-        queueRemoveEventsByType(gDude, EVENT_TYPE_SNEAK);
+        queueRemoveEventsByType(actor, EVENT_TYPE_SNEAK);
     }
 
-    indicatorBarRefresh();
+    // The flag word rides the actor's sheet row, so this is what puts the change on
+    // that player's own indicator bar. Host-local play ignores it (no deltas).
+    playerSheetMarkDirty(actor);
+
+    presenter()->hudIndicatorBar();
 }
 
 // 0x42E26C pc_flag_on
-void dudeEnableState(DudeState state)
+void dudeEnableState(DudeState state, Object* subject)
 {
+    Object* actor = subject != nullptr ? subject : gDude;
     CritterFlags flags;
     switch (state) {
     case DUDE_STATE_SNEAKING:
@@ -1205,38 +1287,41 @@ void dudeEnableState(DudeState state)
         return;
     }
 
-    Proto* proto;
-    if (protoGetProto(gDude, &proto) == -1) {
+    Proto* proto = dudeStateProto(actor);
+    if (proto == nullptr) {
         return;
     }
 
     proto->critter.data.flags |= flags;
 
     if (state == DUDE_STATE_SNEAKING) {
-        sneakEventProcess(nullptr, nullptr);
+        sneakEventProcess(actor, nullptr);
     }
 
-    indicatorBarRefresh();
+    playerSheetMarkDirty(actor);
+
+    presenter()->hudIndicatorBar();
 }
 
 // 0x42E2B0 pc_flag_toggle
-void dudeToggleState(DudeState state)
+void dudeToggleState(DudeState state, Object* subject)
 {
     if (!dudeStateIsValid(state)) {
         return;
     }
 
     // NOTE: Uninline.
-    if (dudeHasState(state)) {
-        dudeDisableState(state);
+    if (dudeHasState(state, subject)) {
+        dudeDisableState(state, subject);
     } else {
-        dudeEnableState(state);
+        dudeEnableState(state, subject);
     }
 }
 
 // 0x42E2F8 is_pc_flag
-bool dudeHasState(DudeState state)
+bool dudeHasState(DudeState state, Object* subject)
 {
+    Object* actor = subject != nullptr ? subject : gDude;
     if (!dudeStateIsValid(state)) {
         return false;
     }
@@ -1244,9 +1329,9 @@ bool dudeHasState(DudeState state)
     CritterFlags flags;
     switch (state) {
     case DUDE_STATE_POISONED:
-        return critterGetPoison(gDude) > POISON_INDICATOR_THRESHOLD;
+        return critterGetPoison(actor) > POISON_INDICATOR_THRESHOLD;
     case DUDE_STATE_RADIATED:
-        return critterGetRadiation(gDude) > RADATION_INDICATOR_THRESHOLD;
+        return critterGetRadiation(actor) > RADATION_INDICATOR_THRESHOLD;
     case DUDE_STATE_SNEAKING:
         flags = CRITTER_DUDE_SNEAKING;
         break;
@@ -1261,7 +1346,7 @@ bool dudeHasState(DudeState state)
     }
 
     Proto* proto;
-    if (protoGetProto(gDude, &proto) == -1) {
+    if (protoGetProto(actor, &proto) == -1) {
         return false;
     }
 
@@ -1273,10 +1358,16 @@ int sneakEventProcess(Object* obj, void* data)
 {
     int time;
 
-    int sneak = skillGetValue(gDude, SKILL_SNEAK);
-    if (skillRoll(gDude, SKILL_SNEAK, 0, nullptr) < ROLL_SUCCESS) {
+    Object* actor = obj != nullptr ? obj : gDude;
+    int slot = playerActorSlotOf(actor);
+    if (slot < 0) {
+        return 0;
+    }
+
+    int sneak = skillGetValue(actor, SKILL_SNEAK);
+    if (skillRoll(actor, SKILL_SNEAK, 0, nullptr) < ROLL_SUCCESS) {
         time = 600;
-        _sneak_working = false;
+        _sneak_working[slot] = false;
 
         if (sneak > 250)
             time = 100;
@@ -1292,10 +1383,10 @@ int sneakEventProcess(Object* obj, void* data)
             time = 400;
     } else {
         time = 600;
-        _sneak_working = true;
+        _sneak_working[slot] = true;
     }
 
-    queueAddEvent(time, gDude, nullptr, EVENT_TYPE_SNEAK);
+    queueAddEvent(time, actor, nullptr, EVENT_TYPE_SNEAK);
 
     return 0;
 }
@@ -1303,18 +1394,21 @@ int sneakEventProcess(Object* obj, void* data)
 // 0x42E3E4 critter_sneak_clear
 int critterDisableSneak(Object* obj, void* data)
 {
-    dudeDisableState(DUDE_STATE_SNEAKING);
+    // The event's owner stops sneaking — before this took a subject, ANY player's
+    // sneak timer expiring cleared the HOST's flag.
+    dudeDisableState(DUDE_STATE_SNEAKING, obj);
     return 1;
 }
 
 // Returns true if dude is really sneaking.
 //
 // 0x42E3F4 is_pc_sneak_working
-bool dudeIsSneaking()
+bool dudeIsSneaking(Object* subject)
 {
     // NOTE: Uninline.
-    if (dudeHasState(DUDE_STATE_SNEAKING)) {
-        return _sneak_working;
+    if (dudeHasState(DUDE_STATE_SNEAKING, subject)) {
+        int slot = playerActorSlotOf(subject != nullptr ? subject : gDude);
+        return slot >= 0 ? _sneak_working[slot] != 0 : false;
     }
 
     return false;
@@ -1525,6 +1619,225 @@ void critterFlagUnset(const ProtoId& protoId, CritterFlags flag)
     }
 
     proto->critter.data.flags &= ~flag;
+}
+
+
+
+static char* critterNameRow(int slot)
+{
+    if (slot > 0 && slot < kMaxPlayerActors) {
+        return gPlayerActorNames[slot - 1];
+    }
+
+    return gDudeName;
+}
+
+char* critterGetNameForSlot(int slot)
+{
+    return critterNameRow(slot);
+}
+
+int critterSetNameForSlot(int slot, const char* name)
+{
+    if (slot < 0 || slot >= kMaxPlayerActors) {
+        return -1;
+    }
+
+    if (strlen(name) > DUDE_NAME_MAX_LENGTH) {
+        return -1;
+    }
+
+    strncpy(critterNameRow(slot), name, DUDE_NAME_MAX_LENGTH);
+
+    return 0;
+}
+
+void critterPlayerActorSeedNames()
+{
+    for (int slot = 1; slot < kMaxPlayerActors; slot++) {
+        critterPlayerActorSeedNameSlot(slot);
+    }
+}
+
+void critterPlayerActorSeedNameSlot(int slot)
+{
+    if (slot < 1 || slot >= kMaxPlayerActors) {
+        return;
+    }
+
+    strncpy(gPlayerActorNames[slot - 1], gDudeName, DUDE_NAME_MAX_LENGTH);
+}
+
+int critterPlayerActorNameRowWrite(File* stream, int slot)
+{
+    if (slot < 0 || slot >= kMaxPlayerActors) {
+        return -1;
+    }
+
+    return fileWrite(critterNameRow(slot), DUDE_NAME_MAX_LENGTH, 1, stream) == 1 ? 0 : -1;
+}
+
+int critterPlayerActorNameRowRead(File* stream, int slot)
+{
+    if (slot < 0 || slot >= kMaxPlayerActors) {
+        return -1;
+    }
+
+    char* row = critterNameRow(slot);
+    if (fileRead(row, DUDE_NAME_MAX_LENGTH, 1, stream) != 1) {
+        return -1;
+    }
+
+    // A wire-supplied name is untrusted input and the row is handed straight to
+    // printf-style message formatting. Terminate it here rather than trusting
+    // the sender.
+    row[DUDE_NAME_MAX_LENGTH - 1] = '\0';
+
+    return 0;
+}
+
+bool critterRevive(Object* critter)
+{
+    if (critter == nullptr || ProtoId(critter).objectType() != OBJ_TYPE_CRITTER) {
+        return false;
+    }
+    if (!critterIsDead(critter)) {
+        return false;
+    }
+
+    // One hit point — critterIsDead reports dead on DAM_DEAD OR current-HP <= 0, so
+    // clearing the flag without a hit point would leave it dead by the second test —
+    // and clear every incapacitating result the kill / knockout paths can set.
+    critter->data.critter.hp = 1;
+    critter->data.critter.combat.results &= ~(DAM_DEAD | DAM_KNOCKED_OUT | DAM_KNOCKED_DOWN | DAM_LOSE_TURN);
+
+    // Undo critterKill's flatten + no-block so the body is solid and clickable again —
+    // but only when the proto is not naturally flat/no-block (then the kill path left
+    // those bits alone and so must we). _obj_toggle_flat XORs OBJECT_FLAT, the exact
+    // inverse of the kill-path toggle when the bit is set.
+    Rect flatRect;
+    bool flatToggled = false;
+    if (!critterFlagCheck(ProtoId(critter), CRITTER_FLAT)) {
+        critter->flags &= ~OBJECT_NO_BLOCK;
+        if ((critter->flags & OBJECT_FLAT) != 0) {
+            _obj_toggle_flat(critter, &flatRect);
+            flatToggled = true;
+        }
+    }
+    if (flatToggled) {
+        presenter()->worldInvalidateRect(&flatRect, critter->elevation);
+    }
+
+    // Stand the body back up through the engine's OWN dude stand-up (relocated to
+    // f2_core for exactly this server-side use). It rebuilds the fid at ANIM_STAND on
+    // the SAME base art the death anim preserved — so it recovers even a GIBBED /
+    // fire-danced corpse (a violent death only changes the anim slot, never the base
+    // art id) — restores the drawn-weapon offset, resets the frame (the corpse-frame
+    // render gotcha), and refreshes. fid = -1 lets it choose STAND vs FIRE_DANCE. The
+    // fid / position / flag / HP changes all stream to viewers via the object-delta +
+    // actor-HP channels regardless of the (server-noop) local refresh.
+    _dude_stand(critter, critter->rotation, FrmId::Empty());
+    return true;
+}
+
+static Proto* dudeStateProto(Object* subject)
+{
+    Object* actor = subject != nullptr ? subject : gDude;
+    if (!playerActorIs(actor)) {
+        return nullptr;
+    }
+
+    Proto* proto = nullptr;
+    if (protoGetProto(actor, &proto) == -1) {
+        return nullptr;
+    }
+
+    return proto;
+}
+
+void _dude_stand(Object* obj, Rotation rotation, const FrmId& frmId)
+{
+    Rect rect;
+
+    objectSetRotation(obj, rotation, &rect);
+
+    int x = 0;
+    int y = 0;
+
+    WeaponAnimation weaponAnimationCode = FrmId(obj).weaponAnimation();
+    if (weaponAnimationCode != WeaponAnimation::None) {
+        if (!frmId.valid()) {
+            FrmId takeOutFrmId = FrmId(obj, ANIM_TAKE_OUT, weaponAnimationCode, obj->rotation + 1);
+            CacheEntry* takeOutFrmHandle;
+            Art* takeOutFrm = artLock(takeOutFrmId, &takeOutFrmHandle);
+            if (takeOutFrm != nullptr) {
+                int frameCount = artGetFrameCount(takeOutFrm);
+                for (int frame = 0; frame < frameCount; frame++) {
+                    int offsetX;
+                    int offsetY;
+                    artGetFrameOffsets(takeOutFrm, frame, obj->rotation, &offsetX, &offsetY);
+                    x += offsetX;
+                    y += offsetY;
+                }
+                artUnlock(takeOutFrmHandle);
+
+                CacheEntry* standFrmHandle;
+                FrmId standFid = FrmId(obj, ANIM_STAND, WeaponAnimation::None, obj->rotation + 1);
+                Art* standFrm = artLock(standFid, &standFrmHandle);
+                if (standFrm != nullptr) {
+                    int offsetX;
+                    int offsetY;
+                    if (artGetRotationOffsets(standFrm, obj->rotation, &offsetX, &offsetY) == 0) {
+                        x += offsetX;
+                        y += offsetY;
+                    }
+                    artUnlock(standFrmHandle);
+                }
+            }
+        }
+    }
+
+    FrmId finalFrmId = frmId;
+    if (!finalFrmId.valid()) {
+        AnimationType anim;
+        if (FrmId(obj).animationType() == ANIM_FIRE_DANCE) {
+            anim = ANIM_FIRE_DANCE;
+        } else {
+            anim = ANIM_STAND;
+        }
+        finalFrmId = FrmId(obj, anim, obj->rotation + 1);
+    }
+
+    Rect temp;
+    objectSetFrmId(obj, finalFrmId, &temp);
+    rectUnion(&rect, &temp, &rect);
+
+    objectSetLocation(obj, obj->tile, obj->elevation, &temp);
+    rectUnion(&rect, &temp, &rect);
+
+    objectSetFrame(obj, 0, &temp);
+    rectUnion(&rect, &temp, &rect);
+
+    _obj_offset(obj, x, y, &temp);
+    rectUnion(&rect, &temp, &rect);
+
+    presenter()->worldInvalidateRect(&rect, obj->elevation);
+}
+
+void _dude_standup(Object* a1)
+{
+    reg_anim_begin(ANIMATION_REQUEST_RESERVED);
+
+    AnimationType anim;
+    if (FrmId(a1).animationType() == ANIM_FALL_BACK) {
+        anim = ANIM_BACK_TO_STANDING;
+    } else {
+        anim = ANIM_PRONE_TO_STANDING;
+    }
+
+    animationRegisterAnimate(a1, anim, 0);
+    reg_anim_end();
+    a1->data.critter.combat.results &= ~DAM_KNOCKED_DOWN;
 }
 
 } // namespace fallout

@@ -4,6 +4,8 @@
 #include "art_defs.h"
 #include "color.h"
 #include "config.h"
+#include <functional>
+
 #include "db.h"
 #include "map_defs.h"
 
@@ -50,6 +52,14 @@ enum CityState : int {
     CITY_STATE_UNKNOWN,
     CITY_STATE_KNOWN
 };
+
+// Co-op random-encounter accept/decline prompt (dedicated server). The server
+// streams EVENT_ENCOUNTER_PROMPT and block-and-pumps this seam for the first
+// viewer's answer (first-answer-wins), mirroring the movie barrier. Null pump
+// (SP / no viewers) → the caller keeps its default. worldmapEncounterAnswer is
+// driven by the encaccept/encdecline control verbs.
+void worldmapEncounterSetServerPump(std::function<bool()> pump);
+void worldmapEncounterAnswer(bool accept);
 
 enum City : int {
     CITY_INVALID = -1,
@@ -342,6 +352,25 @@ extern bool gDidMeetFrankHorrigan;
 
 int wmWorldMap_init();
 void wmWorldMap_exit();
+void wmTransitionSaveMap();
+void wmTransitionSuspendScripts();
+void wmEncounterStagingClear();
+// Emit the "You have encountered…" line that mapLoad's emission-suppression window
+// swallowed on its way to the viewers. Call AFTER the encounter map has loaded; a
+// no-op if no encounter was staged.
+void wmEncounterDescriptionFlush();
+// TEST HOOK (admin `encnext`): make the next random-encounter check fire AND be
+// detected, so the accept/decline prompt can be reached without waiting on two dice.
+// One-shot — the check it arms consumes it.
+void worldmapForceNextEncounter();
+void wmTransitionResumeScripts();
+void worldmapTravelStep(int worldX, int worldY);
+bool worldmapTravelRestHeal(unsigned int now, unsigned int partyHealTime);
+void worldmapTravelMarkVisited();
+bool worldmapTravelClockTick();
+bool worldmapTravelEncounterCheck();
+void wmPartyInitWalking(int x, int y);
+bool wmPartyIsWalking();
 int wmWorldMap_reset();
 int wmWorldMap_save(File* stream);
 int wmWorldMap_load(File* stream);
@@ -383,6 +412,10 @@ int wmAreaMarkVisited(City areaIdx);
 bool wmAreaMarkVisitedState(City areaIdx, VisitedState state);
 bool wmAreaSetVisibleState(City areaIdx, CityState state, bool force);
 int wmAreaSetWorldPos(City areaIdx, int x, int y);
+// How many worldmap AREAS exist (bound for any areaIdx). Exported so callers can
+// validate an index without duplicating worldmap.cc's file-static cityIsValid.
+int wmAreaCount();
+
 int wmGetPartyWorldPos(int* xPtr, int* yPtr);
 int wmGetPartyCurArea(City* areaIdxPtr);
 void wmTownMap();
@@ -400,6 +433,18 @@ int wmMapMusicStart();
 int wmSetMapMusic(Map mapIdx, const char* name);
 int wmMatchAreaContainingMapIdx(Map mapIdx, City* areaIdxPtr);
 int wmTeleportToArea(City areaIdx);
+
+// Park the car at the area owning `mapIdx`, or leave it parked where it is when no
+// area owns that map. ►► USE THIS, never wmMatchAreaContainingMapIdx directly, to
+// write currentCarAreaId: a failed lookup leaves 0 (= CITY_ARROYO) in the out-param,
+// which is the vanilla "car disappeared after a random encounter" bug. See the
+// definition for the full chain (it takes the trunk's contents with it).
+void wmCarParkAtMapArea(int mapIdx);
+
+// SFALL CarPlacedTileFix: clear GVAR_CAR_PLACED_TILE on worldmap entry so the car
+// placement scripts do not skip placing the car on the next map. Call from every
+// worldmap entry; no-ops on a viewer (it does not own gvars).
+void wmCarClearPlacedTile();
 
 // CE
 bool wmStartWorldPosIsConfigured();

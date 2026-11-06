@@ -15,6 +15,7 @@ extern void (*_scr_blit)(unsigned char* src, int src_pitch, int unused, int src_
 extern void (*_zero_mem)();
 
 extern SDL_Window* gSdlWindow;
+extern bool gSdlWindowedMode;
 extern SDL_Surface* gSdlSurface;
 extern SDL_Renderer* gSdlRenderer;
 extern SDL_Texture* gSdlTexture;

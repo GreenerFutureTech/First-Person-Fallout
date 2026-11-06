@@ -216,3 +216,7 @@ For current sfall compatibility status and the remaining work needed to close ga
 ## License
 
 The source code is this repository is available under the [Sustainable Use License](LICENSE.md).
+
+## Co-op integration
+
+This branch also includes the dedicated server and network client from Fallout 2 Co-op. See [the co-op guide](docs/COOP_README.md) and [dedicated server setup](DEDICATED_HOWTO.md).

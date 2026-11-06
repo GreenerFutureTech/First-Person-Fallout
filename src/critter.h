@@ -56,6 +56,19 @@ char* critterGetName(Object* obj);
 void critterProtoDataCopy(CritterProtoData* dest, CritterProtoData* src);
 int dudeSetName(const char* name);
 void dudeResetName();
+
+// Per-actor names (PLAYER_SHEET_DESIGN.md §8). Slot 0 is gDudeName, i.e.
+// dudeSetName / dudeResetName above.
+//
+// The GETTER is the storage accessor, not a convenience wrapper: protoGetName
+// must answer a sheet pid without calling critterGetName, or the two recurse.
+char* critterGetNameForSlot(int slot);
+int critterSetNameForSlot(int slot, const char* name);
+void critterPlayerActorSeedNames();
+// ONE slot, for spawn-at-login (see ACCOUNT_IDENTITY_DESIGN.md trap 1).
+void critterPlayerActorSeedNameSlot(int slot);
+int critterPlayerActorNameRowWrite(File* stream, int slot);
+int critterPlayerActorNameRowRead(File* stream, int slot);
 int critterGetHitPoints(Object* critter);
 int critterAdjustHitPoints(Object* critter, int hp);
 int critterGetPoison(Object* critter);
@@ -79,6 +92,9 @@ char* killTypeGetName(KillType killType);
 char* killTypeGetDescription(KillType killType);
 int critterHealByHours(Object* obj, int hours);
 void critterKill(Object* critter, AnimationType anim, bool refreshRect);
+// Minimal inverse of critterKill: revive a dead critter at 1 HP, standing and
+// blocking again. No-op (returns false) if the critter is not actually dead.
+bool critterRevive(Object* critter);
 int critterGetExp(Object* critter);
 bool critterIsActive(Object* critter);
 bool critterIsDead(Object* critter);
@@ -93,13 +109,25 @@ int gcdLoad(const char* path);
 int protoCritterDataRead(File* stream, CritterProtoData* critterData);
 int gcdSave(const char* path);
 int protoCritterDataWrite(File* stream, CritterProtoData* critterData);
-void dudeDisableState(DudeState state);
-void dudeEnableState(DudeState state);
-void dudeToggleState(DudeState state);
-bool dudeHasState(DudeState state);
+void dudeDisableState(DudeState state, Object* subject = nullptr);
+void dudeEnableState(DudeState state, Object* subject = nullptr);
+void dudeToggleState(DudeState state, Object* subject = nullptr);
+bool dudeHasState(DudeState state, Object* subject = nullptr);
 int sneakEventProcess(Object* obj, void* data);
 int critterDisableSneak(Object* obj, void* data);
-bool dudeIsSneaking();
+bool dudeIsSneaking(Object* subject = nullptr);
+// ►► THE THREE DUDE_STATE_* FLAGS (sneaking, level-up available, addicted) LIVE IN
+// THE PLAYER'S PROTO ROW, and every player actor has its own row — so these take a
+// SUBJECT. They used to read gDude->pid unconditionally, which meant an extra
+// player's sneak toggle, level-up badge and addiction marker were all written into
+// (and read out of) SLOT 0's sheet: the host's indicator bar lit up for someone
+// else's chem habit, an extra could never see its own level-up badge, and two
+// players sneaking shared one flag.
+//
+// `subject == nullptr` means gDude, so every vanilla call site keeps its exact
+// behaviour and single-player is byte-identical. The row is marked sheet-dirty on
+// change, which is what streams the new flags to that actor's own client.
+// True iff `subject` (default gDude) is sneaking AND its last sneak roll held.
 int knockoutEventProcess(Object* obj, void* data);
 int knockoutClear(Object* obj, void* data);
 int critterSetWhoHitMe(Object* critter, Object* hitMe);

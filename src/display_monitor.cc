@@ -1,3 +1,5 @@
+#include "msg_channel.h"
+#include "sfall_config.h"
 #include "display_monitor.h"
 
 #include <string.h>
@@ -22,9 +24,32 @@
 
 namespace fallout {
 
+
+
+struct MessageChannelStyle {
+    int r, g, b; // 0-31 each
+    DrawTextFlags flags; // Per-channel text effects
+    int font; // -1 = DISPLAY_MONITOR_FONT
+};
+
+static const MessageChannelStyle gMessageChannelStyles[kMsgChannelCount] = {
+    /* kMsgChannelDefault */ { 0, 31, 0, DRAW_TEXT_FLAG_NONE, -1 }, // vanilla green (_colorTable[992])
+    /* kMsgChannelCombat  */ { 31, 20, 0, DRAW_TEXT_FLAG_NONE, -1 }, // amber — the fight narrating itself
+    /* kMsgChannelRefusal */ { 20, 20, 20, DRAW_TEXT_FLAG_NONE, -1 }, // grey — nothing happened; recede
+    /* kMsgChannelSystem  */ { 10, 24, 31, DRAW_TEXT_FLAG_SHADOWED, -1 }, // pale blue — not the game world
+    /* kMsgChannelChat    */ { 31, 31, 31, DRAW_TEXT_FLAG_NONE, -1 }, // white — a person is talking
+    /* kMsgChannelReward  */ { 31, 31, 10, DRAW_TEXT_FLAG_UNDERLINED, -1 }, // yellow — you gained something
+};
+
+static int gDisplayMonitorLineHeight;
+
+void displayMonitorAddMessageStyled(const char* str, int channel);
+
+
 // The maximum number of lines display monitor can hold. Once this value
 // is reached earlier messages are thrown away.
 #define DISPLAY_MONITOR_LINES_CAPACITY (100)
+static unsigned char gDisplayMonitorLineChannels[DISPLAY_MONITOR_LINES_CAPACITY];
 
 // The maximum length of a string in display monitor (in characters).
 #define DISPLAY_MONITOR_LINE_LENGTH (80)
@@ -113,7 +138,8 @@ int displayMonitorInit()
         fontSetCurrent(DISPLAY_MONITOR_FONT);
 
         gDisplayMonitorLinesCapacity = DISPLAY_MONITOR_LINES_CAPACITY;
-        _max_disp = DISPLAY_MONITOR_HEIGHT / fontGetLineHeight();
+        gDisplayMonitorLineHeight = fontGetLineHeight();
+        _max_disp = DISPLAY_MONITOR_HEIGHT / gDisplayMonitorLineHeight;
         _disp_start = 0;
         _disp_curr = 0;
         fontSetCurrent(oldFont);
@@ -231,97 +257,7 @@ void displayMonitorExit()
 // 0x43186C display_print
 void displayMonitorAddMessage(const char* str)
 {
-    if (!gDisplayMonitorInitialized || str == nullptr) {
-        return;
-    }
-
-    // SFALL
-    consoleFileAddMessage(str);
-
-    int oldFont = fontGetCurrent();
-    fontSetCurrent(DISPLAY_MONITOR_FONT);
-
-    char knob = '\x95';
-
-    char knobString[2];
-    knobString[0] = knob;
-    knobString[1] = '\0';
-    int knobWidth = fontGetStringWidth(knobString);
-
-    if (!isInCombat()) {
-        unsigned int now = _get_bk_time();
-        if (getTicksBetween(now, gDisplayMonitorLastBeepTimestamp) >= DISPLAY_MONITOR_BEEP_DELAY) {
-            gDisplayMonitorLastBeepTimestamp = now;
-            soundPlayFile("monitor");
-        }
-    }
-
-    std::string mutableMessage(str);
-    char* mutableStr = mutableMessage.data();
-
-    // TODO: Refactor these two loops.
-    char* splitPos = nullptr;
-    while (true) {
-        while (fontGetStringWidth(mutableStr) <= DISPLAY_MONITOR_WIDTH - _max_disp - knobWidth) {
-            char* temp = gDisplayMonitorLines[_disp_start];
-            int length;
-            if (knob != '\0') {
-                *temp++ = knob;
-                length = DISPLAY_MONITOR_LINE_LENGTH - 2;
-                knob = '\0';
-                knobWidth = 0;
-            } else {
-                length = DISPLAY_MONITOR_LINE_LENGTH - 1;
-            }
-            strncpy(temp, mutableStr, length);
-            gDisplayMonitorLines[_disp_start][DISPLAY_MONITOR_LINE_LENGTH - 1] = '\0';
-            _disp_start = (_disp_start + 1) % gDisplayMonitorLinesCapacity;
-
-            if (splitPos == nullptr) {
-                fontSetCurrent(oldFont);
-                _disp_curr = _disp_start;
-                displayMonitorRefresh();
-                return;
-            }
-
-            mutableStr = splitPos + 1;
-            *splitPos = ' ';
-            splitPos = nullptr;
-        }
-
-        char* space = strrchr(mutableStr, ' ');
-        if (space == nullptr) {
-            break;
-        }
-
-        if (splitPos != nullptr) {
-            *splitPos = ' ';
-        }
-
-        splitPos = space;
-        if (space != nullptr) {
-            *space = '\0';
-        }
-    }
-
-    char* temp = gDisplayMonitorLines[_disp_start];
-    int length;
-    if (knob != '\0') {
-        temp++;
-        gDisplayMonitorLines[_disp_start][0] = knob;
-        length = DISPLAY_MONITOR_LINE_LENGTH - 2;
-        knob = '\0';
-    } else {
-        length = DISPLAY_MONITOR_LINE_LENGTH - 1;
-    }
-    strncpy(temp, mutableStr, length);
-
-    gDisplayMonitorLines[_disp_start][DISPLAY_MONITOR_LINE_LENGTH - 1] = '\0';
-    _disp_start = (_disp_start + 1) % gDisplayMonitorLinesCapacity;
-
-    fontSetCurrent(oldFont);
-    _disp_curr = _disp_start;
-    displayMonitorRefresh();
+    displayMonitorAddMessageStyled(str, kMsgChannelDefault);
 }
 
 // NOTE: Inlined.
@@ -334,6 +270,7 @@ static void display_clear()
     if (gDisplayMonitorInitialized) {
         for (index = 0; index < gDisplayMonitorLinesCapacity; index++) {
             gDisplayMonitorLines[index][0] = '\0';
+            gDisplayMonitorLineChannels[index] = kMsgChannelDefault;
         }
 
         _disp_start = 0;
@@ -367,7 +304,22 @@ static void displayMonitorRefresh()
 
     for (int index = 0; index < _max_disp; index++) {
         int stringIndex = (_disp_curr + gDisplayMonitorLinesCapacity + index - _max_disp) % gDisplayMonitorLinesCapacity;
-        fontDrawText(buf + index * _intface_full_width * fontGetLineHeight(), gDisplayMonitorLines[stringIndex], DISPLAY_MONITOR_WIDTH, _intface_full_width, COLOR_GREEN);
+
+        // Per-line style. Vanilla drew every row with _colorTable[992] — that is
+        // exactly what kMsgChannelDefault still resolves to, so an unstyled log is
+        // pixel-identical to before.
+        const MessageChannelStyle& style = gMessageChannelStyles[gDisplayMonitorLineChannels[stringIndex]];
+        if (style.font >= 0) {
+            fontSetCurrent(style.font);
+        } else if (fontGetCurrent() != DISPLAY_MONITOR_FONT) {
+            fontSetCurrent(DISPLAY_MONITOR_FONT);
+        }
+        ColorWithFlags color = _colorTable[(style.r << 10) | (style.g << 5) | style.b] | style.flags;
+
+        // The row PITCH stays the monitor font's line height even when a style
+        // overrides the font: _max_disp was computed from it, so walking by
+        // anything else would drift the last row out of the rectangle.
+        fontDrawText(buf + index * _intface_full_width * gDisplayMonitorLineHeight, gDisplayMonitorLines[stringIndex], DISPLAY_MONITOR_WIDTH, _intface_full_width, color);
 
         // Even though the display monitor is rectangular, it's graphic is not.
         // To give a feel of depth it's covered by some metal canopy and
@@ -478,6 +430,106 @@ static void consoleFileFlush()
         gConsoleFilePrintCount = 0;
         gConsoleFileStream.flush();
     }
+}
+
+
+
+void displayMonitorAddMessageStyled(const char* str, int channel)
+{
+    if (!gDisplayMonitorInitialized || str == nullptr) {
+        return;
+    }
+
+    // SFALL
+    consoleFileAddMessage(str);
+
+    if (channel < 0 || channel >= kMsgChannelCount) channel = kMsgChannelDefault;
+    int oldFont = fontGetCurrent();
+    fontSetCurrent(DISPLAY_MONITOR_FONT);
+
+    char knob = '\x95';
+
+    char knobString[2];
+    knobString[0] = knob;
+    knobString[1] = '\0';
+    int knobWidth = fontGetStringWidth(knobString);
+
+    if (!isInCombat()) {
+        unsigned int now = _get_bk_time();
+        if (getTicksBetween(now, gDisplayMonitorLastBeepTimestamp) >= DISPLAY_MONITOR_BEEP_DELAY) {
+            gDisplayMonitorLastBeepTimestamp = now;
+            soundPlayFile("monitor");
+        }
+    }
+
+    std::string mutableMessage(str);
+    char* mutableStr = mutableMessage.data();
+
+    // TODO: Refactor these two loops.
+    char* splitPos = nullptr;
+    while (true) {
+        while (fontGetStringWidth(mutableStr) <= DISPLAY_MONITOR_WIDTH - _max_disp - knobWidth) {
+            char* temp = gDisplayMonitorLines[_disp_start];
+            int length;
+            if (knob != '\0') {
+                *temp++ = knob;
+                length = DISPLAY_MONITOR_LINE_LENGTH - 2;
+                knob = '\0';
+                knobWidth = 0;
+            } else {
+                length = DISPLAY_MONITOR_LINE_LENGTH - 1;
+            }
+            strncpy(temp, mutableStr, length);
+            gDisplayMonitorLines[_disp_start][DISPLAY_MONITOR_LINE_LENGTH - 1] = '\0';
+            gDisplayMonitorLineChannels[_disp_start] = channel;
+            _disp_start = (_disp_start + 1) % gDisplayMonitorLinesCapacity;
+
+            if (splitPos == nullptr) {
+                fontSetCurrent(oldFont);
+                _disp_curr = _disp_start;
+                displayMonitorRefresh();
+                return;
+            }
+
+            mutableStr = splitPos + 1;
+            *splitPos = ' ';
+            splitPos = nullptr;
+        }
+
+        char* space = strrchr(mutableStr, ' ');
+        if (space == nullptr) {
+            break;
+        }
+
+        if (splitPos != nullptr) {
+            *splitPos = ' ';
+        }
+
+        splitPos = space;
+        if (space != nullptr) {
+            *space = '\0';
+        }
+    }
+
+    char* temp = gDisplayMonitorLines[_disp_start];
+    int length;
+    if (knob != '\0') {
+        temp++;
+        gDisplayMonitorLines[_disp_start][0] = knob;
+        length = DISPLAY_MONITOR_LINE_LENGTH - 2;
+        knob = '\0';
+    } else {
+        length = DISPLAY_MONITOR_LINE_LENGTH - 1;
+    }
+    strncpy(temp, mutableStr, length);
+
+    gDisplayMonitorLines[_disp_start][DISPLAY_MONITOR_LINE_LENGTH - 1] = '\0';
+    gDisplayMonitorLineChannels[_disp_start] = channel;
+            _disp_start = (_disp_start + 1) % gDisplayMonitorLinesCapacity;
+
+    fontSetCurrent(oldFont);
+    _disp_curr = _disp_start;
+    displayMonitorRefresh();
 }
 
 } // namespace fallout
