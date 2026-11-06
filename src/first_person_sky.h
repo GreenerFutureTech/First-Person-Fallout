@@ -3,10 +3,16 @@
 
 namespace fallout {
 
+enum class FirstPersonSkyType {
+    Desert,
+    Cave,
+};
+
 // Draws above the midpoint of the indexed framebuffer. Yaw is in degrees;
 // fieldOfViewScale is the camera plane length used by the world renderer.
 void firstPersonSkyRender(unsigned char* buffer, int width, int height, int pitch,
-    double yaw, double fieldOfViewScale, int ambientIntensityIndex);
+    double yaw, double fieldOfViewScale, int ambientIntensityIndex,
+    FirstPersonSkyType skyType);
 
 } // namespace fallout
 

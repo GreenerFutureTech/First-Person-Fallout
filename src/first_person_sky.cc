@@ -139,10 +139,47 @@ std::vector<uint16_t> buildPanorama()
     return pixels;
 }
 
+std::vector<uint16_t> buildCavePanorama()
+{
+    std::vector<uint16_t> pixels(kPanoramaWidth * kPanoramaHeight);
+    for (int x = 0; x < kPanoramaWidth; x++) {
+        const double u = static_cast<double>(x) / kPanoramaWidth;
+        const double ceiling = 0.13
+            + 0.12 * noise(u * 8.0, 0.3, 8, 227)
+            + 0.05 * noise(u * 27.0, 0.6, 27, 239)
+            + 0.02 * noise(u * 91.0, 0.2, 91, 251);
+        const double stalactiteNoise = noise(u * 23.0, 0.8, 23, 263);
+        const double stalactiteTip = ceiling
+            - std::max(0.0, stalactiteNoise - 0.58) * 0.65;
+
+        for (int y = 0; y < kPanoramaHeight; y++) {
+            const double altitude = static_cast<double>(y) / (kPanoramaHeight - 1);
+            const double rockNoise = 0.65 * noise(u * 49.0, altitude * 37.0, 49, 277)
+                + 0.35 * noise(u * 103.0, altitude * 81.0, 103, 283);
+            const double rockEdge = stalactiteNoise > 0.58
+                ? stalactiteTip
+                : ceiling;
+            const double rock = smoothStep(rockEdge - 0.008, rockEdge + 0.008, altitude);
+            const double distantWall = (1.0 - smoothStep(0.01, 0.16, altitude))
+                * (0.25 + 0.35 * noise(u * 13.0, altitude * 19.0, 13, 293));
+
+            SkyColor color = mix({ 17.0, 16.0, 15.0 },
+                { 49.0, 39.0, 29.0 }, std::exp(-altitude * 18.0));
+            color = mix(color, { 61.0, 48.0, 34.0 }, distantWall);
+            const SkyColor rockColor = mix({ 36.0, 31.0, 27.0 },
+                { 77.0, 62.0, 43.0 }, rockNoise);
+            color = mix(color, rockColor, rock);
+            pixels[y * kPanoramaWidth + x] = packColor(color, x, y);
+        }
+    }
+    return pixels;
+}
+
 } // namespace
 
 void firstPersonSkyRender(unsigned char* buffer, int width, int height, int pitch,
-    double yaw, double fieldOfViewScale, int ambientIntensityIndex)
+    double yaw, double fieldOfViewScale, int ambientIntensityIndex,
+    FirstPersonSkyType skyType)
 {
     if (buffer == nullptr || width < 2 || height < 2 || pitch < width
         || !std::isfinite(yaw) || !std::isfinite(fieldOfViewScale)
@@ -153,7 +190,14 @@ void firstPersonSkyRender(unsigned char* buffer, int width, int height, int pitc
 
     // Build the scenery only once. Retain logical RGB555 colors rather than
     // palette indices so loading another palette cannot leave stale colors.
-    static const std::vector<uint16_t> panorama = buildPanorama();
+    const std::vector<uint16_t>* panorama;
+    if (skyType == FirstPersonSkyType::Cave) {
+        static const std::vector<uint16_t> cavePanorama = buildCavePanorama();
+        panorama = &cavePanorama;
+    } else {
+        static const std::vector<uint16_t> desertPanorama = buildPanorama();
+        panorama = &desertPanorama;
+    }
     static std::vector<double> columnAngles;
     static std::vector<double> columnScales;
     static std::vector<int> panoramaColumns;
@@ -188,7 +232,7 @@ void firstPersonSkyRender(unsigned char* buffer, int width, int height, int pitc
             const int panoramaY = static_cast<int>(std::min(
                 (horizon - y) * columnScales[x], static_cast<double>(kPanoramaHeight - 1)));
             const unsigned char color =
-                _colorTable[panorama[panoramaY * kPanoramaWidth + panoramaColumns[x]]];
+                _colorTable[(*panorama)[panoramaY * kPanoramaWidth + panoramaColumns[x]]];
             row[x] = intensityColorTable[color][ambientIntensityIndex];
         }
     }

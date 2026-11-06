@@ -1051,6 +1051,67 @@ static void tileFirstPersonInitializeWallTextures()
     gFirstPersonWallTexturesInitialized = true;
 }
 
+// Map headers have no indoor/outdoor flag, so classify known stock interiors.
+static bool tileFirstPersonMapIsIndoors(Map map)
+{
+    switch (map) {
+    case MAP_ARROYO_CAVES:
+    case MAP_DEN_BUSINESS:
+    case MAP_DEN_RESIDENTIAL:
+    case MAP_KLAMATH_RATCAVES:
+    case MAP_KLAMATH_TOXICCAVES:
+    case MAP_VAULTCITY_COUNCIL:
+    case MAP_MODOC_BEDNBREAKFAST:
+    case MAP_MODOC_DOWNTHESHITTER:
+    case MAP_MODOC_WELL:
+    case MAP_GHOST_CAVERN:
+    case MAP_SIERRA_BATTLE:
+    case MAP_SIERRA_123:
+    case MAP_SIERRA_4:
+    case MAP_VAULT_CITY_VAULT:
+    case MAP_GECKO_POWER_PLANT:
+    case MAP_GECKO_ACCESS_TUNNELS:
+    case MAP_VAULT_15:
+    case MAP_VAULT_13:
+    case MAP_NCR_COUNCIL_1:
+    case MAP_NCR_COUNCIL_2:
+    case MAP_MILITARY_BASE_12:
+    case MAP_MILITARY_BASE_34:
+    case MAP_DEN_SLAVE_RUN:
+    case MAP_NEW_RENO_CHOP_SHOP:
+    case MAP_NEW_RENO_BOXING:
+    case MAP_REDDING_WANAMINGO_ENT:
+    case MAP_REDDING_WANAMINGO_12:
+    case MAP_REDDING_DTOWN_TUNNEL:
+    case MAP_REDDING_MINE_TUNNEL:
+    case MAP_RND_CAVERN0:
+    case MAP_RND_CAVERN1:
+    case MAP_RND_CAVERN2:
+    case MAP_RND_CAVERN3:
+    case MAP_RND_CAVERN4:
+    case MAP_RND_CAVERN5:
+    case MAP_BROKEN_HILLS2:
+    case MAP_RAIDERS_CAMP2:
+    case MAP_RND_CAVERN_5:
+    case MAP_RND_CAVERN_6:
+    case MAP_RND_CAVERN_7:
+    case MAP_ENCLAVE_DETENTION:
+    case MAP_ENCLAVE_END_FIGHT:
+    case MAP_ENCLAVE_BARRACKS:
+    case MAP_ENCLAVE_PRESIDENT:
+    case MAP_ENCLAVE_REACTOR:
+    case MAP_ENCLAVE_TRAP_ROOM:
+    case MAP_SAN_FRAN_TANKER:
+    case MAP_SHUTTLE_INTERIOR:
+    case MAP_ELRONOLOGIST_BASE:
+    case MAP_NEW_RENO_VB:
+    case MAP_SHI_TEMPLE:
+        return true;
+    default:
+        return false;
+    }
+}
+
 static void tileRenderFirstPersonPreview()
 {
     constexpr double kPi = 3.14159265358979323846;
@@ -1079,9 +1140,15 @@ static void tileRenderFirstPersonPreview()
     gFirstPersonPreviewDoorHitTargets.clear();
 
     const int horizonY = gTileWindowHeight / 2;
-    firstPersonSkyRender(gTileWindowBuffer, gTileWindowWidth, gTileWindowHeight,
-        gTileWindowPitch, tileFirstPersonPreviewGetYaw(), kFieldOfViewScale,
-        ambientIntensityIndex);
+    const FirstPersonSkyType skyType = gMapHeader.index == MAP_ARROYO_TEMPLE
+        ? FirstPersonSkyType::Cave
+        : FirstPersonSkyType::Desert;
+    if (skyType == FirstPersonSkyType::Cave
+        || !tileFirstPersonMapIsIndoors(gMapHeader.index)) {
+        firstPersonSkyRender(gTileWindowBuffer, gTileWindowWidth, gTileWindowHeight,
+            gTileWindowPitch, tileFirstPersonPreviewGetYaw(), kFieldOfViewScale,
+            ambientIntensityIndex, skyType);
+    }
     bufferFill(gTileWindowBuffer + horizonY * gTileWindowPitch,
         gTileWindowWidth,
         gTileWindowHeight - horizonY,
