@@ -1112,6 +1112,28 @@ static bool tileFirstPersonMapIsIndoors(Map map)
     }
 }
 
+static bool tileFirstPersonMapUsesCaveSkybox(Map map)
+{
+    switch (map) {
+    case MAP_ARROYO_CAVES:
+    case MAP_KLAMATH_RATCAVES:
+    case MAP_KLAMATH_TOXICCAVES:
+    case MAP_GHOST_CAVERN:
+    case MAP_RND_CAVERN0:
+    case MAP_RND_CAVERN1:
+    case MAP_RND_CAVERN2:
+    case MAP_RND_CAVERN3:
+    case MAP_RND_CAVERN4:
+    case MAP_RND_CAVERN5:
+    case MAP_RND_CAVERN_5:
+    case MAP_RND_CAVERN_6:
+    case MAP_RND_CAVERN_7:
+        return true;
+    default:
+        return false;
+    }
+}
+
 static void tileRenderFirstPersonPreview()
 {
     constexpr double kPi = 3.14159265358979323846;
@@ -1141,6 +1163,7 @@ static void tileRenderFirstPersonPreview()
 
     const int horizonY = gTileWindowHeight / 2;
     const FirstPersonSkyType skyType = gMapHeader.index == MAP_ARROYO_TEMPLE
+            || tileFirstPersonMapUsesCaveSkybox(gMapHeader.index)
         ? FirstPersonSkyType::Cave
         : FirstPersonSkyType::Desert;
     if (skyType == FirstPersonSkyType::Cave

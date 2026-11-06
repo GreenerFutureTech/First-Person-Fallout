@@ -144,31 +144,61 @@ std::vector<uint16_t> buildCavePanorama()
     std::vector<uint16_t> pixels(kPanoramaWidth * kPanoramaHeight);
     for (int x = 0; x < kPanoramaWidth; x++) {
         const double u = static_cast<double>(x) / kPanoramaWidth;
-        const double ceiling = 0.13
-            + 0.12 * noise(u * 8.0, 0.3, 8, 227)
-            + 0.05 * noise(u * 27.0, 0.6, 27, 239)
-            + 0.02 * noise(u * 91.0, 0.2, 91, 251);
-        const double stalactiteNoise = noise(u * 23.0, 0.8, 23, 263);
-        const double stalactiteTip = ceiling
-            - std::max(0.0, stalactiteNoise - 0.58) * 0.65;
+        const double ceiling = 0.40
+            + 0.12 * noise(u * 7.0, 0.3, 7, 227)
+            + 0.05 * noise(u * 19.0, 0.6, 19, 239)
+            + 0.02 * noise(u * 43.0, 0.2, 43, 251);
+        const double stalactites = noise(u * 25.0, 0.8, 25, 263);
+        const double stalactiteLength = std::pow(
+            std::max(0.0, (stalactites - 0.51) / 0.49), 1.7) * 0.48;
+        const double ceilingEdge = ceiling - stalactiteLength;
+        const double farWallEdge = 0.025
+            + 0.055 * noise(u * 11.0, 0.1, 11, 269)
+            + 0.018 * noise(u * 37.0, 0.5, 37, 271);
 
         for (int y = 0; y < kPanoramaHeight; y++) {
             const double altitude = static_cast<double>(y) / (kPanoramaHeight - 1);
-            const double rockNoise = 0.65 * noise(u * 49.0, altitude * 37.0, 49, 277)
-                + 0.35 * noise(u * 103.0, altitude * 81.0, 103, 283);
-            const double rockEdge = stalactiteNoise > 0.58
-                ? stalactiteTip
-                : ceiling;
-            const double rock = smoothStep(rockEdge - 0.008, rockEdge + 0.008, altitude);
-            const double distantWall = (1.0 - smoothStep(0.01, 0.16, altitude))
-                * (0.25 + 0.35 * noise(u * 13.0, altitude * 19.0, 13, 293));
+            const double rockNoise = 0.45 * noise(u * 17.0 + altitude * 2.0,
+                                          altitude * 13.0, 17, 277)
+                + 0.35 * noise(u * 53.0 - altitude * 5.0,
+                    altitude * 39.0, 53, 281)
+                + 0.20 * noise(u * 127.0 + altitude * 8.0,
+                    altitude * 91.0, 127, 283);
+            const double mineralBands = noise(u * 31.0 + altitude * 4.0,
+                altitude * 9.0, 31, 287);
+            const double roof = smoothStep(ceilingEdge - 0.008,
+                ceilingEdge + 0.008, altitude);
+            const double farWall = 1.0 - smoothStep(farWallEdge - 0.006,
+                farWallEdge + 0.006, altitude);
+            const double roofRim = std::exp(-std::abs(altitude - ceilingEdge) * 90.0);
 
-            SkyColor color = mix({ 17.0, 16.0, 15.0 },
-                { 49.0, 39.0, 29.0 }, std::exp(-altitude * 18.0));
-            color = mix(color, { 61.0, 48.0, 34.0 }, distantWall);
-            const SkyColor rockColor = mix({ 36.0, 31.0, 27.0 },
-                { 77.0, 62.0, 43.0 }, rockNoise);
-            color = mix(color, rockColor, rock);
+            SkyColor color = mix({ 13.0, 19.0, 24.0 },
+                { 49.0, 43.0, 35.0 }, std::exp(-altitude * 9.0));
+            const double amberDistance = std::remainder(u - 0.17, 1.0);
+            const double blueDistance = std::remainder(u - 0.56, 1.0);
+            const double ochreDistance = std::remainder(u - 0.84, 1.0);
+            const double amberGlow = std::exp(-(amberDistance * amberDistance / 0.002
+                                                  + (altitude - 0.17) * (altitude - 0.17) / 0.018));
+            const double blueGlow = std::exp(-(blueDistance * blueDistance / 0.003
+                                                 + (altitude - 0.13) * (altitude - 0.13) / 0.026));
+            const double ochreGlow = std::exp(-(ochreDistance * ochreDistance / 0.002
+                                                  + (altitude - 0.20) * (altitude - 0.20) / 0.020));
+            color = mix(color, { 143.0, 78.0, 35.0 }, amberGlow * 0.78);
+            color = mix(color, { 55.0, 101.0, 117.0 }, blueGlow * 0.58);
+            color = mix(color, { 153.0, 105.0, 51.0 }, ochreGlow * 0.66);
+
+            const SkyColor distantColor = mix({ 35.0, 43.0, 47.0 },
+                { 73.0, 62.0, 48.0 }, rockNoise);
+            color = mix(color, distantColor, farWall);
+
+            SkyColor rockColor = mix({ 31.0, 36.0, 38.0 },
+                { 94.0, 76.0, 53.0 }, rockNoise);
+            rockColor = mix(rockColor, { 111.0, 77.0, 43.0 },
+                smoothStep(0.58, 0.84, mineralBands) * (0.25 + 0.5 * amberGlow));
+            rockColor = mix(rockColor, { 58.0, 91.0, 99.0 },
+                blueGlow * 0.35 * smoothStep(0.3, 0.7, rockNoise));
+            color = mix(color, rockColor, roof);
+            color = mix(color, { 137.0, 91.0, 50.0 }, roofRim * amberGlow * 0.58);
             pixels[y * kPanoramaWidth + x] = packColor(color, x, y);
         }
     }
