@@ -2202,9 +2202,18 @@ static int mainClientViewer(const char* connectSpec)
                     // mode from the bar, bad-shot messages, called-shot picker) runs locally,
                     // and its commit fork forwards `cattack` upstream (§3.b).
                     if (conn.myTurn() && !combatBusy) {
-                        Object* targetObj = gameMouseGetObjectUnderCursor(OBJ_TYPE_CRITTER, false, gElevation);
-                        if (targetObj == nullptr) {
-                            targetObj = gameMouseGetObjectUnderCursor(OBJ_TYPE_INVALID, false, gElevation);
+                        Object* targetObj = nullptr;
+                        if (tileFirstPersonPreviewIsEnabled()) {
+                            targetObj = mouseDeviceUsesRelativeMode()
+                                ? tileFirstPersonPreviewPickCritter()
+                                : tileFirstPersonPreviewPickCritterAt(mx, my);
+                        } else {
+                            targetObj = gameMouseGetObjectUnderCursor(
+                                OBJ_TYPE_CRITTER, false, gElevation);
+                            if (targetObj == nullptr) {
+                                targetObj = gameMouseGetObjectUnderCursor(
+                                    OBJ_TYPE_INVALID, false, gElevation);
+                            }
                         }
                         if (targetObj != nullptr) {
                             // _combat_attack_this runs the vanilla selection UX and
