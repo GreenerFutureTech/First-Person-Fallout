@@ -1739,6 +1739,11 @@ static int mainClientViewer(const char* connectSpec)
         // or clicks are dispatched (gameHandleKey is deliberately NOT called), so the
         // viewer can never mutate the sim; the standard mouse pump still runs harmlessly.
         int keyCode = inputGetInput();
+        gameHandleFirstPersonPreviewInput(keyCode);
+        if (keyCode == KEY_F11) {
+            gameToggleFirstPersonPreview();
+            keyCode = -1;
+        }
 
         // LALT toggles the highlight-lootables overlay. Safe in the viewer: it only
         // sets client-side outlines (rendering), never touches the sim.

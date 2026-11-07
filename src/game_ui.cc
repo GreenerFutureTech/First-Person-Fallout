@@ -162,6 +162,29 @@ void gameHandleFirstPersonPreviewInput(int eventCode)
     }
 }
 
+void gameToggleFirstPersonPreview()
+{
+    if (tileFirstPersonPreviewIsEnabled()) {
+        tileFirstPersonPreviewToggle();
+        mouseShowCursor();
+        gFirstPersonPreviewMouseReleased = false;
+        gFirstPersonPreviewLootPending = false;
+        gFirstPersonPreviewLootWindowShown = false;
+        gFirstPersonPreviewActionMenuShown = false;
+        gFirstPersonPreviewLeftClickStartTime = 0;
+        if (!mouseDeviceSetRelativeModeForced(false)) {
+            debugPrint("Failed to restore mouse mode: %s\n", SDL_GetError());
+        }
+    } else if (mouseDeviceSetRelativeModeForced(true)) {
+        inputEventQueueReset();
+        mouseResetButtonState();
+        mouseHideCursor();
+        tileFirstPersonPreviewToggle();
+    } else {
+        debugPrint("Failed to enable relative mouse mode for preview: %s\n", SDL_GetError());
+    }
+}
+
 static void gameFirstPersonPreviewStartLoot(Object* critter)
 {
     if (critter == nullptr || FrmId(critter).objectType() != OBJ_TYPE_CRITTER) {
@@ -1328,25 +1351,7 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
         tileFirstPersonPreviewToggleTopology();
         break;
     case KEY_F11:
-        if (tileFirstPersonPreviewIsEnabled()) {
-            tileFirstPersonPreviewToggle();
-            mouseShowCursor();
-            gFirstPersonPreviewMouseReleased = false;
-            gFirstPersonPreviewLootPending = false;
-            gFirstPersonPreviewLootWindowShown = false;
-            gFirstPersonPreviewActionMenuShown = false;
-            gFirstPersonPreviewLeftClickStartTime = 0;
-            if (!mouseDeviceSetRelativeModeForced(false)) {
-                debugPrint("Failed to restore mouse mode: %s\n", SDL_GetError());
-            }
-        } else if (mouseDeviceSetRelativeModeForced(true)) {
-            inputEventQueueReset();
-            mouseResetButtonState();
-            mouseHideCursor();
-            tileFirstPersonPreviewToggle();
-        } else {
-            debugPrint("Failed to enable relative mouse mode for preview: %s\n", SDL_GetError());
-        }
+        gameToggleFirstPersonPreview();
         break;
     case KEY_CTRL_V:
         if (1) {

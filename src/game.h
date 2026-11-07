@@ -70,6 +70,7 @@ void gameExit();
 // Processes only the first-person camera and visual/UI mouse-mode toggle.
 // This is also called while combat AI animations are running.
 void gameHandleFirstPersonPreviewInput(int eventCode);
+void gameToggleFirstPersonPreview();
 int gameHandleKey(int eventCode, bool isInCombatMode);
 void gameUiDisable(int allowScrolling);
 void gameUiEnable();

@@ -26,6 +26,18 @@ cmake --build build     -j"$(nproc)" --target f2_server fallout2-ce
 cmake --build build-win -j"$(nproc)" --target f2_server fallout2-ce
 ```
 
+On Windows, the repository PowerShell helper configures the default CMake
+generator when needed and builds both executables:
+
+```powershell
+.\scripts\build-coop.ps1
+# Optional: choose configuration/build directory
+.\scripts\build-coop.ps1 -Configuration Release -BuildDirectory build-release
+```
+
+The script does not copy or replace files in a game installation. Run the
+resulting executables with the game data folder as the working directory.
+
 | binary | what it is |
 |--------|------------|
 | `f2_server` / `f2_server.exe` | headless dedicated server. No SDL window, no art locks |
