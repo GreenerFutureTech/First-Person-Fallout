@@ -6,7 +6,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$repositoryRoot = (Resolve-Path $PSScriptRoot).Path
 $buildPath = if ([System.IO.Path]::IsPathRooted($BuildDirectory)) {
     $BuildDirectory
 } else {

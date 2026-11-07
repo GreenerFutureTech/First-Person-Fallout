@@ -26,17 +26,55 @@ cmake --build build     -j"$(nproc)" --target f2_server fallout2-ce
 cmake --build build-win -j"$(nproc)" --target f2_server fallout2-ce
 ```
 
-On Windows, the repository PowerShell helper configures the default CMake
+On Windows, the root-level PowerShell helper configures the default CMake
 generator when needed and builds both executables:
 
 ```powershell
-.\scripts\build-coop.ps1
+.\build-coop.ps1
 # Optional: choose configuration/build directory
-.\scripts\build-coop.ps1 -Configuration Release -BuildDirectory build-release
+.\build-coop.ps1 -Configuration Release -BuildDirectory build-release
 ```
 
 The script does not copy or replace files in a game installation. Run the
 resulting executables with the game data folder as the working directory.
+
+To launch the multiplayer client interactively on Windows, run:
+
+```powershell
+.\run-coop-client.ps1
+```
+
+It asks for the game-data folder, server host/wire port, account name, whether
+this is a first-time account and whether to create a character, an optional
+server token, and windowed mode. New-character creation uses the game's own
+character editor and only applies if the server has not seen that account name.
+The client runs from the selected game-data folder; the script restores its
+temporary environment settings when the client exits. Answers are saved to
+`%APPDATA%\FirstPersonFallout\coop-client.json` and prefilled on the next run;
+press Enter at a prompt to keep its saved value. The optional token is stored
+encrypted for the current Windows user, and its prompt remains hidden (press
+Enter to reuse it). The launcher remembers server/account combinations in
+`%APPDATA%\FirstPersonFallout\used-coop-accounts.json`; the first-time question
+still appears, but defaults to No for any combination already launched from
+this script, not just the most recent one. To use a non-default build output or
+game folder, pass `-Configuration`, `-BuildDirectory`, or `-GameDirectory`.
+Add `-WhatIf` to review and save the selected settings without launching the
+game or recording the account as used.
+
+To configure and start the dedicated server interactively on Windows, run:
+
+```powershell
+.\run-coop-server.ps1
+```
+
+The server launcher prompts for a new map, save slot, or operator-selected lobby;
+wire and admin ports; pacing and autosave; player slots; server identity;
+keepalive; and optional token enforcement. Settings are saved in
+`%APPDATA%\FirstPersonFallout\coop-server.json` and prefilled next time; press
+Enter to keep each displayed value. Use `-Configuration`, `-BuildDirectory`,
+or `-GameDirectory` to override the defaults, and `-WhatIf` to save and review
+the configuration without starting the server. The admin/command port is
+unrestricted and should only be exposed on trusted networks.
 
 | binary | what it is |
 |--------|------------|
