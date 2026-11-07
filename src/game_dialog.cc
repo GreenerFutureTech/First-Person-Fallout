@@ -894,6 +894,27 @@ bool gameDialogWindowActive()
     return _gdialog_state == GAME_DIALOG_ACTIVE;
 }
 
+static double gameDialogFirstPersonViewYaw = 0.0;
+static double gameDialogFirstPersonViewPitch = 0.0;
+static bool gameDialogFirstPersonViewSaved = false;
+
+static void gameDialogSaveFirstPersonView()
+{
+    gameDialogFirstPersonViewSaved = tileFirstPersonPreviewGetViewAngles(
+        &gameDialogFirstPersonViewYaw, &gameDialogFirstPersonViewPitch);
+}
+
+static void gameDialogRestoreFirstPersonView()
+{
+    if (!gameDialogFirstPersonViewSaved) {
+        return;
+    }
+
+    tileFirstPersonPreviewSetViewAngles(
+        gameDialogFirstPersonViewYaw, gameDialogFirstPersonViewPitch);
+    gameDialogFirstPersonViewSaved = false;
+}
+
 // gdialogEnter
 // 0x444D3C
 void gameDialogEnter(Object* speaker, int mode)
@@ -953,6 +974,7 @@ void gameDialogEnter(Object* speaker, int mode)
     gameDialogOldCenterTile = gCenterTile;
     gameDialogBarterModifier = 0;
     gameDialogOldDudeTile = gDude->tile;
+    gameDialogSaveFirstPersonView();
     isoDisable();
 
     _dialog_state_fix = 1;
@@ -977,6 +999,7 @@ void gameDialogEnter(Object* speaker, int mode)
         isoEnable();
         scriptsExecMapUpdateProc();
         _dialog_state_fix = 0;
+        gameDialogRestoreFirstPersonView();
         return;
     }
 
@@ -985,6 +1008,9 @@ void gameDialogEnter(Object* speaker, int mode)
         isoEnable();
         scriptsExecMapUpdateProc();
         _dialog_state_fix = 0;
+        if (!gameDialogWindowActive()) {
+            gameDialogRestoreFirstPersonView();
+        }
         return;
     }
 
@@ -1019,6 +1045,9 @@ void gameDialogEnter(Object* speaker, int mode)
     scriptsExecMapUpdateProc();
 
     _dialog_state_fix = 0;
+    if (!gameDialogWindowActive()) {
+        gameDialogRestoreFirstPersonView();
+    }
 }
 
 // 0x444FE4

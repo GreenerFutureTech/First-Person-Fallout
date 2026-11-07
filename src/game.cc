@@ -175,13 +175,6 @@ static void** gGameGlobalPointers = nullptr;
 
 
 
-
-
-
-
-
-
-
 // 0x442D44
 
 

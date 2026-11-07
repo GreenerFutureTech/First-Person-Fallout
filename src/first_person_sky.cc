@@ -208,7 +208,7 @@ std::vector<uint16_t> buildCavePanorama()
 } // namespace
 
 void firstPersonSkyRender(unsigned char* buffer, int width, int height, int pitch,
-    double yaw, double fieldOfViewScale, int ambientIntensityIndex,
+    int horizonY, double yaw, double fieldOfViewScale, int ambientIntensityIndex,
     FirstPersonSkyType skyType)
 {
     if (buffer == nullptr || width < 2 || height < 2 || pitch < width
@@ -233,7 +233,7 @@ void firstPersonSkyRender(unsigned char* buffer, int width, int height, int pitc
     static std::vector<int> panoramaColumns;
     static int cachedHeight = 0;
     static double cachedFieldOfView = 0.0;
-    const int horizon = height / 2;
+    const int horizon = std::clamp(horizonY, 0, height);
     if (columnAngles.size() != static_cast<std::size_t>(width)
         || cachedHeight != height || cachedFieldOfView != fieldOfViewScale) {
         columnAngles.resize(width);
