@@ -1101,7 +1101,7 @@ static void tileRenderFirstPersonPreview()
     // per-pixel neighbor search repeated map/FID/texture lookups hundreds of
     // thousands of times every frame.
     constexpr int kFloorCacheCellResolution = 16;
-    constexpr int kFloorCacheCellArea = kFloorCacheCellResolution * kFloorCacheCellResolution;
+    constexpr int kFloorCacheWidth = SQUARE_GRID_WIDTH * kFloorCacheCellResolution;
     static std::vector<int> cachedFloorFids;
     static std::vector<unsigned char> cachedFloorColors;
     static std::vector<FrmImage> floorTextures;
@@ -1147,13 +1147,15 @@ static void tileRenderFirstPersonPreview()
             }
         }
 
-        cachedFloorColors.assign(SQUARE_GRID_SIZE * kFloorCacheCellArea, COLOR_DULL_BROWN);
+        cachedFloorColors.assign(
+            SQUARE_GRID_HEIGHT * kFloorCacheCellResolution * kFloorCacheWidth,
+            COLOR_DULL_BROWN);
         for (int mapY = 0; mapY < SQUARE_GRID_HEIGHT; mapY++) {
-            for (int mapX = 0; mapX < SQUARE_GRID_WIDTH; mapX++) {
-                for (int sampleY = 0; sampleY < kFloorCacheCellResolution; sampleY++) {
+            for (int sampleY = 0; sampleY < kFloorCacheCellResolution; sampleY++) {
+                const double worldY = mapY + (sampleY + 0.5) / kFloorCacheCellResolution;
+                for (int mapX = 0; mapX < SQUARE_GRID_WIDTH; mapX++) {
                     for (int sampleX = 0; sampleX < kFloorCacheCellResolution; sampleX++) {
                         const double worldX = mapX + (sampleX + 0.5) / kFloorCacheCellResolution;
-                        const double worldY = mapY + (sampleY + 0.5) / kFloorCacheCellResolution;
                         unsigned char floorColor = COLOR_DULL_BROWN;
                         double bestDistance = std::numeric_limits<double>::infinity();
                         for (int neighborY = std::max(0, mapY - 1);
@@ -1207,8 +1209,9 @@ static void tileRenderFirstPersonPreview()
                                 }
                             }
                         }
-                        const int cacheIndex = (mapY * SQUARE_GRID_WIDTH + mapX) * kFloorCacheCellArea
-                            + sampleY * kFloorCacheCellResolution + sampleX;
+                        const int cacheIndex =
+                            (mapY * kFloorCacheCellResolution + sampleY) * kFloorCacheWidth
+                            + mapX * kFloorCacheCellResolution + sampleX;
                         cachedFloorColors[cacheIndex] = floorColor;
                     }
                 }
@@ -1587,8 +1590,9 @@ static void tileRenderFirstPersonPreview()
                 static_cast<int>((worldX - mapX) * kFloorCacheCellResolution));
             const int sampleY = std::min(kFloorCacheCellResolution - 1,
                 static_cast<int>((worldY - mapY) * kFloorCacheCellResolution));
-            const int cacheIndex = (mapY * SQUARE_GRID_WIDTH + mapX) * kFloorCacheCellArea
-                + sampleY * kFloorCacheCellResolution + sampleX;
+            const int cacheIndex =
+                (mapY * kFloorCacheCellResolution + sampleY) * kFloorCacheWidth
+                + mapX * kFloorCacheCellResolution + sampleX;
             const unsigned char color = intensityColorTable[
                 cachedFloorColors[cacheIndex]][ambientIntensityIndex];
             for (int blockY = y;
