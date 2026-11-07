@@ -1,3 +1,8 @@
+#include "character_editor.h"
+#include <string.h>
+#include "critter.h"
+#include "player_sheet.h" // playerSheetMarkDirty — stream perk-rank changes
+#include "server_players.h" // playerActorSlotOf / kMaxPlayerActors
 #include "perk.h"
 
 #include <stdio.h>
@@ -53,6 +58,43 @@ typedef struct PerkDescription {
 typedef struct PerkRankData {
     int ranks[PERK_COUNT];
 } PerkRankData;
+
+static PerkRankData gPlayerActorPerkRanks[kMaxPlayerActors - 1];
+
+static int gPlayerActorOwedPerk[kMaxPlayerActors];
+
+static PerkRankData* perkPlayerActorRow(int slot);
+
+void perkPlayerActorSeedRanks();
+
+void perkPlayerActorSeedRanksSlot(int slot);
+
+void perkPlayerActorClearRanksSlot(int slot);
+
+static PerkRankData* perkPlayerActorRow(int slot);
+
+int perkPlayerActorRowWrite(File* stream, int slot);
+
+int perkPlayerActorRowRead(File* stream, int slot);
+
+static int* perkOwedPickCell(Object* critter);
+
+bool perkOwedPickGet(Object* critter);
+
+int perkOwedPickCount(Object* critter);
+
+void perkOwedPickAdd(Object* critter, int delta);
+
+void perkOwedPickSet(Object* critter, bool owed);
+
+int perkPlayerActorOwedPickRowWrite(File* stream, int slot);
+
+int perkPlayerActorOwedPickRowRead(File* stream, int slot);
+
+int perkChoiceApply(Object* critter, Perk perk, const int* perksBackup, int* pendingChoicePtr);
+
+
+
 
 typedef struct PerkTweaks {
     int nightVisionBonus = 20;
@@ -484,6 +526,43 @@ int perksSave(File* stream)
 // 0x49678C perkGetLevelData
 static PerkRankData* perkGetRankData(Object* critter)
 {
+    // ►►►► REGISTRY FIRST. The `critter == gDude` test that used to sit HERE, above the
+    // slot lookup, is why every viewer displayed the HOST's perks as its own. `gDude` is
+    // not "the host": on a co-op client it is THAT CLIENT'S OWN ACTOR. So on P3's machine
+    // perkGetRank(gDude, …) took the short-circuit and read gPartyMemberPerkRanks — SLOT
+    // 0's row — while P3's own row, correctly addressed as slot 2, went into
+    // gPlayerActorPerkRanks[1] where nothing local ever read it. Owner-observed: P3's
+    // character screen listing P1's Awareness, perks appearing to accumulate across
+    // seats, and the inspect/awareness detail level flapping as rows landed either way
+    // round.
+    //
+    // The note below already fixed exactly this for EXTRAS. It could not fix it for the
+    // local actor, because the short-circuit ran first and the registry was never asked.
+    // Same bug, same function, one line higher — the `== gDude` taxonomy in
+    // PLAYER_SHEET_DESIGN.md: `subject == gDude` is an IDENTITY claim ("this is the
+    // host") and it is false on every client.
+    //
+    // Extra player actors resolve BEFORE the party-member pid scan below — which they
+    // would otherwise fall straight through, because an extra is not gDude and
+    // its pid is the DUDE pid, which the scan skips (it starts at index 1). The
+    // fallthrough then returned gPartyMemberPerkRanks, i.e. the HOST's row, so
+    // every extra silently read AND WROTE P1's perks. That looked harmless only
+    // while the rows were identical; the first perk granted to one actor
+    // corrupted the host's sheet. See PLAYER_SHEET_DESIGN.md §1.
+    int playerSlot = playerActorSlotOf(critter);
+    if (playerSlot > 0) {
+        return &(gPlayerActorPerkRanks[playerSlot - 1]);
+    }
+    if (playerSlot == 0) {
+        // Slot 0's row IS the dude table, on every machine — that aliasing is what lets
+        // the host's perks ride the same save/wire path as an extra's.
+        return gPartyMemberPerkRanks;
+    }
+
+    // Not in the registry. For gDude that means it is not populated YET (a load or a
+    // join still in flight), not "this is not a player" — the same fail-open
+    // perkOwedPickCell takes, and for the same reason: failing closed during startup
+    // would hand back somebody else's perks.
     if (critter == gDude) {
         return gPartyMemberPerkRanks;
     }
@@ -633,12 +712,27 @@ static void perkResetRanks()
             ranksData->ranks[perk] = 0;
         }
     }
+
+    // Extra player actors reset with everyone else — a new game must not inherit
+    // the previous one's perks (these are file statics, not malloc'd per run).
+    for (int slot = 0; slot < kMaxPlayerActors - 1; slot++) {
+        for (int perk = 0; perk < PERK_COUNT; perk++) {
+            gPlayerActorPerkRanks[slot].ranks[perk] = 0;
+        }
+    }
+
+    // …and so does every owed pick: a fresh game owes nobody a perk.
+    for (int slot = 0; slot < kMaxPlayerActors; slot++) {
+        gPlayerActorOwedPerk[slot] = 0;
+    }
 }
 
 // 0x496A5C perk_add
 int perkAdd(Object* critter, Perk perk)
 {
-    return perkAddAtLevel(critter, perk, pcGetStat(PC_STAT_LEVEL));
+    int result = perkAddAtLevel(critter, perk, pcGetStat(PC_STAT_LEVEL, critter));
+    if (result == 0) playerSheetMarkDirty(critter);
+    return result;
 }
 
 int perkAddAtLevel(Object* critter, Perk perk, int level)
@@ -679,6 +773,10 @@ int perkAddForce(Object* critter, Perk perk)
     ranksData->ranks[perk] += 1;
 
     perkAddEffect(critter, perk);
+
+    // Perk ranks are per-actor sheet state — stream the row so the actor's client
+    // reflects the new perk (and any stat effect it just applied).
+    playerSheetMarkDirty(critter);
 
     return 0;
 }
@@ -1136,6 +1234,211 @@ int perkGetStonewallPercent()
 int perkGetWeaponHandlingBonus()
 {
     return perkTweaks.weaponHandlingBonus;
+}
+
+
+
+void perkPlayerActorSeedRanks()
+{
+    for (int slot = 1; slot < kMaxPlayerActors; slot++) {
+        perkPlayerActorSeedRanksSlot(slot);
+    }
+}
+
+void perkPlayerActorSeedRanksSlot(int slot)
+{
+    if (gPartyMemberPerkRanks == nullptr || slot < 1 || slot >= kMaxPlayerActors) {
+        return;
+    }
+
+    memcpy(&(gPlayerActorPerkRanks[slot - 1]), gPartyMemberPerkRanks, sizeof(PerkRankData));
+}
+
+void perkPlayerActorClearRanksSlot(int slot)
+{
+    PerkRankData* ranksData = perkPlayerActorRow(slot);
+    if (ranksData == nullptr) {
+        return;
+    }
+
+    for (int perk = 0; perk < PERK_COUNT; perk++) {
+        ranksData->ranks[perk] = 0;
+    }
+}
+
+static PerkRankData* perkPlayerActorRow(int slot)
+{
+    if (slot == 0) {
+        return gPartyMemberPerkRanks; // may be null before perksInit
+    }
+
+    if (slot < 1 || slot >= kMaxPlayerActors) {
+        return nullptr;
+    }
+
+    return &(gPlayerActorPerkRanks[slot - 1]);
+}
+
+int perkPlayerActorRowWrite(File* stream, int slot)
+{
+    PerkRankData* ranksData = perkPlayerActorRow(slot);
+    if (ranksData == nullptr) {
+        return -1;
+    }
+
+    for (int perk = 0; perk < PERK_COUNT; perk++) {
+        if (fileWriteInt32(stream, ranksData->ranks[perk]) == -1) {
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+int perkPlayerActorRowRead(File* stream, int slot)
+{
+    PerkRankData* ranksData = perkPlayerActorRow(slot);
+    if (ranksData == nullptr) {
+        return -1;
+    }
+
+    for (int perk = 0; perk < PERK_COUNT; perk++) {
+        if (fileReadInt32(stream, &(ranksData->ranks[perk])) == -1) {
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+static int* perkOwedPickCell(Object* critter)
+{
+    Object* subject = critter != nullptr ? critter : gDude;
+
+    // ►► REGISTRY FIRST, exactly as pcStatRow resolves the PC-stat rows, and for a
+    // reason worth stating: `subject == gDude` is NOT a test for "the host". A
+    // ServerActorScope rebinds gDude to whichever actor is acting, and on a co-op
+    // client gDude IS that client's own actor — so short-circuiting on gDude would
+    // read and write SLOT 0's pick for every actor in the game, which is the host's
+    // own character.
+    int slot = playerActorSlotOf(subject);
+    if (slot >= 0 && slot < kMaxPlayerActors) {
+        return &(gPlayerActorOwedPerk[slot]);
+    }
+
+    // Not in the registry. For gDude (and the no-subject default) that means the
+    // registry is not populated YET rather than "not a player": characterEditorLoad
+    // restores the host's flag from inside the savegame handler chain, before the
+    // actors are registered, and failing closed there would silently drop an owed
+    // pick across every save/load. Any other critter genuinely has no pick.
+    if (subject == gDude) {
+        return &(gPlayerActorOwedPerk[0]);
+    }
+
+    return nullptr;
+}
+
+bool perkOwedPickGet(Object* critter)
+{
+    int* cell = perkOwedPickCell(critter);
+    return cell != nullptr && *cell > 0;
+}
+
+int perkOwedPickCount(Object* critter)
+{
+    int* cell = perkOwedPickCell(critter);
+    return cell != nullptr ? *cell : 0;
+}
+
+void perkOwedPickAdd(Object* critter, int delta)
+{
+    int* cell = perkOwedPickCell(critter);
+    if (cell == nullptr || delta == 0) {
+        return;
+    }
+
+    int updated = *cell + delta;
+    if (updated < 0) {
+        updated = 0; // spending a pick nobody owes is a no-op, never a negative debt
+    }
+    if (updated > 255) {
+        updated = 255; // the wire/save byte is a uint8; a real game never approaches this
+    }
+    if (updated == *cell) {
+        return;
+    }
+
+    *cell = updated;
+    playerSheetMarkDirty(critter != nullptr ? critter : gDude);
+}
+
+void perkOwedPickSet(Object* critter, bool owed)
+{
+    int* cell = perkOwedPickCell(critter);
+    if (cell == nullptr) {
+        return;
+    }
+
+    int value = owed ? 1 : 0;
+    if (*cell == value) {
+        return;
+    }
+
+    *cell = value;
+
+    // The flag is sheet state the client renders (it is what makes the perk
+    // dialog offer itself), so a change has to reach that actor's screen.
+    playerSheetMarkDirty(critter != nullptr ? critter : gDude);
+}
+
+int perkPlayerActorOwedPickRowWrite(File* stream, int slot)
+{
+    if (slot < 0 || slot >= kMaxPlayerActors) {
+        return -1;
+    }
+
+    int owed = gPlayerActorOwedPerk[slot];
+    return fileWriteUInt8(stream, (unsigned char)(owed < 0 ? 0 : (owed > 255 ? 255 : owed)));
+}
+
+int perkPlayerActorOwedPickRowRead(File* stream, int slot)
+{
+    if (slot < 0 || slot >= kMaxPlayerActors) {
+        return -1;
+    }
+
+    unsigned char owed;
+    if (fileReadUInt8(stream, &owed) == -1) {
+        return -1;
+    }
+
+    gPlayerActorOwedPerk[slot] = owed;
+
+    return 0;
+}
+
+int perkChoiceApply(Object* critter, Perk perk, const int* perksBackup, int* pendingChoicePtr)
+{
+    *pendingChoicePtr = PERK_CHOICE_PENDING_NONE;
+
+    if (perkAddAtLevel(critter, perk, characterEditorGetPerkSelectionLevel(critter)) == -1) {
+        return -1;
+    }
+
+    if (perkGetRank(critter, PERK_TAG) != 0 && perksBackup[PERK_TAG] == 0) {
+        *pendingChoicePtr = PERK_CHOICE_PENDING_TAG;
+    } else if (perkGetRank(critter, PERK_MUTATE) != 0 && perksBackup[PERK_MUTATE] == 0) {
+        *pendingChoicePtr = PERK_CHOICE_PENDING_MUTATE;
+    } else if (perkGetRank(critter, PERK_LIFEGIVER) != perksBackup[PERK_LIFEGIVER]) {
+        int maxHp = critterGetBonusStat(critter, STAT_MAXIMUM_HIT_POINTS);
+        critterSetBonusStat(critter, STAT_MAXIMUM_HIT_POINTS, maxHp + perkGetLifegiverBonus());
+        critterAdjustHitPoints(critter, perkGetLifegiverBonus());
+    } else if (perkGetRank(critter, PERK_EDUCATED) != perksBackup[PERK_EDUCATED]) {
+        int sp = pcGetStat(PC_STAT_UNSPENT_SKILL_POINTS, critter);
+        pcSetStat(PC_STAT_UNSPENT_SKILL_POINTS, sp + perkGetEducatedBonus(), critter);
+    }
+
+    return 0;
 }
 
 } // namespace fallout

@@ -1,3 +1,8 @@
+#include "character_editor.h" // gCharacterEditorLastLevel — stamped so a screen never re-awards
+#include "msg_channel.h" // kMsgChannelReward — a level-up is good news, addressed to its actor
+#include "presenter.h"
+#include "player_sheet.h" // playerSheetMarkDirty — stream runtime sheet changes
+#include "server_players.h" // playerActorSlotOf — per-actor PC-stat rows
 #include "stat.h"
 
 #include <charconv>
@@ -32,6 +37,25 @@
 #include "trait.h"
 
 namespace fallout {
+
+static int gPlayerActorPcStats[kMaxPlayerActors - 1][PC_STAT_COUNT];
+
+static int* pcStatRow(Object* subject);
+
+bool pcLevelUpApply(int fromLevel, int toLevel, Object* subject);
+
+void pcLevelUpBadgeRefresh(Object* subject);
+
+void pcPlayerActorSeedStats();
+
+void pcPlayerActorSeedStatsSlot(int slot);
+
+static int* pcPlayerActorRow(int slot);
+
+int pcPlayerActorRowWrite(File* stream, int slot);
+
+int pcPlayerActorRowRead(File* stream, int slot);
+
 
 // Provides metadata about stats.
 typedef struct StatDescription {
@@ -350,11 +374,15 @@ int critterGetStat(Object* critter, Stat stat)
                 if (_combat_whose_turn() != critter) {
                     int armorClassBonus = critter->data.critter.combat.ap * unspentApBonus;
 
-                    if (critter == gDude) {
-                        if (perkHasRank(gDude, PERK_HTH_EVADE)) {
+                    // Every player actor evades with its OWN unarmed skill and
+                    // its OWN equipped weapons — the whole block reads `critter`,
+                    // not gDude, or an extra's armor class is computed from what
+                    // the HOST happens to be holding.
+                    if (playerActorIs(critter)) {
+                        if (perkHasRank(critter, PERK_HTH_EVADE)) {
                             bool hasWeapon = false;
 
-                            Object* item2 = critterGetItem2(gDude);
+                            Object* item2 = critterGetItem2(critter);
                             if (item2 != nullptr) {
                                 if (itemGetType(item2) == ITEM_TYPE_WEAPON) {
                                     if (weaponGetAnimationCode(item2) != WeaponAnimation::None) {
@@ -364,7 +392,7 @@ int critterGetStat(Object* critter, Stat stat)
                             }
 
                             if (!hasWeapon) {
-                                Object* item1 = critterGetItem1(gDude);
+                                Object* item1 = critterGetItem1(critter);
                                 if (item1 != nullptr) {
                                     if (itemGetType(item1) == ITEM_TYPE_WEAPON) {
                                         if (weaponGetAnimationCode(item1) != WeaponAnimation::None) {
@@ -375,8 +403,8 @@ int critterGetStat(Object* critter, Stat stat)
                             }
 
                             if (!hasWeapon) {
-                                armorClassBonus += critter->data.critter.combat.ap * perkGetRank(gDude, PERK_HTH_EVADE) * unspentApPerkBonus;
-                                value += skillGetValue(gDude, SKILL_UNARMED) / 12;
+                                armorClassBonus += critter->data.critter.combat.ap * perkGetRank(critter, PERK_HTH_EVADE) * unspentApPerkBonus;
+                                value += skillGetValue(critter, SKILL_UNARMED) / 12;
                             }
                         }
                     }
@@ -391,7 +419,14 @@ int critterGetStat(Object* critter, Stat stat)
             break;
         }
 
-        if (critter == gDude) {
+        // Perk-derived SPECIAL / damage-resistance / max-HP bonuses belong to the
+        // subject actor, not whoever is bound to gDude. Keying on `== gDude` drops
+        // an extra's bonuses whenever it is not the scoped actor (e.g. it is the
+        // DEFENDER during an enemy turn, where gDude is restored to the host), so
+        // its Dermal Armor DR / Adrenaline Rush / GAIN_* etc. silently vanish
+        // off-turn. Use playerActorIs, matching the HtH-evade block above and
+        // critterGetBaseStatWithTraitModifier.
+        if (playerActorIs(critter)) {
             switch (stat) {
             case STAT_STRENGTH:
                 if (perkGetRank(critter, PERK_GAIN_STRENGTH)) {
@@ -553,8 +588,10 @@ int critterGetBaseStatWithTraitModifier(Object* critter, Stat stat)
 {
     int value = critterGetBaseStat(critter, stat);
 
-    if (critter == gDude) {
-        value += traitGetStatModifier(stat);
+    // EVERY player actor gets its own trait modifiers, not just the host —
+    // playerActorIs IS `critter == gDude` with an empty registry.
+    if (playerActorIs(critter)) {
+        value += traitGetStatModifier(stat, critter);
     }
 
     return value;
@@ -565,8 +602,29 @@ int critterGetBaseStat(Object* critter, Stat stat)
 {
     Proto* proto;
 
-    if (stat >= STAT_FIRST && stat < SAVEABLE_STAT_COUNT) {
-        protoGetProto(critter, &proto);
+    if (stat >= 0 && stat < SAVEABLE_STAT_COUNT) {
+        // MP hardening: a critter's pid must resolve to a proto. It ALWAYS does in
+        // single-player, so vanilla dereferences unconditionally — but a co-op
+        // viewer can transiently hold an actor whose pid does not resolve during a
+        // rebaseline, and the unchecked deref then reads out of bounds (ASAN:
+        // heap-buffer-overflow). Degrade to 0 instead of crashing; the next
+        // interface update reads the correct value once the world settles.
+        //
+        // The pid must also be a CRITTER pid. baseStats lives deep inside
+        // CritterProto (proto_size 0x1A0); every other proto type is allocated at
+        // its own, smaller size (proto.cc _proto_sizes — ItemProto 0x84, SceneryProto
+        // 0x38, ...). skillUse (skill.cc:663-664) reads the TARGET's HP stats before
+        // it branches on skill, so using Lockpick/Repair/Traps on a door, container
+        // or item reaches here with a non-critter target; indexing baseStats[stat]
+        // then runs off the end of that smaller allocation. Vanilla has the same
+        // unconditional read but got away with it — the OOB bytes landed in adjacent
+        // 32-bit heap and were never used for non-healing skills. Return 0: a
+        // non-critter has no SPECIAL/derived stats, and the healing math that would
+        // consume HP only runs for critter targets.
+        if (ProtoId(critter).objectType() != OBJ_TYPE_CRITTER
+            || protoGetProto(critter, &proto) == -1 || proto == nullptr) {
+            return 0;
+        }
         return proto->critter.data.baseStats[stat];
     }
 
@@ -587,7 +645,14 @@ int critterGetBonusStat(Object* critter, Stat stat)
 {
     if (stat >= STAT_FIRST && stat < SAVEABLE_STAT_COUNT) {
         Proto* proto;
-        protoGetProto(critter, &proto);
+        // MP hardening + non-critter guard, same as critterGetBaseStat — see the
+        // note there. bonusStats is the same CritterProto-only array, so a
+        // non-critter target (Lockpick/Repair on a door) would read off the end of
+        // its smaller proto allocation.
+        if (ProtoId(critter).objectType() != OBJ_TYPE_CRITTER
+            || protoGetProto(critter, &proto) == -1 || proto == nullptr) {
+            return 0;
+        }
         return proto->critter.data.bonusStats[stat];
     }
 
@@ -609,8 +674,8 @@ int critterSetBaseStat(Object* critter, Stat stat, int value)
             return -1;
         }
 
-        if (critter == gDude) {
-            value -= traitGetStatModifier(stat);
+        if (playerActorIs(critter)) {
+            value -= traitGetStatModifier(stat, critter);
         }
 
         if (value < statGetMinimum(critter, stat)) {
@@ -627,6 +692,10 @@ int critterSetBaseStat(Object* critter, Stat stat, int value)
         if (stat >= STAT_STRENGTH && stat <= STAT_LUCK) {
             critterUpdateDerivedStats(critter);
         }
+
+        // Sheet lives in the per-slot proto row, not on the Object — stream the
+        // row so viewers see the change live (no-op off a network presenter).
+        playerSheetMarkDirty(critter);
 
         return 0;
     }
@@ -649,8 +718,10 @@ int critterIncBaseStat(Object* critter, Stat stat)
 {
     int value = critterGetBaseStat(critter, stat);
 
-    if (critter == gDude) {
-        value += traitGetStatModifier(stat);
+    // EVERY player actor gets its own trait modifiers, not just the host —
+    // playerActorIs IS `critter == gDude` with an empty registry.
+    if (playerActorIs(critter)) {
+        value += traitGetStatModifier(stat, critter);
     }
 
     return critterSetBaseStat(critter, stat, value + 1);
@@ -661,8 +732,10 @@ int critterDecBaseStat(Object* critter, Stat stat)
 {
     int value = critterGetBaseStat(critter, stat);
 
-    if (critter == gDude) {
-        value += traitGetStatModifier(stat);
+    // EVERY player actor gets its own trait modifiers, not just the host —
+    // playerActorIs IS `critter == gDude` with an empty registry.
+    if (playerActorIs(critter)) {
+        value += traitGetStatModifier(stat, critter);
     }
 
     return critterSetBaseStat(critter, stat, value - 1);
@@ -683,6 +756,10 @@ int critterSetBonusStat(Object* critter, Stat stat, int value)
         if (stat >= STAT_STRENGTH && stat <= STAT_LUCK) {
             critterUpdateDerivedStats(critter);
         }
+
+        // Sheet lives in the per-slot proto row, not on the Object — stream the
+        // row so viewers see the change live (no-op off a network presenter).
+        playerSheetMarkDirty(critter);
 
         return 0;
     }
@@ -761,13 +838,13 @@ char* statGetValueDescription(int value)
 }
 
 // 0x4AF8FC
-int pcGetStat(PcStat pcStat)
+int pcGetStat(PcStat pcStat, Object* subject)
 {
-    return pcStatIsValid(pcStat) ? gPcStatValues[pcStat] : 0;
+    return pcStatIsValid(pcStat) ? pcStatRow(subject)[pcStat] : 0;
 }
 
 // 0x4AF910
-int pcSetStat(PcStat pcStat, int value)
+int pcSetStat(PcStat pcStat, int value, Object* subject)
 {
     int result;
 
@@ -784,16 +861,22 @@ int pcSetStat(PcStat pcStat, int value)
         return -3;
     }
 
-    if (pcStat != PC_STAT_EXPERIENCE || value >= gPcStatValues[PC_STAT_EXPERIENCE]) {
-        gPcStatValues[pcStat] = value;
+    int* row = pcStatRow(subject);
+
+    if (pcStat != PC_STAT_EXPERIENCE || value >= row[PC_STAT_EXPERIENCE]) {
+        row[pcStat] = value;
         if (pcStat == PC_STAT_EXPERIENCE) {
-            result = pcAddExperienceWithOptions(0, true);
+            result = pcAddExperienceWithOptions(0, true, nullptr, subject);
         } else {
             result = 0;
         }
     } else {
-        result = pcSetExperience(value);
+        result = pcSetExperience(value, subject);
     }
+
+    // Stream the row: level / karma / unspent skill points are per-actor sheet
+    // fields, so a viewer must see them change (same channel as SPECIAL/XP).
+    playerSheetMarkDirty(subject);
 
     return result;
 }
@@ -805,6 +888,15 @@ void pcStatsReset()
 {
     for (PcStat pcStat = PC_STAT_FIRST; pcStat < PC_STAT_COUNT; pcStat++) {
         gPcStatValues[pcStat] = gPcStatDescriptions[pcStat].defaultValue;
+    }
+
+    // Extra actors reset with the host — these are file statics, not malloc'd per
+    // run, so a new game would otherwise inherit the previous one's XP and level
+    // (the same trap perkResetRanks has).
+    for (int slot = 0; slot < kMaxPlayerActors - 1; slot++) {
+        for (int pcStat = 0; pcStat < PC_STAT_COUNT; pcStat++) {
+            gPlayerActorPcStats[slot][pcStat] = gPcStatDescriptions[pcStat].defaultValue;
+        }
     }
 }
 
@@ -868,9 +960,9 @@ static int pcGetLevelForExperience(int xp)
 // Returns experience to reach next level.
 //
 // 0x4AF9A0
-int pcGetExperienceForNextLevel()
+int pcGetExperienceForNextLevel(Object* subject)
 {
-    return pcGetExperienceForLevel(gPcStatValues[PC_STAT_LEVEL] + 1);
+    return pcGetExperienceForLevel(pcStatRow(subject)[PC_STAT_LEVEL] + 1);
 }
 
 // Returns exp to reach given level.
@@ -943,19 +1035,26 @@ int statRoll(Object* critter, Stat stat, int modifier, int* howMuch)
 }
 
 // 0x4AFAA8
-int pcAddExperience(int xp, int* xpGained)
+int pcAddExperience(int xp, int* xpGained, Object* subject)
 {
-    return pcAddExperienceWithOptions(xp, true, xpGained);
+    return pcAddExperienceWithOptions(xp, true, xpGained, subject);
 }
 
 // 0x4AFAB8
-int pcAddExperienceWithOptions(int xp, bool doParty, int* xpGained)
+int pcAddExperienceWithOptions(int xp, bool doParty, int* xpGained, Object* subject)
 {
-    int oldXp = gPcStatValues[PC_STAT_EXPERIENCE];
+    // Resolve ONCE, up front. Everything below that used to read gDude reads this
+    // instead, and the row it indexes must be the same actor's — an earner whose
+    // XP lands in one row while the level-up spends another's is risk #2, and it
+    // is silent (§7).
+    Object* earner = subject != nullptr ? subject : gDude;
+    int* row = pcStatRow(earner);
 
-    int newXp = gPcStatValues[PC_STAT_EXPERIENCE];
+    int oldXp = row[PC_STAT_EXPERIENCE];
+
+    int newXp = row[PC_STAT_EXPERIENCE];
     newXp += xp;
-    newXp += perkGetRank(gDude, PERK_SWIFT_LEARNER) * 5 * xp / 100;
+    newXp += perkGetRank(earner, PERK_SWIFT_LEARNER) * 5 * xp / 100;
 
     if (newXp < gPcStatDescriptions[PC_STAT_EXPERIENCE].minimumValue) {
         newXp = gPcStatDescriptions[PC_STAT_EXPERIENCE].minimumValue;
@@ -965,50 +1064,97 @@ int pcAddExperienceWithOptions(int xp, bool doParty, int* xpGained)
         newXp = gPcStatDescriptions[PC_STAT_EXPERIENCE].maximumValue;
     }
 
-    gPcStatValues[PC_STAT_EXPERIENCE] = newXp;
+    row[PC_STAT_EXPERIENCE] = newXp;
 
-    while (gPcStatValues[PC_STAT_LEVEL] < pcGetMaxLevel()) {
-        if (newXp < pcGetExperienceForNextLevel()) {
+    // The level-up award is the EARNER's: hit points land on the actor that did
+    // the killing, not on whoever happens to be gDude.
+    // gDude is rebound by ServerActorScope, so pointer equality with it means
+    // "current acting player", not host. Slot 0 is the stable host identity.
+    bool isHost = playerActorSlotOf(earner) == 0;
+
+    while (row[PC_STAT_LEVEL] < pcGetMaxLevel()) {
+        if (newXp < pcGetExperienceForNextLevel(earner)) {
             break;
         }
 
-        if (pcSetStat(PC_STAT_LEVEL, gPcStatValues[PC_STAT_LEVEL] + 1) == 0) {
-            characterEditorHandleLevelUp(gPcStatValues[PC_STAT_LEVEL]);
+        int levelBefore = row[PC_STAT_LEVEL];
+        if (pcSetStat(PC_STAT_LEVEL, row[PC_STAT_LEVEL] + 1, earner) == 0) {
+            int maxHpBefore = critterGetStat(earner, STAT_MAXIMUM_HIT_POINTS);
 
-            int maxHpBefore = critterGetStat(gDude, STAT_MAXIMUM_HIT_POINTS);
-
-            // You have gone up a level.
-            MessageListItem messageListItem;
-            messageListItem.num = 600;
-            if (messageListGetItem(&gStatsMessageList, &messageListItem)) {
-                displayMonitorAddMessage(messageListItem.text);
+            // ►► THE SKILL POINTS AND THE FREE PERK ARE AWARDED HERE, on the level
+            // itself, for the actor that earned it.
+            //
+            // They used to be awarded by characterEditorUpdateLevel — that is, LAZILY,
+            // the next time somebody opened the character screen (vanilla awards HP in
+            // this funnel but points on the screen). In co-op that is not a quirk, it is
+            // a hole: the dedicated server has no character screen at all, and every
+            // player's screen is server-owned, so NOBODY was ever awarded a point. The
+            // owed perk was worse than missing — it was one shared PC-global, so the
+            // first player to open their sheet consumed the pick and everyone else's
+            // vanished (PLAYER_SHEET_DESIGN.md §8).
+            //
+            // Awarding at the funnel makes the earner the subject and needs no screen.
+            // For single-player the totals are identical, only earlier: the points are
+            // already in the row when the screen opens instead of appearing as it does.
+            pcLevelUpApply(levelBefore, levelBefore + 1, earner);
+            characterEditorHandleLevelUp(levelBefore + 1, earner);
+            if (isHost) {
+                // This process's screen has nothing left to reconcile — without the
+                // stamp, characterEditorUpdateLevel would award the same level again.
+                gCharacterEditorLastLevel = row[PC_STAT_LEVEL];
             }
 
-            dudeEnableState(DUDE_STATE_LEVEL_UP_AVAILABLE);
-
-            soundPlayFile("levelup");
+            // ►► "YOU HAVE GONE UP A LEVEL" NOW REACHES THE ACTOR WHO LEVELLED, not just
+            // the host. This block used to be host-only with the note "until per-client HUD
+            // routing exists" — it exists now (consoleMessageStyled addresses one actor), and
+            // the gap was worse than cosmetic: an extra levelled "silently but really", so a
+            // player gained a level, HP and skill points with NOTHING on their screen to say
+            // so. Addressed, so it lands on the right screen and nobody else's.
+            //
+            // The interface repaints below stay HOST-ONLY on purpose: they act on THIS
+            // process's single interface bar, so firing them for an extra would repaint
+            // the host's bar with another character's numbers. The level-up FLAG is no
+            // longer in that group — dudeEnableState takes a subject now, so it marks the
+            // earner's own sheet row and streams to the earner's own indicator bar.
+            {
+                MessageListItem messageListItem;
+                messageListItem.num = 600; // You have gone up a level.
+                if (messageListGetItem(&gStatsMessageList, &messageListItem)) {
+                    presenter()->consoleMessageStyled(earner != nullptr ? earner->netId : 0,
+                        kMsgChannelReward, messageListItem.text);
+                }
+            }
+            pcLevelUpBadgeRefresh(earner);
+            if (isHost) {
+                presenter()->sfxPlay("levelup");
+            }
 
             // NOTE: Uninline.
-            int endurance = critterGetBaseStatWithTraitModifier(gDude, STAT_ENDURANCE);
+            int endurance = critterGetBaseStatWithTraitModifier(earner, STAT_ENDURANCE);
 
             int hpPerLevel = endurance / 2 + 2;
-            hpPerLevel += perkGetRank(gDude, PERK_LIFEGIVER) * perkGetLifegiverBonus();
+            hpPerLevel += perkGetRank(earner, PERK_LIFEGIVER) * perkGetLifegiverBonus();
 
-            int bonusHp = critterGetBonusStat(gDude, STAT_MAXIMUM_HIT_POINTS);
-            critterSetBonusStat(gDude, STAT_MAXIMUM_HIT_POINTS, bonusHp + hpPerLevel);
+            int bonusHp = critterGetBonusStat(earner, STAT_MAXIMUM_HIT_POINTS);
+            critterSetBonusStat(earner, STAT_MAXIMUM_HIT_POINTS, bonusHp + hpPerLevel);
 
-            int maxHpAfter = critterGetStat(gDude, STAT_MAXIMUM_HIT_POINTS);
-            critterAdjustHitPoints(gDude, maxHpAfter - maxHpBefore);
+            int maxHpAfter = critterGetStat(earner, STAT_MAXIMUM_HIT_POINTS);
+            critterAdjustHitPoints(earner, maxHpAfter - maxHpBefore);
 
-            interfaceRenderHitPoints(false);
+            if (isHost) {
+                presenter()->hudHitPoints(false);
 
-            // SFALL: Update unarmed attack after leveling up.
-            InterfaceItemAction leftItemAction;
-            InterfaceItemAction rightItemAction;
-            interfaceGetItemActions(&leftItemAction, &rightItemAction);
-            interfaceUpdateItems(false, leftItemAction, rightItemAction);
+                // SFALL: Update unarmed attack after leveling up.
+                InterfaceItemAction leftItemAction;
+                InterfaceItemAction rightItemAction;
+                interfaceGetItemActions(&leftItemAction, &rightItemAction);
+                presenter()->hudItems(false, leftItemAction, rightItemAction);
+            }
 
-            if (doParty && partyMemberEngineLevelUpEnabled()) {
+            // Companions follow the HOST's level only. They are one shared party
+            // (MP_PROPOSAL Ch 14), so letting each player's level-up advance them
+            // would compound their growth by the player count.
+            if (doParty && isHost && partyMemberEngineLevelUpEnabled()) {
                 _partyMemberIncLevels();
             }
         }
@@ -1018,43 +1164,183 @@ int pcAddExperienceWithOptions(int xp, bool doParty, int* xpGained)
         *xpGained = newXp - oldXp;
     }
 
+    // Stream the earner's new XP/level row. The award is already per-actor (the
+    // combat bucket credits the killer), but without this the extra's client keeps
+    // showing seeded XP — "only slot 0 gains XP". The XP write above is direct (not
+    // via pcSetStat), so mark here; whole-row is idempotent so the nested level-up
+    // pcSetStat marking again is harmless.
+    playerSheetMarkDirty(earner);
+
     return 0;
 }
 
 // 0x4AFC38
-int pcSetExperience(int xp)
+int pcSetExperience(int xp, Object* subject)
 {
-    int oldLevel = gPcStatValues[PC_STAT_LEVEL];
-    gPcStatValues[PC_STAT_EXPERIENCE] = xp;
+    Object* earner = subject != nullptr ? subject : gDude;
+    int* row = pcStatRow(earner);
+
+    int oldLevel = row[PC_STAT_LEVEL];
+    row[PC_STAT_EXPERIENCE] = xp;
 
     int newLevel = pcGetLevelForExperience(xp);
 
-    pcSetStat(PC_STAT_LEVEL, newLevel);
+    pcSetStat(PC_STAT_LEVEL, newLevel, earner);
+
+    // The DEMOTION path (XP set backwards). Mirror of the award in
+    // pcAddExperienceWithOptions, and gated the same way: the HP is taken off the
+    // earner whoever it is, and the badge clears on the earner's own row; only the
+    // interface repaint is the host's.
+    bool isHost = playerActorSlotOf(earner) == 0;
+    dudeDisableState(DUDE_STATE_LEVEL_UP_AVAILABLE, earner);
 
     if (newLevel > oldLevel) {
-        for (int levelToGrant = oldLevel + 1; levelToGrant <= newLevel; levelToGrant++) {
-            characterEditorHandleLevelUp(levelToGrant);
+        for (int level = oldLevel + 1; level <= newLevel; ++level) {
+            pcLevelUpApply(level - 1, level, earner);
+            characterEditorHandleLevelUp(level, earner);
+        }
+        pcLevelUpBadgeRefresh(earner);
+    }
+
+    // NOTE: Uninline.
+    int endurance = critterGetBaseStatWithTraitModifier(earner, STAT_ENDURANCE);
+
+    int hpPerLevel = endurance / 2 + 2;
+    hpPerLevel += perkGetRank(earner, PERK_LIFEGIVER) * perkGetLifegiverBonus();
+
+    int deltaHp = (oldLevel - newLevel) * hpPerLevel;
+    critterAdjustHitPoints(earner, -deltaHp);
+
+    int bonusHp = critterGetBonusStat(earner, STAT_MAXIMUM_HIT_POINTS);
+
+    critterSetBonusStat(earner, STAT_MAXIMUM_HIT_POINTS, bonusHp - deltaHp);
+
+    if (isHost) {
+        presenter()->hudHitPoints(false);
+    }
+
+    return 0;
+}
+
+
+
+static int* pcStatRow(Object* subject)
+{
+    int slot = playerActorSlotOf(subject != nullptr ? subject : gDude);
+    return slot > 0 ? gPlayerActorPcStats[slot - 1] : gPcStatValues;
+}
+
+bool pcLevelUpApply(int fromLevel, int toLevel, Object* subject)
+{
+    Object* earner = subject != nullptr ? subject : gDude;
+    bool freePerk = false;
+
+    for (int nextLevel = fromLevel + 1; nextLevel <= toLevel; nextLevel++) {
+        int sp = pcGetStat(PC_STAT_UNSPENT_SKILL_POINTS, earner);
+        sp += 5 + characterEditorGetSkillPointsPerLevelModifier();
+        sp += critterGetBaseStatWithTraitModifier(earner, STAT_INTELLIGENCE) * 2;
+        sp += perkGetRank(earner, PERK_EDUCATED) * perkGetEducatedBonus();
+        sp += traitIsSelectedAndActive(TRAIT_SKILLED, earner) * 5;
+        if (traitIsSelectedAndActive(TRAIT_GIFTED, earner)) {
+            sp -= 5;
+            if (sp < 0) {
+                sp = 0;
+            }
+        }
+        if (sp > 99) {
+            sp = 99;
+        }
+
+        pcSetStat(PC_STAT_UNSPENT_SKILL_POINTS, sp, earner);
+
+        int selectedPerksCount = 0;
+        for (Perk perk = PERK_FIRST; perk < PERK_COUNT; perk++) {
+            if (perkGetRank(earner, perk) != 0) {
+                selectedPerksCount += 1;
+                if (selectedPerksCount >= 37) {
+                    break;
+                }
+            }
+        }
+
+        if (selectedPerksCount < 37) {
+            int progression = 3;
+            if (traitIsSelectedAndActive(TRAIT_SKILLED, earner)) {
+                progression += 1;
+            }
+
+            if (nextLevel % progression == 0) {
+                freePerk = true;
+            }
         }
     }
 
-    dudeDisableState(DUDE_STATE_LEVEL_UP_AVAILABLE);
+    return freePerk;
+}
 
-    // NOTE: Uninline.
-    int endurance = critterGetBaseStatWithTraitModifier(gDude, STAT_ENDURANCE);
+void pcLevelUpBadgeRefresh(Object* subject)
+{
+    Object* actor = subject != nullptr ? subject : gDude;
 
-    int hpPerLevel = endurance / 2 + 2;
-    hpPerLevel += perkGetRank(gDude, PERK_LIFEGIVER) * perkGetLifegiverBonus();
+    bool owed = pcGetStat(PC_STAT_UNSPENT_SKILL_POINTS, actor) > 0
+        || perkOwedPickGet(actor);
 
-    int deltaHp = (oldLevel - newLevel) * hpPerLevel;
-    critterAdjustHitPoints(gDude, -deltaHp);
+    if (owed) {
+        dudeEnableState(DUDE_STATE_LEVEL_UP_AVAILABLE, actor);
+    } else {
+        dudeDisableState(DUDE_STATE_LEVEL_UP_AVAILABLE, actor);
+    }
+}
 
-    int bonusHp = critterGetBonusStat(gDude, STAT_MAXIMUM_HIT_POINTS);
+void pcPlayerActorSeedStats()
+{
+    for (int slot = 1; slot < kMaxPlayerActors; slot++) {
+        pcPlayerActorSeedStatsSlot(slot);
+    }
+}
 
-    critterSetBonusStat(gDude, STAT_MAXIMUM_HIT_POINTS, bonusHp - deltaHp);
+void pcPlayerActorSeedStatsSlot(int slot)
+{
+    if (slot < 1 || slot >= kMaxPlayerActors) {
+        return;
+    }
 
-    interfaceRenderHitPoints(false);
+    for (int pcStat = 0; pcStat < PC_STAT_COUNT; pcStat++) {
+        gPlayerActorPcStats[slot - 1][pcStat] = gPcStatValues[pcStat];
+    }
+}
 
-    return 0;
+static int* pcPlayerActorRow(int slot)
+{
+    if (slot == 0) {
+        return gPcStatValues;
+    }
+
+    if (slot < 1 || slot >= kMaxPlayerActors) {
+        return nullptr;
+    }
+
+    return gPlayerActorPcStats[slot - 1];
+}
+
+int pcPlayerActorRowWrite(File* stream, int slot)
+{
+    int* row = pcPlayerActorRow(slot);
+    if (row == nullptr) {
+        return -1;
+    }
+
+    return fileWriteInt32List(stream, row, PC_STAT_COUNT);
+}
+
+int pcPlayerActorRowRead(File* stream, int slot)
+{
+    int* row = pcPlayerActorRow(slot);
+    if (row == nullptr) {
+        return -1;
+    }
+
+    return fileReadInt32List(stream, row, PC_STAT_COUNT);
 }
 
 } // namespace fallout

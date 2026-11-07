@@ -1,3 +1,4 @@
+
 #include "svga.h"
 
 #include <limits.h>
@@ -32,6 +33,9 @@
 #include "window_manager_private.h"
 
 namespace fallout {
+
+bool gSdlWindowedMode = false;
+
 
 static bool createRenderer(int width, int height);
 static void destroyRenderer();
@@ -441,7 +445,11 @@ int _GNW95_init_mode_ex(int width, int height, int bpp)
         height /= scale;
     }
 
-    if (_GNW95_init_window(width, height, settings.screen.windowed, scale) == -1) {
+    WindowMode windowed = settings.screen.windowed;
+    if (const char* overrideValue = getenv("F2_WINDOWED")) {
+        windowed = atoi(overrideValue) != 0 ? WindowMode::Windowed : WindowMode::Fullscreen;
+    }
+    if (_GNW95_init_window(width, height, windowed, scale) == -1) {
         return -1;
     }
 
@@ -493,7 +501,14 @@ int _GNW95_init_window(int width, int height, WindowMode mode, int scale)
 
         gSdlWindow = SDL_CreateWindow(gProgramWindowTitle, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, width * scale, height * scale, windowFlags);
         if (gSdlWindow == nullptr) {
-            return -1;
+            // Fall back for video drivers without OpenGL support (notably
+            // SDL's "dummy" driver used for headless runs).
+            SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
+            windowFlags &= ~SDL_WINDOW_OPENGL;
+            gSdlWindow = SDL_CreateWindow(gProgramWindowTitle, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, width * scale, height * scale, windowFlags);
+            if (gSdlWindow == nullptr) {
+                return -1;
+            }
         }
 
         if (!createRenderer(width, height)) {
@@ -504,6 +519,14 @@ int _GNW95_init_window(int width, int height, WindowMode mode, int scale)
 
             return -1;
         }
+
+        // Confine the mouse to the window in WINDOWED mode — the game positions the
+        // cursor in absolute coords over a small window, so without a grab the
+        // pointer slips off the edge and clicks land outside (mode already
+        // confines). SDL releases the confine while the window is unfocused, so
+        // alt-tab still works; input.cc re-applies it on focus gain.
+        gSdlWindowedMode = mode != WindowMode::Fullscreen;
+        SDL_SetWindowGrab(gSdlWindow, gSdlWindowedMode ? SDL_TRUE : SDL_FALSE);
     }
 
     return 0;
@@ -901,5 +924,9 @@ void renderPresent()
     movieRenderDirectOverlay();
     SDL_RenderPresent(gSdlRenderer);
 }
+
+
+
+
 
 } // namespace fallout

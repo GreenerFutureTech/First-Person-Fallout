@@ -1,3 +1,10 @@
+#include <string>
+#include <vector>
+#include "client_net.h" // clientViewerActive — a viewer does not own the clock
+#include "rest.h" // restPerform — the shared rest simulation
+#include "server_loop.h"
+#include "sfall_config.h"
+#include "rest.h"
 #include "pipboy.h"
 
 #include <algorithm>
@@ -47,6 +54,30 @@
 #include "worldmap.h"
 
 namespace fallout {
+
+struct ServerHolodisk {
+    std::string name;
+    std::vector<std::string> lines;
+};
+
+static std::vector<ServerHolodisk> gServerHolodisks;
+
+void pipboyServerHolodiskClear();
+
+void pipboyServerHolodiskAdd(const char* name, const char* const* lines, int lineCount);
+
+int pipboyServerHolodiskCount();
+
+static bool holodiskIsServer(int disk);
+
+static const ServerHolodisk* holodiskServerAt(int disk);
+
+static const char* holodiskLine(int disk, int line);
+
+static const char* holodiskName(int disk);
+
+static bool pipboyRestFrame();
+
 
 #define PIPBOY_WINDOW_WIDTH (640)
 #define PIPBOY_WINDOW_HEIGHT (480)
@@ -129,24 +160,7 @@ typedef enum PipboyTextOptions {
     PIPBOY_TEXT_NO_INDENT = 0x80,
 } PipboyTextOptions;
 
-typedef enum PipboyRestDuration {
-    PIPBOY_REST_DURATION_TEN_MINUTES,
-    PIPBOY_REST_DURATION_THIRTY_MINUTES,
-    PIPBOY_REST_DURATION_ONE_HOUR,
-    PIPBOY_REST_DURATION_TWO_HOURS,
-    PIPBOY_REST_DURATION_THREE_HOURS,
-    PIPBOY_REST_DURATION_FOUR_HOURS,
-    PIPBOY_REST_DURATION_FIVE_HOURS,
-    PIPBOY_REST_DURATION_SIX_HOURS,
-    PIPBOY_REST_DURATION_UNTIL_MORNING,
-    PIPBOY_REST_DURATION_UNTIL_NOON,
-    PIPBOY_REST_DURATION_UNTIL_EVENING,
-    PIPBOY_REST_DURATION_UNTIL_MIDNIGHT,
-    PIPBOY_REST_DURATION_UNTIL_HEALED,
-    PIPBOY_REST_DURATION_UNTIL_PARTY_HEALED,
-    PIPBOY_REST_DURATION_COUNT,
-    PIPBOY_REST_DURATION_COUNT_WITHOUT_PARTY = PIPBOY_REST_DURATION_COUNT - 1,
-} PipboyRestDuration;
+
 
 static constexpr int PIPBOY_REST_DURATION_WAKE_HOUR_COUNT = PIPBOY_REST_DURATION_UNTIL_MIDNIGHT - PIPBOY_REST_DURATION_UNTIL_MORNING + 1;
 static constexpr int kDefaultPipboyRestDurationWakeHours[PIPBOY_REST_DURATION_WAKE_HOUR_COUNT] = {
@@ -245,9 +259,9 @@ static void pipboyDrawHitPoints();
 static void pipboyWindowCreateButtons(int a1, int a2, bool a3);
 static void pipboyWindowDestroyButtons();
 static bool pipboyRest(int hours, int minutes, int kind);
-static bool _Check4Health(int minutes);
-static bool _AddHealth();
-static void _ClacTime(int* hours, int* minutes, int wakeUpHour);
+
+
+
 static int pipboyRestOptionWakeHour(int restOption);
 static void pipboyRestOptionsReset();
 static int pipboyRenderScreensaver();
@@ -412,7 +426,7 @@ int gPipboyWindowButtonStart;
 int gPipboyCurrentLine;
 
 // 0x664518 rest_time
-int _rest_time;
+
 
 static int restHealTime = 180;
 
@@ -652,7 +666,9 @@ static int pipboyWindowInit(int intent)
 
     gPipboyRestOptionsCount = PIPBOY_REST_DURATION_COUNT_WITHOUT_PARTY;
 
-    if (_getPartyMemberCount() > 1 && partyIsAnyoneCanBeHealedByRest()) {
+    // Offering, not gating: with another player present the rest-until-everyone-is-
+    // healed durations are the useful ones.
+    if (partyGroupSize() > 1 && partyIsAnyoneCanBeHealedByRest()) {
         gPipboyRestOptionsCount = PIPBOY_REST_DURATION_COUNT;
     }
 
@@ -660,7 +676,7 @@ static int pipboyWindowInit(int intent)
     fontSetCurrent(101);
 
     _proc_bail_flag = 0;
-    _rest_time = 0;
+    restHealReset();
     gPipboyCurrentLine = 0;
     gPipboyWindowButtonCount = 0;
     gPipboyLinesCount = PIPBOY_WINDOW_CONTENT_VIEW_HEIGHT / fontGetLineHeight() - 1;
@@ -1182,6 +1198,15 @@ static void pipboyWindowHandleStatus(int userInput)
                         _holodisk += 1;
                     }
                 }
+                if (index >= gHolodisksCount) {
+                    // Not one of the vanilla disks — it is the (userInput-1 - visibleVanilla)-th
+                    // server disk. Every server disk is visible, so the remainder indexes
+                    // them directly.
+                    int serverIndex = (realIndex - 1) - _holodisk;
+                    if (serverIndex >= 0 && serverIndex < (int)gServerHolodisks.size()) {
+                        index = gHolodisksCount + serverIndex;
+                    }
+                }
                 _holodisk = index;
 
                 blitBufferToBuffer(_pipboyFrmImages[PIPBOY_FRM_BACKGROUND].getData() + PIPBOY_WINDOW_WIDTH * PIPBOY_WINDOW_CONTENT_VIEW_Y + PIPBOY_WINDOW_CONTENT_VIEW_X,
@@ -1511,19 +1536,17 @@ static void pipboyRenderHolodiskText()
         gPipboyCurrentLine = 0;
     }
 
-    HolodiskDescription* holodisk = &(gHolodiskDescriptions[_holodisk]);
-
-    int holodiskTextId;
+    // ►► LINE INDEX, not a message id. holodiskLine() serves the selected disk's lines
+    // from EITHER pipboy.msg (vanilla: consecutive ids ending at "**END-DISK**") or a
+    // streamed server disk, returning nullptr past the end — so these three walks no
+    // longer care which kind is open. `line` replaces vanilla's holodiskTextId; the
+    // arithmetic is otherwise unchanged.
+    int line = 0;
     int linesCount = 0;
 
     gPipboyHolodiskLastPage = 0;
 
-    for (holodiskTextId = holodisk->description; holodiskTextId < holodisk->description + 500; holodiskTextId += 1) {
-        const char* text = getmsg(&gPipboyMessageList, &gPipboyMessageListItem, holodiskTextId);
-        if (strcmp(text, "**END-DISK**") == 0) {
-            break;
-        }
-
+    for (line = 0; holodiskLine(_holodisk, line) != nullptr; line += 1) {
         linesCount += 1;
         if (linesCount >= PIPBOY_HOLODISK_LINES_MAX) {
             linesCount = 0;
@@ -1531,18 +1554,21 @@ static void pipboyRenderHolodiskText()
         }
     }
 
-    if (holodiskTextId >= holodisk->description + 500) {
+    if (line >= 500) {
         debugPrint("\nPIPBOY: #1 Holodisk text end not found!\n");
     }
 
-    holodiskTextId = holodisk->description;
+    line = 0;
 
     if (_view_page != 0) {
         int page = 0;
         int numberOfLines = 0;
-        for (; holodiskTextId < holodisk->description + 500; holodiskTextId += 1) {
-            const char* line = getmsg(&gPipboyMessageList, &gPipboyMessageListItem, holodiskTextId);
-            if (strcmp(line, "**END-DISK**") == 0) {
+        // Vanilla's loop condition here was `holodiskTextId < holodiskTextId + 500` — a
+        // self-comparison that is always true, i.e. it relied entirely on the breaks. The
+        // accessor's nullptr end bounds it properly; behaviour only differs for a
+        // malformed disk that never terminates, which vanilla would have run off.
+        for (; ; line += 1) {
+            if (holodiskLine(_holodisk, line) == nullptr) {
                 debugPrint("\nPIPBOY: Premature page end in holodisk page search!\n");
                 break;
             }
@@ -1558,14 +1584,9 @@ static void pipboyRenderHolodiskText()
             }
         }
 
-        holodiskTextId += 1;
-
-        if (holodiskTextId >= holodisk->description + 500) {
-            debugPrint("\nPIPBOY: #2 Holodisk text end not found!\n");
-        }
+        line += 1;
     } else {
-        const char* name = getmsg(&gPipboyMessageList, &gPipboyMessageListItem, holodisk->name);
-        pipboyDrawText(name, PIPBOY_TEXT_ALIGNMENT_CENTER | PIPBOY_TEXT_STYLE_UNDERLINE, COLOR_GREEN);
+        pipboyDrawText(holodiskName(_holodisk), PIPBOY_TEXT_ALIGNMENT_CENTER | PIPBOY_TEXT_STYLE_UNDERLINE, COLOR_GREEN);
     }
 
     if (gPipboyHolodiskLastPage != 0) {
@@ -1576,10 +1597,10 @@ static void pipboyRenderHolodiskText()
         gPipboyCurrentLine = 3;
     }
 
-    for (int line = 0; line < PIPBOY_HOLODISK_LINES_MAX; line += 1) {
-        const char* text = getmsg(&gPipboyMessageList, &gPipboyMessageListItem, holodiskTextId);
-        if (strcmp(text, "**END-DISK**") == 0) {
-            break;
+    for (int drawn = 0; drawn < PIPBOY_HOLODISK_LINES_MAX; drawn += 1) {
+        const char* text = holodiskLine(_holodisk, line);
+        if (text == nullptr) {
+            break; // end of disk
         }
 
         if (strcmp(text, "**END-PAR**") == 0) {
@@ -1588,7 +1609,7 @@ static void pipboyRenderHolodiskText()
             pipboyDrawText(text, PIPBOY_TEXT_NO_INDENT, COLOR_GREEN);
         }
 
-        holodiskTextId += 1;
+        line += 1;
     }
 
     // Call for back/more button navigation
@@ -1632,6 +1653,8 @@ static int pipboyWindowRenderHolodiskList(int selectedHolodiskEntry)
         }
     }
 
+    knownHolodisksCount += static_cast<int>(gServerHolodisks.size());
+
     // Calculate pagination
     int totalPages = (knownHolodisksCount + maxEntriesPerPage - 1) / maxEntriesPerPage;
     if (_view_page_holodisk >= totalPages) _view_page_holodisk = totalPages - 1;
@@ -1654,6 +1677,16 @@ static int pipboyWindowRenderHolodiskList(int selectedHolodiskEntry)
             displayedHolodisks++;
         }
         currentIndex++;
+    }
+
+    for (int index = 0; index < static_cast<int>(gServerHolodisks.size()); ++index) {
+        if (currentIndex >= startIdx && currentIndex < startIdx + maxEntriesPerPage) {
+            Color color = ((gPipboyCurrentLine - 1) / 2 == selectedHolodiskEntry - 1) ? COLOR_LIGHT_YELLOW : COLOR_GREEN;
+            pipboyDrawText(gServerHolodisks[index].name.c_str(), PIPBOY_TEXT_ALIGNMENT_RIGHT_COLUMN, color);
+            ++gPipboyCurrentLine;
+            ++displayedHolodisks;
+        }
+        ++currentIndex;
     }
 
     if (displayedHolodisks > 0) {
@@ -2104,7 +2137,7 @@ static int pipboyRenderVideoArchive(int selectedEntry)
 static void pipboyHandleAlarmClock(int eventCode)
 {
     if (eventCode == 1024) {
-        if (critterCanDudeRest()) {
+        if (clientViewerActive() || critterCanDudeRest()) {
             pipboyWindowDestroyButtons();
             pipboyWindowRenderRestOptions(0);
             pipboyWindowCreateButtons(5, gPipboyRestOptionsCount, false);
@@ -2128,6 +2161,13 @@ static void pipboyHandleAlarmClock(int eventCode)
         int minutes = 0;
         int hours = 0;
 
+        if (clientViewerActive()) {
+            clientViewerRest(duration);
+            pipboyWindowRenderRestOptions(0);
+            windowRefresh(gPipboyWindow);
+            return;
+        }
+
         switch (duration) {
         case PIPBOY_REST_DURATION_TEN_MINUTES:
             pipboyRest(0, 10, 0);
@@ -2148,7 +2188,7 @@ static void pipboyHandleAlarmClock(int eventCode)
         case PIPBOY_REST_DURATION_UNTIL_EVENING:
         case PIPBOY_REST_DURATION_UNTIL_MIDNIGHT: {
             int wakeUpHour = pipboyRestOptionWakeHour(duration);
-            _ClacTime(&hours, &minutes, wakeUpHour);
+            restUntilHourDuration(&hours, &minutes, wakeUpHour);
             if (pipboyRest(hours, minutes, 0) == 0 && wakeUpHour == 0) {
                 pipboyDrawNumber(0, 4, PIPBOY_WINDOW_TIME_X, PIPBOY_WINDOW_TIME_Y);
                 windowRefresh(gPipboyWindow);
@@ -2299,8 +2339,8 @@ static bool pipboyRestSetGameTime(unsigned int newGameTime, RestEventType eventT
 
     gameTimeSetTime(newGameTime);
 
-    if (!wmRestModeNoHealing() && healingMinutes > 0 && _Check4Health(healingMinutes)) {
-        _AddHealth();
+    if (!wmRestModeNoHealing() && healingMinutes > 0 && restHealCheck(healingMinutes)) {
+        restHealApply();
     }
 
     return rc;
@@ -2309,6 +2349,9 @@ static bool pipboyRestSetGameTime(unsigned int newGameTime, RestEventType eventT
 // 0x499A24
 static bool pipboyRest(int hours, int minutes, int duration)
 {
+    if (clientViewerActive()) return false;
+    if (headlessProbeActive()) return restPerform(hours, minutes, duration, nullptr) != kRestCompleted;
+
     struct RestDepthGuard {
         RestDepthGuard() { pipboyRestDepth++; }
         ~RestDepthGuard() { pipboyRestDepth--; }
@@ -2534,59 +2577,13 @@ static bool pipboyRest(int hours, int minutes, int duration)
 }
 
 // 0x499FCC
-static bool _Check4Health(int minutes)
-{
-    _rest_time += minutes;
 
-    if (_rest_time < restHealTime) {
-        return false;
-    }
-
-    debugPrint("\n health added!\n");
-    _rest_time = 0;
-
-    return true;
-}
 
 // NOTE: Inlined.
-static bool _AddHealth()
-{
-    _partyMemberRestingHeal(3);
 
-    int currentHp = critterGetHitPoints(gDude);
-    int maxHp = critterGetStat(gDude, STAT_MAXIMUM_HIT_POINTS);
-    return currentHp == maxHp;
-}
 
 // Returns [hours] and [minutes] needed to rest until [wakeUpHour].
-static void _ClacTime(int* hours, int* minutes, int wakeUpHour)
-{
-    int gameTimeHour = gameTimeGetHour();
 
-    *hours = gameTimeHour / 100;
-    *minutes = gameTimeHour % 100;
-
-    if (*hours != wakeUpHour || *minutes != 0) {
-        *hours = wakeUpHour - *hours;
-        if (*hours < 0) {
-            *hours += 24;
-            if (*minutes != 0) {
-                *hours -= 1;
-                *minutes = 60 - *minutes;
-            }
-        } else {
-            if (*minutes != 0) {
-                *hours -= 1;
-                *minutes = 60 - *minutes;
-                if (*hours < 0) {
-                    *hours = 23;
-                }
-            }
-        }
-    } else {
-        *hours = 24;
-    }
-}
 
 bool pipboyRestOptionMsgsSetBase(int baseMessageId)
 {
@@ -3005,6 +3002,100 @@ static void holodiskFree()
     }
 
     gHolodisksCount = 0;
+}
+
+
+
+void pipboyServerHolodiskClear()
+{
+    gServerHolodisks.clear();
+}
+
+void pipboyServerHolodiskAdd(const char* name, const char* const* lines, int lineCount)
+{
+    ServerHolodisk disk;
+    disk.name = name != nullptr ? name : "";
+    for (int i = 0; i < lineCount; i++) {
+        disk.lines.push_back(lines[i] != nullptr ? lines[i] : "");
+    }
+    gServerHolodisks.push_back(std::move(disk));
+}
+
+int pipboyServerHolodiskCount()
+{
+    return (int)gServerHolodisks.size();
+}
+
+static bool holodiskIsServer(int disk)
+{
+    return disk >= gHolodisksCount;
+}
+
+static const ServerHolodisk* holodiskServerAt(int disk)
+{
+    int index = disk - gHolodisksCount;
+    if (index < 0 || index >= (int)gServerHolodisks.size()) {
+        return nullptr;
+    }
+    return &gServerHolodisks[index];
+}
+
+static const char* holodiskLine(int disk, int line)
+{
+    if (line < 0) {
+        return nullptr;
+    }
+    if (holodiskIsServer(disk)) {
+        const ServerHolodisk* serverDisk = holodiskServerAt(disk);
+        if (serverDisk == nullptr || line >= (int)serverDisk->lines.size()) {
+            return nullptr;
+        }
+        return serverDisk->lines[line].c_str();
+    }
+    if (disk < 0 || disk >= gHolodisksCount || line >= 500) {
+        return nullptr;
+    }
+    const char* text = getmsg(&gPipboyMessageList, &gPipboyMessageListItem,
+        gHolodiskDescriptions[disk].description + line);
+    if (text == nullptr || strcmp(text, "**END-DISK**") == 0) {
+        return nullptr;
+    }
+    return text;
+}
+
+static const char* holodiskName(int disk)
+{
+    if (holodiskIsServer(disk)) {
+        const ServerHolodisk* serverDisk = holodiskServerAt(disk);
+        return serverDisk != nullptr ? serverDisk->name.c_str() : "";
+    }
+    if (disk < 0 || disk >= gHolodisksCount) {
+        return "";
+    }
+    return getmsg(&gPipboyMessageList, &gPipboyMessageListItem, gHolodiskDescriptions[disk].name);
+}
+
+static bool pipboyRestFrame()
+{
+    sharedFpsLimiter.mark();
+
+    unsigned int start = getTicks();
+
+    bool abort = inputGetInput() == KEY_ESCAPE || _game_user_wants_to_quit != 0;
+
+    pipboyDrawNumber(gameTimeGetHour(), 4, PIPBOY_WINDOW_TIME_X, PIPBOY_WINDOW_TIME_Y);
+    pipboyDrawDate();
+    pipboyDrawHitPoints();
+    windowRefresh(gPipboyWindow);
+
+    if (!abort) {
+        delay_ms(50 - (getTicks() - start));
+    }
+
+    renderPresent();
+    sharedFpsLimiter.throttle();
+
+    return abort;
 }
 
 } // namespace fallout

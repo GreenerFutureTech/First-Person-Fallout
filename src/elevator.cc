@@ -1,3 +1,14 @@
+#include <stdio.h>
+#include "animation.h" // reg_anim_clear — an elevator ride cancels a walk in progress
+#include "config.h"
+#include "game.h" // gDude
+#include "light.h" // _obj_rebuild_all_light — the closing doors change the lighting
+#include "map.h" // gMapHeader / mapSetTransition
+#include "object.h"
+#include "proto_types.h" // PROTO_ID_* — the three elevator-door scenery pids
+#include "proto_instance.h" // objectAttemptPlacement
+#include "server_players.h" // playerActorAt/Count/Online — the party rides together
+#include "tile.h" // tileDistanceBetween
 #include "elevator.h"
 
 #include <ctype.h>
@@ -29,6 +40,9 @@
 
 namespace fallout {
 
+int elevatorPickLevel(int elevator, int startLevel);
+
+
 // The maximum number of elevator levels.
 #define ELEVATOR_LEVEL_MAX (4)
 
@@ -48,11 +62,7 @@ typedef struct ElevatorBackground {
     InterfaceFrameId panelFrmId;
 } ElevatorBackground;
 
-typedef struct ElevatorDescription {
-    Map map;
-    int elevation;
-    int tile;
-} ElevatorDescription;
+
 
 static int elevatorWindowInit(int elevator);
 static void elevatorWindowFree();
@@ -97,180 +107,10 @@ static ElevatorBackground gElevatorBackgrounds[ELEVATORS_MAX] = {
 // Number of levels for eleveators.
 //
 // 0x43EA1C btncnt
-static int gElevatorLevels[ELEVATORS_MAX] = {
-    4,
-    2,
-    3,
-    2,
-    3,
-    2,
-    3,
-    3,
-    3,
-    3,
-    3,
-    2,
-    4,
-    2,
-    3,
-    3,
-    3,
-    2,
-    2,
-    2,
-    2,
-    2,
-    2,
-    2,
-};
+
 
 // 0x43EA7C retvals
-static ElevatorDescription gElevatorDescriptions[ELEVATORS_MAX][ELEVATOR_LEVEL_MAX] = {
-    {
-        { MAP_KLAMATH_GRAZE, ELEVATION_FIRST, 18940 },
-        { MAP_KLAMATH_GRAZE, ELEVATION_SECOND, 18936 },
-        { MAP_VAULTCITY_COURTYARD, ELEVATION_FIRST, 21340 },
-        { MAP_VAULTCITY_COURTYARD, ELEVATION_SECOND, 21340 },
-    },
-    {
-        { MAP_KLAMATH_TRAPCAVES, ELEVATION_FIRST, 20502 },
-        { MAP_KLAMATH_GRAZE, ELEVATION_FIRST, 14912 },
-        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
-        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
-    },
-    {
-        { MAP_GECKO_JUNKYARD, ELEVATION_FIRST, 12498 },
-        { MAP_GECKO_JUNKYARD, ELEVATION_SECOND, 20094 },
-        { MAP_GECKO_ACCESS_TUNNELS, ELEVATION_FIRST, 17312 },
-        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
-    },
-    {
-        { MAP_GECKO_ACCESS_TUNNELS, ELEVATION_FIRST, 16140 },
-        { MAP_GECKO_ACCESS_TUNNELS, ELEVATION_SECOND, 16140 },
-        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
-        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
-    },
-    {
-        { MAP_MILITARY_BASE_12, ELEVATION_FIRST, 14920 },
-        { MAP_MILITARY_BASE_12, ELEVATION_SECOND, 15120 },
-        { MAP_MILITARY_BASE_34, ELEVATION_FIRST, 12944 },
-        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
-    },
-    {
-        { MAP_MILITARY_BASE_34, ELEVATION_FIRST, 24520 },
-        { MAP_MILITARY_BASE_34, ELEVATION_SECOND, 25316 },
-        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
-        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
-    },
-    {
-        { MAP_NCR_DOWNTOWN, ELEVATION_FIRST, 22526 },
-        { MAP_NCR_DOWNTOWN, ELEVATION_SECOND, 22526 },
-        { MAP_NCR_DOWNTOWN, ELEVATION_THIRD, 22526 },
-        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
-    },
-    {
-        { MAP_NCR_DOWNTOWN, ELEVATION_THIRD, 14086 },
-        { MAP_NCR_COUNCIL_1, ELEVATION_FIRST, 14086 },
-        { MAP_NCR_COUNCIL_1, ELEVATION_THIRD, 14086 },
-        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
-    },
-    {
-        { MAP_VAULT_13, ELEVATION_FIRST, 14104 },
-        { MAP_VAULT_13, ELEVATION_SECOND, 22504 },
-        { MAP_VAULT_13, ELEVATION_THIRD, 17312 },
-        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
-    },
-    {
-        { MAP_KLAMATH_1, ELEVATION_FIRST, 13704 },
-        { MAP_KLAMATH_1, ELEVATION_SECOND, 23302 },
-        { MAP_KLAMATH_1, ELEVATION_THIRD, 17308 },
-        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
-    },
-    {
-        { MAP_SIERRA_123, ELEVATION_FIRST, 19300 },
-        { MAP_SIERRA_123, ELEVATION_SECOND, 19300 },
-        { MAP_SIERRA_123, ELEVATION_THIRD, 20110 },
-        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
-    },
-    {
-        { MAP_SIERRA_123, ELEVATION_THIRD, 20118 },
-        { MAP_SIERRA_4, ELEVATION_FIRST, 21710 },
-        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
-        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
-    },
-    {
-        { MAP_SIERRA_123, ELEVATION_FIRST, 20122 },
-        { MAP_SIERRA_123, ELEVATION_SECOND, 20124 },
-        { MAP_SIERRA_123, ELEVATION_THIRD, 20940 },
-        { MAP_SIERRA_4, ELEVATION_FIRST, 22540 },
-    },
-    {
-        { MAP_KLAMATH_TOXICCAVES, ELEVATION_SECOND, 16052 },
-        { MAP_KLAMATH_TOXICCAVES, ELEVATION_THIRD, 14480 },
-        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
-        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
-    },
-    {
-        { MAP_DEN_ENTRANCE, ELEVATION_FIRST, 14104 },
-        { MAP_DEN_ENTRANCE, ELEVATION_SECOND, 22504 },
-        { MAP_DEN_ENTRANCE, ELEVATION_THIRD, 17312 },
-        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
-    },
-    {
-        { MAP_VAULT_CITY_VAULT, ELEVATION_FIRST, 14104 },
-        { MAP_VAULT_CITY_VAULT, ELEVATION_SECOND, 22504 },
-        { MAP_VAULT_CITY_VAULT, ELEVATION_THIRD, 17312 },
-        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
-    },
-    {
-        { MAP_VAULT_15, ELEVATION_FIRST, 13704 },
-        { MAP_VAULT_15, ELEVATION_SECOND, 23302 },
-        { MAP_VAULT_15, ELEVATION_THIRD, 17308 },
-        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
-    },
-    {
-        { MAP_VAULT_15_EAST_ENTRANCE, ELEVATION_FIRST, 17285 },
-        { MAP_VAULT_15, ELEVATION_FIRST, 19472 },
-        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
-        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
-    },
-    {
-        { MAP_NAVARRO_ENTRANCE, ELEVATION_THIRD, 10701 },
-        { MAP_NAVARRO_ENTRANCE, ELEVATION_SECOND, 10705 },
-        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
-        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
-    },
-    {
-        { MAP_NAVARRO_ENTRANCE, ELEVATION_THIRD, 14697 },
-        { MAP_NAVARRO_ENTRANCE, ELEVATION_SECOND, 15099 },
-        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
-        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
-    },
-    {
-        { MAP_NAVARRO_ENTRANCE, ELEVATION_THIRD, 23877 },
-        { MAP_NAVARRO_ENTRANCE, ELEVATION_SECOND, 25481 },
-        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
-        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
-    },
-    {
-        { MAP_NAVARRO_ENTRANCE, ELEVATION_THIRD, 26130 },
-        { MAP_NAVARRO_ENTRANCE, ELEVATION_SECOND, 24721 },
-        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
-        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
-    },
-    {
-        { MAP_SAN_FRAN_CHINATOWN, ELEVATION_FIRST, 23953 },
-        { MAP_SHI_TEMPLE, ELEVATION_SECOND, 16526 },
-        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
-        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
-    },
-    {
-        { MAP_REDDING_WANAMINGO_ENT, ELEVATION_FIRST, 13901 },
-        { MAP_REDDING_WANAMINGO_12, ELEVATION_SECOND, 17923 },
-        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
-        { MAP_RND_DESERT_1, ELEVATION_FIRST, -1 },
-    },
-};
+
 
 // NOTE: These values are also used as key bindings.
 //
@@ -342,165 +182,14 @@ static FrmImage _elevatorPanelFrmImage;
 // 0x43EF5C elevator_select
 int elevatorSelectLevel(int elevator, Map* mapPtr, int* elevationPtr, int* tilePtr)
 {
-    if (elevator < 0 || elevator >= ELEVATORS_MAX) {
-        return -1;
+    int startLevel = elevatorResolveStartLevel(elevator, *mapPtr, *elevationPtr);
+    int level = elevatorPickLevel(elevator, startLevel);
+    if (level == -1) level = elevatorGetLevelFromEscKey(elevator, *mapPtr);
+    if (level < 0) {
+        return level == -2 ? -1 : 0; // -2 = could not open the screen; -1 = escaped
     }
 
-    if (gElevatorLevels[elevator] < 2 || gElevatorLevels[elevator] > ELEVATOR_LEVEL_MAX) {
-        char message[80];
-        snprintf(message, sizeof(message), "Elevator type %d not found.", elevator);
-        const char* body = "Check configuration";
-        showDialogBox(message, &body, 1, 192, 135, COLOR_AMBER, nullptr, COLOR_AMBER, DIALOG_BOX_LARGE);
-        debugPrint("\nElevator select: invalid button count type=%d buttonCount=%d",
-            elevator,
-            gElevatorLevels[elevator]);
-        return -1;
-    }
-
-    // SFALL
-    if (elevatorWindowInit(elevator) == -1) {
-        return -1;
-    }
-
-    const ElevatorDescription* elevatorDescription = gElevatorDescriptions[elevator];
-    touch_set_touchscreen_mode(true);
-
-    int index;
-    for (index = 0; index < ELEVATOR_LEVEL_MAX; index++) {
-        if (elevatorDescription[index].map == *mapPtr) {
-            break;
-        }
-    }
-
-    if (index < ELEVATOR_LEVEL_MAX) {
-        int adjustedIndex = *elevationPtr + index;
-        if (adjustedIndex >= 0 && adjustedIndex < ELEVATOR_LEVEL_MAX && elevatorDescription[adjustedIndex].tile != -1) {
-            *elevationPtr = adjustedIndex;
-        }
-    }
-
-    if (elevator == ELEVATOR_SIERRA_2) {
-        if (*elevationPtr <= 2) {
-            *elevationPtr -= 2;
-        } else {
-            *elevationPtr -= 3;
-        }
-    } else if (elevator == ELEVATOR_MILITARY_BASE_LOWER) {
-        if (*elevationPtr >= 2) {
-            *elevationPtr -= 2;
-        }
-    } else if (elevator == ELEVATOR_MILITARY_BASE_UPPER && *elevationPtr == 4) {
-        *elevationPtr -= 2;
-    }
-
-    if (*elevationPtr > 3) {
-        *elevationPtr -= 3;
-    }
-
-    int clampedElevation = std::clamp(*elevationPtr, 0, gElevatorLevels[elevator] - 1);
-    if (clampedElevation != *elevationPtr) {
-        *elevationPtr = clampedElevation;
-    }
-
-    debugPrint("\n the start elev level %d\n", *elevationPtr);
-
-    int gaugeSliceSize = (_elevatorFrmImages[ELEVATOR_FRM_GAUGE].getWidth() * _elevatorFrmImages[ELEVATOR_FRM_GAUGE].getHeight()) / 13;
-    float gaugeUnitsPerLevel = 12.0f / (float)(gElevatorLevels[elevator] - 1);
-    blitBufferToBuffer(
-        _elevatorFrmImages[ELEVATOR_FRM_GAUGE].getData() + gaugeSliceSize * (int)((float)(*elevationPtr) * gaugeUnitsPerLevel),
-        _elevatorFrmImages[ELEVATOR_FRM_GAUGE].getWidth(),
-        _elevatorFrmImages[ELEVATOR_FRM_GAUGE].getHeight() / 13,
-        _elevatorFrmImages[ELEVATOR_FRM_GAUGE].getWidth(),
-        gElevatorWindowBuffer + _elevatorBackgroundFrmImage.getWidth() * 41 + 121,
-        _elevatorBackgroundFrmImage.getWidth());
-    windowRefresh(gElevatorWindow);
-
-    bool done = false;
-    bool skipGauge = false;
-    int keyCode;
-    while (!done) {
-        sharedFpsLimiter.mark();
-
-        keyCode = inputGetInput();
-        if (keyCode == KEY_ESCAPE) {
-            keyCode = elevatorGetLevelFromEscKey(elevator, *mapPtr);
-            skipGauge = true;
-            done = true;
-        }
-
-        if (keyCode >= 500 && keyCode < 500 + gElevatorLevels[elevator]) {
-            done = true;
-        }
-
-        if (keyCode > 0 && keyCode < 500) {
-            int level = elevatorGetLevelFromKeyCode(elevator, keyCode);
-            if (level != 0) {
-                keyCode = 500 + level - 1;
-                done = true;
-            }
-        }
-
-        renderPresent();
-        sharedFpsLimiter.throttle();
-    }
-
-    if (!skipGauge) {
-        keyCode -= 500;
-
-        if (*elevationPtr != keyCode) {
-            float levelStep = (float)(gElevatorLevels[elevator] - 1) / 12.0f;
-
-            const int delay = std::max(static_cast<int>(levelStep * 276.92307f / settings.ui.anim_speed), 1);
-
-            if (keyCode < *elevationPtr) {
-                levelStep = -levelStep;
-            }
-
-            int numberOfLevelsTravelled = keyCode - *elevationPtr;
-            if (numberOfLevelsTravelled < 0) {
-                numberOfLevelsTravelled = -numberOfLevelsTravelled;
-            }
-
-            soundPlayFile(gElevatorSoundEffects[gElevatorLevels[elevator] - 2][numberOfLevelsTravelled]);
-
-            float targetGaugePosition = (float)keyCode * gaugeUnitsPerLevel;
-            float currentGaugePosition = (float)(*elevationPtr) * gaugeUnitsPerLevel;
-            do {
-                sharedFpsLimiter.mark();
-
-                unsigned int tick = getTicks();
-                currentGaugePosition += levelStep;
-                blitBufferToBuffer(
-                    _elevatorFrmImages[ELEVATOR_FRM_GAUGE].getData() + gaugeSliceSize * (int)currentGaugePosition,
-                    _elevatorFrmImages[ELEVATOR_FRM_GAUGE].getWidth(),
-                    _elevatorFrmImages[ELEVATOR_FRM_GAUGE].getHeight() / 13,
-                    _elevatorFrmImages[ELEVATOR_FRM_GAUGE].getWidth(),
-                    gElevatorWindowBuffer + _elevatorBackgroundFrmImage.getWidth() * 41 + 121,
-                    _elevatorBackgroundFrmImage.getWidth());
-
-                windowRefresh(gElevatorWindow);
-
-                _GNW95_process_message();
-                delay_ms(delay - (getTicks() - tick));
-                _GNW95_process_message();
-
-                renderPresent();
-                sharedFpsLimiter.throttle();
-            } while ((levelStep <= 0.0 || currentGaugePosition < targetGaugePosition) && (levelStep > 0.0 || currentGaugePosition > targetGaugePosition));
-
-            inputPauseForTocks(200);
-        }
-    }
-
-    elevatorWindowFree();
-    touch_set_touchscreen_mode(false);
-
-    if (keyCode >= 0 && keyCode < gElevatorLevels[elevator]) {
-        const ElevatorDescription* description = &(elevatorDescription[keyCode]);
-        *mapPtr = description->map;
-        *elevationPtr = description->elevation;
-        *tilePtr = description->tile;
-    }
+    elevatorResolveDestination(elevator, level, mapPtr, elevationPtr, tilePtr);
 
     return 0;
 }
@@ -609,7 +298,7 @@ static int elevatorWindowInit(int elevator)
     }
 
     int y = 40;
-    for (int level = 0; level < gElevatorLevels[elevator]; level++) {
+    for (int level = 0; level < elevatorLevelCount(elevator); level++) {
         int btn = buttonCreate(gElevatorWindow,
             13,
             y,
@@ -672,19 +361,14 @@ static int elevatorGetLevelFromKeyCode(int elevator, int keyCode)
     return 0;
 }
 
-static int elevatorGetLevelFromEscKey(int elevator, int map)
+static int elevatorGetLevelFromEscKey(int elevator, int currentMap)
 {
-    const ElevatorDescription* exits = gElevatorDescriptions[elevator];
-    for (int index = 0; index < ELEVATOR_LEVEL_MAX; index++) {
-        if (exits[index].map == map && exits[index].elevation == gElevation) {
-            return index;
-        }
-    }
-    return -1;
+    return elevatorEscapeLevel(elevator, currentMap);
 }
 
 void elevatorsInit()
 {
+    elevatorsDataInit();
     char* elevatorsFileName;
     configGetString(&gSfallConfig, SFALL_CONFIG_MISC_KEY, SFALL_CONFIG_ELEVATORS_FILE_KEY, &elevatorsFileName);
     if (elevatorsFileName == nullptr || *elevatorsFileName == '\0') {
@@ -703,26 +387,10 @@ void elevatorsInit()
     for (int index = 0; index < ELEVATORS_MAX; index++) {
         snprintf(sectionKey, sizeof(sectionKey), "%d", index);
 
-        if (index >= ELEVATOR_COUNT) {
-            int levels = 0;
-            if (configGetInt(elevatorsConfig.get(), sectionKey, "ButtonCount", &levels)) {
-                gElevatorLevels[index] = std::clamp(levels, 2, ELEVATOR_LEVEL_MAX);
-            }
-        }
 
         configGetEnum<InterfaceFrameId>(elevatorsConfig.get(), sectionKey, "MainFrm", &(gElevatorBackgrounds[index].backgroundFrmId));
         configGetEnum<InterfaceFrameId>(elevatorsConfig.get(), sectionKey, "ButtonsFrm", &(gElevatorBackgrounds[index].panelFrmId));
 
-        for (int level = 0; level < ELEVATOR_LEVEL_MAX; level++) {
-            snprintf(key, sizeof(key), "ID%d", level + 1);
-            configGetEnum<Map>(elevatorsConfig.get(), sectionKey, key, &(gElevatorDescriptions[index][level].map));
-
-            snprintf(key, sizeof(key), "Elevation%d", level + 1);
-            configGetInt(elevatorsConfig.get(), sectionKey, key, &(gElevatorDescriptions[index][level].elevation));
-
-            snprintf(key, sizeof(key), "Tile%d", level + 1);
-            configGetInt(elevatorsConfig.get(), sectionKey, key, &(gElevatorDescriptions[index][level].tile));
-        }
     }
 
     // NOTE: Sfall implementation is slightly different. It uses one
@@ -737,11 +405,130 @@ void elevatorsInit()
             type = std::clamp(type, 0, ELEVATORS_MAX - 1);
             if (index != type) {
                 memcpy(&(gElevatorBackgrounds[index]), &(gElevatorBackgrounds[type]), sizeof(*gElevatorBackgrounds));
-                memcpy(&(gElevatorLevels[index]), &(gElevatorLevels[type]), sizeof(*gElevatorLevels));
                 memcpy(&(gElevatorLevelLabels[index]), &(gElevatorLevelLabels[type]), sizeof(*gElevatorLevelLabels));
             }
         }
     }
+}
+
+
+
+int elevatorPickLevel(int elevator, int startLevel)
+{
+    if (elevator < 0 || elevator >= ELEVATORS_MAX) return -2;
+    if (elevatorLevelCount(elevator) < 2 || elevatorLevelCount(elevator) > ELEVATOR_LEVEL_MAX) {
+        char message[80];
+        snprintf(message, sizeof(message), "Elevator type %d not found.", elevator);
+        const char* body = "Check configuration";
+        showDialogBox(message, &body, 1, 192, 135, COLOR_AMBER, nullptr, COLOR_AMBER, DIALOG_BOX_LARGE);
+        debugPrint("\nElevator select: invalid button count type=%d buttonCount=%d",
+            elevator,
+            elevatorLevelCount(elevator));
+        return -2;
+    }
+
+    // SFALL
+    if (elevatorWindowInit(elevator) == -1) {
+        return -2;
+    }
+
+    touch_set_touchscreen_mode(true);
+    int elevationValue = std::clamp(startLevel, 0, elevatorLevelCount(elevator) - 1);
+    int* elevationPtr = &elevationValue;
+    debugPrint("\n the start elev level %d\n", *elevationPtr);
+
+    int gaugeSliceSize = (_elevatorFrmImages[ELEVATOR_FRM_GAUGE].getWidth() * _elevatorFrmImages[ELEVATOR_FRM_GAUGE].getHeight()) / 13;
+    float gaugeUnitsPerLevel = 12.0f / (float)(elevatorLevelCount(elevator) - 1);
+    blitBufferToBuffer(
+        _elevatorFrmImages[ELEVATOR_FRM_GAUGE].getData() + gaugeSliceSize * (int)((float)(*elevationPtr) * gaugeUnitsPerLevel),
+        _elevatorFrmImages[ELEVATOR_FRM_GAUGE].getWidth(),
+        _elevatorFrmImages[ELEVATOR_FRM_GAUGE].getHeight() / 13,
+        _elevatorFrmImages[ELEVATOR_FRM_GAUGE].getWidth(),
+        gElevatorWindowBuffer + _elevatorBackgroundFrmImage.getWidth() * 41 + 121,
+        _elevatorBackgroundFrmImage.getWidth());
+    windowRefresh(gElevatorWindow);
+
+    bool done = false;
+    bool skipGauge = false;
+    int keyCode;
+    while (!done) {
+        sharedFpsLimiter.mark();
+
+        keyCode = inputGetInput();
+        if (keyCode == KEY_ESCAPE) {
+            keyCode = -1;
+            skipGauge = true;
+            done = true;
+        }
+
+        if (keyCode >= 500 && keyCode < 500 + elevatorLevelCount(elevator)) {
+            done = true;
+        }
+
+        if (keyCode > 0 && keyCode < 500) {
+            int level = elevatorGetLevelFromKeyCode(elevator, keyCode);
+            if (level != 0) {
+                keyCode = 500 + level - 1;
+                done = true;
+            }
+        }
+
+        renderPresent();
+        sharedFpsLimiter.throttle();
+    }
+
+    if (!skipGauge) {
+        keyCode -= 500;
+
+        if (*elevationPtr != keyCode) {
+            float levelStep = (float)(elevatorLevelCount(elevator) - 1) / 12.0f;
+
+            const int delay = std::max(static_cast<int>(levelStep * 276.92307f / settings.ui.anim_speed), 1);
+
+            if (keyCode < *elevationPtr) {
+                levelStep = -levelStep;
+            }
+
+            int numberOfLevelsTravelled = keyCode - *elevationPtr;
+            if (numberOfLevelsTravelled < 0) {
+                numberOfLevelsTravelled = -numberOfLevelsTravelled;
+            }
+
+            soundPlayFile(gElevatorSoundEffects[elevatorLevelCount(elevator) - 2][numberOfLevelsTravelled]);
+
+            float targetGaugePosition = (float)keyCode * gaugeUnitsPerLevel;
+            float currentGaugePosition = (float)(*elevationPtr) * gaugeUnitsPerLevel;
+            do {
+                sharedFpsLimiter.mark();
+
+                unsigned int tick = getTicks();
+                currentGaugePosition += levelStep;
+                blitBufferToBuffer(
+                    _elevatorFrmImages[ELEVATOR_FRM_GAUGE].getData() + gaugeSliceSize * (int)currentGaugePosition,
+                    _elevatorFrmImages[ELEVATOR_FRM_GAUGE].getWidth(),
+                    _elevatorFrmImages[ELEVATOR_FRM_GAUGE].getHeight() / 13,
+                    _elevatorFrmImages[ELEVATOR_FRM_GAUGE].getWidth(),
+                    gElevatorWindowBuffer + _elevatorBackgroundFrmImage.getWidth() * 41 + 121,
+                    _elevatorBackgroundFrmImage.getWidth());
+
+                windowRefresh(gElevatorWindow);
+
+                _GNW95_process_message();
+                delay_ms(delay - (getTicks() - tick));
+                _GNW95_process_message();
+
+                renderPresent();
+                sharedFpsLimiter.throttle();
+            } while ((levelStep <= 0.0 || currentGaugePosition < targetGaugePosition) && (levelStep > 0.0 || currentGaugePosition > targetGaugePosition));
+
+            inputPauseForTocks(200);
+        }
+    }
+
+    elevatorWindowFree();
+    touch_set_touchscreen_mode(false);
+
+    return keyCode >= 0 && keyCode < elevatorLevelCount(elevator) ? keyCode : -1;
 }
 
 } // namespace fallout

@@ -1,3 +1,9 @@
+#include "object_render.h"
+#include "presenter.h"
+#include "server_players.h"
+#include "server_loop.h"
+#include "client_net.h" // clientViewerActive — combat-mirror guards (COMBAT_CLIENT_DESIGN.md §5.1)
+#include "geometry.h"
 #include "object.h"
 
 #include <assert.h>
@@ -35,6 +41,31 @@
 
 namespace fallout {
 
+static int gNextNetId = 1;
+
+int objectReattach(Object* obj, int tile, MapElevation elevation);
+
+Object* objectFindByNetId(int netId);
+
+int _obj_save_player_actor(File* stream, Object* actor);
+
+void objectApplyWireFlags(Object* obj, unsigned int wireFlags);
+
+int _obj_load_player_actor(File* stream, Object** actorPtr);
+
+int objectNextNetId();
+
+int objectGetNextNetId();
+
+void objectSetNextNetId(int netId);
+
+static void objectAssignInventoryNetIds(Object* owner);
+
+static void objectZeroInventoryNetIds(Object* owner);
+
+void objectAssignAllNetIds();
+
+
 static int objectLoadAllInternal(File* stream);
 static void _object_fix_weapon_ammo(Object* obj);
 static int objectWrite(Object* obj, File* stream);
@@ -44,11 +75,11 @@ static int _obj_order_table_init();
 static int _obj_order_comp_func_even(const void* a1, const void* a2);
 static int _obj_order_comp_func_odd(const void* a1, const void* a2);
 static void _obj_order_table_exit();
-static int _obj_render_table_init();
-static void _obj_render_table_exit();
+
+
 static void _obj_light_table_init();
-static void _obj_blend_table_init();
-static void _obj_blend_table_exit();
+
+
 static int _obj_save_obj(File* stream, Object* object);
 static int _obj_load_obj(File* stream, Object** objectPtr, MapElevation elevation, Object* owner);
 static int objectAllocate(Object** objectPtr);
@@ -60,13 +91,13 @@ static void _obj_insert(ObjectListNode* ptr);
 static int _obj_remove(ObjectListNode* a1, ObjectListNode* a2);
 static int _obj_connect_to_tile(ObjectListNode* node, int tile_index, MapElevation elev, Rect* rect);
 static int _obj_adjust_light(Object* obj, int a2, Rect* rect);
-static void objectDrawOutline(Object* object, Rect* rect);
-static void _obj_render_object(Object* object, Rect* rect, int light);
+
+
 static int _obj_preload_sort(const void* fid1, const void* fid2);
 static Object* objectPrepareWhoHitMeForSave(CritterCombatData* combatData);
 
 // 0x5195F8 objInitialized
-static bool gObjectsInitialized = false;
+bool gObjectsInitialized = false;
 
 // 0x5195FC updateHexWidth
 static int gObjectsUpdateAreaHexWidth = 0;
@@ -75,33 +106,33 @@ static int gObjectsUpdateAreaHexWidth = 0;
 static int gObjectsUpdateAreaHexHeight = 0;
 
 // 0x519604 updateHexArea
-static int gObjectsUpdateAreaHexSize = 0;
+int gObjectsUpdateAreaHexSize = 0;
 
 // 0x519608 orderTable
-static int* _orderTable[2] = {
+int* _orderTable[2] = {
     nullptr,
     nullptr,
 };
 
 // 0x519610 offsetTable
-static int* _offsetTable[2] = {
+int* _offsetTable[2] = {
     nullptr,
     nullptr,
 };
 
 // 0x519618 offsetDivTable
-static int* _offsetDivTable = nullptr;
+int* _offsetDivTable = nullptr;
 
 // 0x51961C offsetModTable
-static int* _offsetModTable = nullptr;
+int* _offsetModTable = nullptr;
 
 // 0x519620 renderTable
-static ObjectListNode** _renderTable = nullptr;
+
 
 // Contains objects that are not bounded to tiles.
 //
 // 0x519628 floatingObjects
-static ObjectListNode* gObjectListHead = nullptr;
+ObjectListNode* gObjectListHead = nullptr;
 
 // 0x51962C centerToUpperLeft
 static int _centerToUpperLeft = 0;
@@ -190,19 +221,19 @@ static MapElevation _obj_last_elev = ELEVATION_INVALID;
 static bool _obj_last_is_empty = true;
 
 // 0x519780 wallBlendTable
-Color* _wallBlendTable = nullptr;
+
 
 // 0x519784 glassBlendTable
-static Color* _glassBlendTable = nullptr;
+
 
 // 0x519788 steamBlendTable
-static Color* _steamBlendTable = nullptr;
+
 
 // 0x51978C energyBlendTable
-static Color* _energyBlendTable = nullptr;
+
 
 // 0x519790 redBlendTable
-static Color* _redBlendTable = nullptr;
+
 
 // 0x519794 moveBlockObj
 Object* _moveBlockObj = nullptr;
@@ -250,10 +281,10 @@ static int _light_blocked[ROTATION_COUNT][36];
 static int _light_offsets[2][ROTATION_COUNT][36];
 
 // 0x639BF0 buf_rect
-static Rect gObjectsWindowRect;
+Rect gObjectsWindowRect;
 
 // Likely outlined objects on the screen.
-static std::vector<Object*> outlinedObjects;
+
 
 // 0x639D90 updateAreaPixelBounds
 static Rect gObjectsUpdateAreaPixelBounds;
@@ -261,19 +292,19 @@ static Rect gObjectsUpdateAreaPixelBounds;
 // Contains objects that are bounded to tiles.
 //
 // 0x639DA0 objectTable
-static ObjectListNode* gObjectListHeadByTile[HEX_GRID_SIZE];
+ObjectListNode* gObjectListHeadByTile[HEX_GRID_SIZE];
 
 // 0x660EA0 glassGrayTable
-static Color _glassGrayTable[COLOR_COUNT];
+
 
 // 0x660FA0 commonGrayTable
-Color _commonGrayTable[COLOR_COUNT];
+
 
 // 0x6610A0 buf_size
-static int gObjectsWindowBufferSize;
+int gObjectsWindowBufferSize;
 
 // 0x6610A4 back_buf
-static unsigned char* gObjectsWindowBuffer;
+unsigned char* gObjectsWindowBuffer;
 
 // 0x6610A8 buf_length
 static int gObjectsWindowHeight;
@@ -284,7 +315,7 @@ static int gObjectsWindowHeight;
 Object* gEgg;
 
 // 0x6610B0 back_buf_width
-static int gObjectsWindowPitch;
+int gObjectsWindowPitch;
 
 // 0x6610B4 buf_width
 static int gObjectsWindowWidth;
@@ -456,6 +487,22 @@ int objectRead(Object* obj, File* stream)
         return -1;
     }
 
+    // whoHitMe is a runtime-only CACHE of the persistent whoHitMeCid; a serialized
+    // pointer is always garbage across a load (a foreign process address, or — the
+    // fatal case — a legacy 4-byte value sitting in the 8-byte field on 64-bit, e.g.
+    // -1 -> 0xffffffff, a non-null bogus pointer). The many nullptr-only-guarded deref
+    // sites (combat.cc:5453 _damage_object, state_dump.cc:98, actions.cc:2449) fault on
+    // it. Null it on EVERY deserialization — objectRead is the single chokepoint for map
+    // load, savegame, join blob AND _obj_copy (which round-trips through here) — so no
+    // path can surface a bogus whoHitMe. This SUBSUMES _map_fix_critter_combat_data
+    // (which only covered critters present at map-load time — artemple's script-spawned
+    // Temple guards loaded LATER escaped it → the cdamage SIGSEGV). whoHitMeCid is
+    // untouched; combat re-resolves the pointer via _find_cid at _combat_begin. See the
+    // id-plus-cached-pointer antipattern (do NOT 32-bit-mask the deref — fix the source).
+    if (ProtoId(obj).objectType() == OBJ_TYPE_CRITTER) {
+        obj->data.critter.combat.whoHitMe = nullptr;
+    }
+
     if (isExitGridProtoId(obj)) {
         if (obj->data.misc.map <= 0) {
             constexpr int kExit2Grid1FrameId = MiscFrmId(MiscFrameId::Exit2Grid1).frameId();
@@ -597,6 +644,31 @@ static int objectLoadAllInternal(File* stream)
 
             Inventory* inventory = &(objectListNode->obj->data.inventory);
             if (inventory->length != 0) {
+                // length/capacity come straight from the object stream, which on a
+                // rebaseline is a wire/blob-loaded trust boundary. A corrupt or
+                // garbage count (observed: capacity ~0xfffffffe on a co-op map-switch
+                // rebaseline) otherwise drives an impossible malloc — ASAN aborts with
+                // allocation-size-too-big, a stock build crashes or wildly over-
+                // allocates — and a length past capacity overruns the item array
+                // below. Reject the object rather than trust it. (The corrupt count's
+                // upstream cause is the applyBlob teardown/parse corruption; this is
+                // the boundary backstop so a bad blob fails the load instead of
+                // crashing.)
+                if (inventory->length < 0
+                    || inventory->capacity < inventory->length
+                    || (size_t)(unsigned int)inventory->capacity > SIZE_MAX / sizeof(InventoryItem)) {
+                    // Loud, not silent: name the object so a repro points AT the
+                    // root (which object's serialization desynced the stream) instead
+                    // of the reject hiding it. If pid/fid also look like garbage, the
+                    // whole object struct is corrupt → a stream mis-alignment earlier
+                    // in objectLoadAll; if they look valid, this specific object's
+                    // inventory write/read disagrees.
+                    debugPrint("Error loading inventory: bad length=%d capacity=%d "
+                               "obj pid=0x%X fid=0x%X — corrupt blob or stream desync\n",
+                        inventory->length, inventory->capacity,
+                        objectListNode->obj->pid, objectListNode->obj->fid);
+                    return -1;
+                }
                 inventory->items = (InventoryItem*)internal_malloc(sizeof(InventoryItem) * inventory->capacity);
                 if (inventory->items == nullptr) {
                     return -1;
@@ -800,133 +872,10 @@ int objectSaveAll(File* stream)
 }
 
 // 0x489550 obj_render_pre_roof
-void _obj_render_pre_roof(Rect* rect, MapElevation elevation)
-{
-    if (!gObjectsInitialized) {
-        return;
-    }
 
-    Rect updatedRect;
-    if (rectIntersection(rect, &gObjectsWindowRect, &updatedRect) != 0) {
-        return;
-    }
-
-    int ambientIntensity = lightGetAmbientIntensity();
-    int minX = updatedRect.left - 320;
-    int minY = updatedRect.top - 240;
-    int maxX = updatedRect.right + 320;
-    int maxY = updatedRect.bottom + 240;
-    int upperLeftTile = tileFromScreenXY(minX, minY, true);
-    int updateAreaHexWidth = (maxX - minX + 1) / 32;
-    int updateAreaHexHeight = (maxY - minY + 1) / 12;
-    int parity = gCenterTile & 1;
-
-    outlinedObjects.clear();
-
-    int renderCount = 0;
-    for (int i = 0; i < gObjectsUpdateAreaHexSize; i++) {
-        int offsetIndex = _orderTable[parity][i];
-        if (updateAreaHexHeight > _offsetDivTable[offsetIndex] && updateAreaHexWidth > _offsetModTable[offsetIndex]) {
-            int tile = upperLeftTile + _offsetTable[parity][offsetIndex];
-            ObjectListNode* objectListNode = hexGridTileIsValid(tile)
-                ? gObjectListHeadByTile[tile]
-                : nullptr;
-
-            int lightIntensity = ambientIntensity;
-            if (objectListNode != nullptr) {
-                // NOTE: Calls `lightGetTileIntensity` twice.
-                lightIntensity = std::max(ambientIntensity, lightGetTileIntensity(elevation, objectListNode->obj->tile));
-            }
-
-            while (objectListNode != nullptr) {
-                if (elevation < objectListNode->obj->elevation) {
-                    break;
-                }
-
-                if (elevation == objectListNode->obj->elevation) {
-                    if ((objectListNode->obj->flags & OBJECT_FLAT) == OBJECT_NONE) {
-                        break;
-                    }
-
-                    if ((objectListNode->obj->flags & OBJECT_HIDDEN) == OBJECT_NONE) {
-                        _obj_render_object(objectListNode->obj, &updatedRect, lightIntensity);
-
-                        if (objectHasVisibleOutline(objectListNode->obj)) {
-                            outlinedObjects.push_back(objectListNode->obj);
-                        }
-                    }
-                }
-
-                objectListNode = objectListNode->next;
-            }
-
-            if (objectListNode != nullptr) {
-                _renderTable[renderCount++] = objectListNode;
-            }
-        }
-    }
-
-    tileRenderEdgeBlackSquares(&updatedRect, elevation, false);
-
-    for (int i = 0; i < renderCount; i++) {
-        int lightIntensity = ambientIntensity;
-
-        ObjectListNode* objectListNode = _renderTable[i];
-        if (objectListNode != nullptr) {
-            // NOTE: Calls `lightGetTileIntensity` twice.
-            lightIntensity = std::max(ambientIntensity, lightGetTileIntensity(elevation, objectListNode->obj->tile));
-        }
-
-        while (objectListNode != nullptr) {
-            Object* object = objectListNode->obj;
-            if (elevation < object->elevation) {
-                break;
-            }
-
-            if (elevation == objectListNode->obj->elevation) {
-                if ((objectListNode->obj->flags & OBJECT_HIDDEN) == OBJECT_NONE) {
-                    _obj_render_object(object, &updatedRect, lightIntensity);
-
-                    if (objectHasVisibleOutline(objectListNode->obj)) {
-                        outlinedObjects.push_back(objectListNode->obj);
-                    }
-                }
-            }
-
-            objectListNode = objectListNode->next;
-        }
-    }
-
-    tileRenderEdgeBlackSquares(&updatedRect, elevation, true);
-}
 
 // 0x4897EC obj_render_post_roof
-void _obj_render_post_roof(Rect* rect, MapElevation elevation)
-{
-    if (!gObjectsInitialized) {
-        return;
-    }
 
-    Rect updatedRect;
-    if (rectIntersection(rect, &gObjectsWindowRect, &updatedRect) != 0) {
-        return;
-    }
-
-    for (Object* object : outlinedObjects) {
-        objectDrawOutline(object, &updatedRect);
-    }
-
-    textObjectsRenderInRect(&updatedRect);
-
-    ObjectListNode* objectListNode = gObjectListHead;
-    while (objectListNode != nullptr) {
-        Object* object = objectListNode->obj;
-        if ((object->flags & OBJECT_HIDDEN) == OBJECT_NONE) {
-            _obj_render_object(object, &updatedRect, 0x10000);
-        }
-        objectListNode = objectListNode->next;
-    }
-}
 
 // 0x489A84 obj_new
 int objectCreateWithFrmIdProtoId(Object** objectPtr, const FrmId& frmId, const ProtoId& protoId)
@@ -1069,6 +1018,10 @@ int _obj_copy(Object** a1, Object* a2)
 
     objectListNode->obj->id = scriptsNewObjectId();
 
+    if (serverLoopActive()) {
+        objectListNode->obj->netId = objectNextNetId();
+    }
+
     if (objectListNode->obj->sid != -1) {
         objectListNode->obj->sid = -1;
         objectSetScriptFromProto(objectListNode->obj, &(objectListNode->obj->sid));
@@ -1086,6 +1039,17 @@ int _obj_copy(Object** a1, Object* a2)
     Inventory* newInventory = &(objectListNode->obj->data.inventory);
     newInventory->length = 0;
     newInventory->capacity = 0;
+    // The memcpy above copied the SOURCE's items POINTER as well. Clearing only
+    // length/capacity leaves the copy aliasing the source's array, and itemAdd's
+    // growth test (`length == capacity || items == nullptr`) then takes the
+    // realloc branch on that borrowed pointer — reallocating the SOURCE's array
+    // and adopting it. Both objects end up sharing one array while the source's
+    // pointer may already be dangling: edits to one inventory show up in the
+    // other, entries read back as garbage items, and teardown frees freed memory.
+    // Latent in vanilla only because every other caller copies an object whose
+    // inventory is empty AND nullptr; copying the DUDE (co-op extra actors, which
+    // carry the starting inventory) is what first supplies a non-null pointer.
+    newInventory->items = nullptr;
 
     Inventory* oldInventory = &(a2->data.inventory);
     for (int index = 0; index < oldInventory->length; index++) {
@@ -1105,7 +1069,27 @@ int _obj_copy(Object** a1, Object* a2)
             objectListNodeDestroy(&objectListNode);
             return -1;
         }
+
+        // The recursive _obj_copy above _obj_insert'ed this item into the WORLD
+        // object list, and itemAdd has now also put it in an inventory — the item
+        // is in two places at once. Carried items belong in neither the world list
+        // nor a tile bucket (see command.cc's give, which _obj_disconnect's right
+        // after objectCreateWithProtoId for exactly this reason).
+        //
+        // The damage is deferred and looks unrelated: map teardown walks the world
+        // list and frees the item, but an owner that survives teardown keeps
+        // pointing at it. Observed with co-op extra actors (OBJECT_NO_REMOVE, so
+        // they DO survive): after a transition their carried spear read back as
+        // pid 0x0500000C — a freed object reinterpreted — rendering as a garbage
+        // item. Left in the world list it is also a double free waiting for any
+        // owner that is torn down normally.
+        _obj_disconnect(newItem, nullptr);
     }
+
+    // MP_PROTOCOL.md §4 spawn: the second create path (duplication / stack
+    // split). Recursion above already emitted objectCreated for each copied
+    // inventory item, so children precede their parent on the wire.
+    presenter()->objectCreated(objectListNode->obj);
 
     return 0;
 }
@@ -1134,7 +1118,16 @@ int _obj_connect(Object* object, int tile, MapElevation elevation, Rect* rect)
 
     objectListNode->obj = object;
 
-    return _obj_connect_to_tile(objectListNode, tile, elevation, rect);
+    int rc = _obj_connect_to_tile(objectListNode, tile, elevation, rect);
+    if (rc == 0) {
+        // MP_PROTOCOL.md §4/§6.2b item<->world lifecycle: the object attached to a
+        // world tile (drop/scatter/unload/script obj_connect). This bypasses
+        // objectCreateWithFidPid and objectSetLocation, so it is the sole signal an
+        // item re-parented from an inventory now appears at a tile. Distinct from
+        // objectCreated — the object persists, it is not born here.
+        presenter()->objectConnected(object, tile, elevation);
+    }
+    return rc;
 }
 
 // 0x489F34 obj_disconnect
@@ -1172,6 +1165,13 @@ int _obj_disconnect(Object* obj, Rect* rect)
     }
 
     obj->tile = -1;
+
+    // MP_PROTOCOL.md §4/§6.2b item<->world lifecycle: the object detached from its
+    // world tile (pickup/consume/unload/script obj_disconnect) into an inventory or
+    // limbo. Bypasses objectDestroy (the object persists), so this is the sole
+    // signal the item left the world. Reached only on the success path; obj->id is
+    // intact, obj->tile is now -1.
+    presenter()->objectDisconnected(obj);
 
     return 0;
 }
@@ -1428,6 +1428,7 @@ int objectSetLocation(Object* obj, int tile, MapElevation elevation, Rect* rect)
     }
 
     int oldElevation = obj->elevation;
+    int oldTile = obj->tile;
     if (prevNode != nullptr) {
         prevNode->next = node->next;
     } else {
@@ -1443,7 +1444,21 @@ int objectSetLocation(Object* obj, int tile, MapElevation elevation, Rect* rect)
         return -1;
     }
 
-    if (isInCombat()) {
+    // MP_PROTOCOL.md §4 move: tile/elevation is now committed. The per-tile
+    // stream is coalesced into a path event downstream; suppressed during map
+    // load by the consumer (dude placement moves through here). Pixel-offset
+    // interpolation (_obj_offset) is client-derived, not synced.
+    //
+    // During a script game-time skip the per-tile stream is COALESCED instead:
+    // the window records this object's origin once and ships a single snap to
+    // its final tile when the skip ends (presenter.h TIME-SKIP MOVE COALESCING).
+    if (presenterTimeSkipActive()) {
+        presenterTimeSkipRecordMove(obj, oldTile, oldElevation);
+    } else {
+        presenter()->objectMoved(obj, oldTile, oldElevation, tile, elevation);
+    }
+
+    if (isInCombat() && !clientViewerActive()) {
         if (FrmId(obj).objectType() == OBJ_TYPE_CRITTER) {
             bool enableOutline = obj->outline != OUTLINE_TYPE_NONE && (obj->outline & OUTLINE_DISABLED) == OUTLINE_TYPE_NONE;
             _combat_update_critter_outline_for_los(obj, enableOutline);
@@ -1455,7 +1470,36 @@ int objectSetLocation(Object* obj, int tile, MapElevation elevation, Rect* rect)
     }
 
     if (obj == gDude) {
-        ObjectListNode* objectListNode = gObjectListHeadByTile[tile];
+        // ►►►► A WIRE VIEWER MUST NOT DISCOVER ITS OWN EXIT GRIDS. Transitions belong
+        // to the authority: the server walks its dude onto the grid, latches the
+        // MapTransition, performs the load and rebaselines us. Our gDude is a MIRROR
+        // being replayed, so when the replayed walk lands on the same tile this block
+        // used to latch a SECOND, local transition — and mapSetTransition opens with
+        //
+        //     if (isInCombat()) { _game_user_wants_to_quit = 1; }
+        //
+        // which on a viewer is read off a MIRRORED combat state, not a local fight.
+        // Vanilla is safe because that 1 is an in-band "break out of the combat loop"
+        // signal that combat.cc itself clears again (combat.cc:3294/3643). The viewer
+        // has no such loop to consume it, so the flag survived, and BOTH the worldmap
+        // modal (worldmap_ui.cc `if (_game_user_wants_to_quit != 0) break;`) and the
+        // frame loop (`while (_game_user_wants_to_quit == 0)`) then exited. The client
+        // vanished the instant you walked off the edge of a map during a fight, which
+        // reads exactly like a crash and leaves no core file, because it is a clean
+        // return out of main.
+        //
+        // ►► THE SAME BUG, ONE BRANCH DOWN, WAS ALREADY FOUND AND FIXED: the elevation
+        // change at the bottom of this function carries `&& !clientViewerActive()` with
+        // a comment saying a wire-driven change "would silently kill mainClientViewer"
+        // (COMBAT_CLIENT_DESIGN.md §5.1). That guard was put on the symptom that had
+        // been noticed; this scan is the other door into the identical failure. Whenever
+        // gDude is a mirror, ask of every `obj == gDude` branch whether it is OBSERVING
+        // the dude or DECIDING for it — deciding is the authority's job.
+        //
+        // Nothing else in this scan is wanted on a viewer either: it looks for exit
+        // grids and does nothing but latch the transition and mark the worldmap entrance
+        // known, and that entrance state is server-owned too.
+        ObjectListNode* objectListNode = clientViewerActive() ? nullptr : gObjectListHeadByTile[tile];
         while (objectListNode != nullptr) {
             Object* obj = objectListNode->obj;
             int elev = obj->elevation;
@@ -1539,7 +1583,7 @@ int objectSetLocation(Object* obj, int tile, MapElevation elevation, Rect* rect)
 
             mapSetElevation(elevation);
             tileSetCenter(tile, TILE_SET_CENTER_REFRESH_WINDOW | TILE_SET_CENTER_FLAG_IGNORE_SCROLL_RESTRICTIONS);
-            if (isInCombat()) {
+            if (isInCombat() && !clientViewerActive()) {
                 _game_user_wants_to_quit = GAME_QUIT_REQUEST_END_COMBAT;
             }
         }
@@ -2031,6 +2075,15 @@ int objectDestroy(Object* object, Rect* rect)
         return -1;
     }
 
+    // MP_PROTOCOL.md §4 destroy: emit before the free so obj->id is readable.
+    // Map teardown (_obj_remove_all) bypasses objectDestroy, so this fires only
+    // for gameplay destroys, not the bulk world-clear on map change.
+    presenter()->objectDestroyed(object);
+
+    // A time-skip window may be holding this object's pre-skip origin; the
+    // pointer is about to become unreadable.
+    presenterTimeSkipForget(object);
+
     _gmouse_remove_item_outline(object);
 
     ObjectListNode* node;
@@ -2174,6 +2227,10 @@ void _obj_remove_all()
     ObjectListNode* node;
     ObjectListNode* prev;
     ObjectListNode* next;
+
+    // Bulk world-clear bypasses objectDestroy, so nothing else drops the
+    // time-skip window's held pointers. Every one of them dies here.
+    presenterTimeSkipForgetAll();
 
     _scr_remove_all();
 
@@ -2829,118 +2886,16 @@ void objectListFree(Object** objectList)
 }
 
 // 0x48BDD8 translucent_trans_buf_to_buf
-void _translucent_trans_buf_to_buf(unsigned char* src, int srcWidth, int srcHeight, int srcPitch, unsigned char* dest, int destX, int destY, int destPitch, Color* blendTable, Color* colorTable)
-{
-    dest += destPitch * destY + destX;
-    int srcStep = srcPitch - srcWidth;
-    int destStep = destPitch - srcWidth;
 
-    for (int y = 0; y < srcHeight; y++) {
-        for (int x = 0; x < srcWidth; x++) {
-            Color v1 = colorTable[*src];
-            Color* v2 = blendTable + (v1 << 8);
-            unsigned char v3 = *dest;
-
-            *dest = v2[v3];
-
-            src++;
-            dest++;
-        }
-
-        src += srcStep;
-        dest += destStep;
-    }
-}
 
 // 0x48BEFC dark_trans_buf_to_buf
-void _dark_trans_buf_to_buf(unsigned char* src, int srcWidth, int srcHeight, int srcPitch, unsigned char* dest, int destX, int destY, int destPitch, int intensity)
-{
-    unsigned char* sp = src;
-    unsigned char* dp = dest + destPitch * destY + destX;
 
-    int srcStep = srcPitch - srcWidth;
-    int destStep = destPitch - srcWidth;
-    int intensityIndex = intensity / 512;
-
-    for (int y = 0; y < srcHeight; y++) {
-        for (int x = 0; x < srcWidth; x++) {
-            Color color = static_cast<Color>(*sp);
-            if (color != COLOR_FIRST) {
-                if (color < 0xE5) {
-                    color = intensityColorTable[color][intensityIndex];
-                }
-
-                *dp = color;
-            }
-
-            sp++;
-            dp++;
-        }
-
-        sp += srcStep;
-        dp += destStep;
-    }
-}
 
 // 0x48BF88 dark_translucent_trans_buf_to_buf
-void _dark_translucent_trans_buf_to_buf(unsigned char* src, int srcWidth, int srcHeight, int srcPitch, unsigned char* dest, int destX, int destY, int destPitch, int intensity, Color* blendTable, Color* colorTable)
-{
-    int srcStep = srcPitch - srcWidth;
-    int destStep = destPitch - srcWidth;
-    int intensityIndex = intensity / 512;
 
-    dest += destPitch * destY + destX;
-
-    for (int y = 0; y < srcHeight; y++) {
-        for (int x = 0; x < srcWidth; x++) {
-            unsigned char srcByte = *src;
-            if (srcByte != 0) {
-                unsigned char destByte = *dest;
-                unsigned int index = colorTable[srcByte] << 8;
-                index = blendTable[index + destByte];
-                *dest = intensityColorTable[index][intensityIndex];
-            }
-
-            src++;
-            dest++;
-        }
-
-        src += srcStep;
-        dest += destStep;
-    }
-}
 
 // 0x48C03C intensity_mask_buf_to_buf
-void _intensity_mask_buf_to_buf(unsigned char* src, int srcWidth, int srcHeight, int srcPitch, unsigned char* dest, int destPitch, unsigned char* mask, int maskPitch, int intensity)
-{
-    int srcStep = srcPitch - srcWidth;
-    int destStep = destPitch - srcWidth;
-    int maskStep = maskPitch - srcWidth;
-    int intensityIndex = intensity / 512;
 
-    for (int y = 0; y < srcHeight; y++) {
-        for (int x = 0; x < srcWidth; x++) {
-            unsigned char color = *src;
-            if (color != 0) {
-                color = intensityColorTable[color][intensityIndex];
-                if (*mask != 0) {
-                    unsigned char v1 = intensityColorTable[*dest][128 - *mask];
-                    unsigned char v2 = intensityColorTable[color][*mask];
-                    color = colorMixAddTable[v2][v1];
-                }
-                *dest = color;
-            }
-
-            src++;
-            dest++;
-            mask++;
-        }
-
-        src += srcStep;
-        dest += destStep;
-        mask += maskStep;
-    }
-}
 
 // 0x48C2B4 obj_outline_object
 int objectSetOutline(Object* obj, OutlineType outlineType, Rect* rect)
@@ -3504,34 +3459,12 @@ static void _obj_order_table_exit()
 }
 
 // 0x48CF8C obj_render_table_init
-static int _obj_render_table_init()
-{
-    if (_renderTable != nullptr) {
-        return -1;
-    }
 
-    _renderTable = (ObjectListNode**)internal_malloc(sizeof(*_renderTable) * gObjectsUpdateAreaHexSize);
-    if (_renderTable == nullptr) {
-        return -1;
-    }
-
-    for (int index = 0; index < gObjectsUpdateAreaHexSize; index++) {
-        _renderTable[index] = nullptr;
-    }
-
-    return 0;
-}
 
 // NOTE: Inlined.
 //
 // 0x48D000 obj_render_table_exit
-static void _obj_render_table_exit()
-{
-    if (_renderTable != nullptr) {
-        internal_free(_renderTable);
-        _renderTable = nullptr;
-    }
-}
+
 
 // 0x48D020 obj_light_table_init
 static void _obj_light_table_init()
@@ -3555,38 +3488,12 @@ static void _obj_light_table_init()
 }
 
 // 0x48D1E4 obj_blend_table_init
-static void _obj_blend_table_init()
-{
-    for (int index = COLOR_FIRST; index < COLOR_COUNT; index++) {
-        int rgb = Color2RGB(static_cast<Color>(index & COLOR_LAST));
-        int r = (rgb & 0x7C00) >> 10;
-        int g = (rgb & 0x3E0) >> 5;
-        int b = rgb & 0x1F;
-        _glassGrayTable[index] = static_cast<Color>(((r + 5 * g + 4 * b) / 10) >> 2);
-        _commonGrayTable[index] = static_cast<Color>(((b + 3 * r + 6 * g) / 10) >> 2);
-    }
 
-    _glassGrayTable[0] = COLOR_FIRST;
-    _commonGrayTable[0] = COLOR_FIRST;
-
-    _wallBlendTable = _getColorBlendTable(COLOR_PALE_BLUE);
-    _glassBlendTable = _getColorBlendTable(COLOR_CYAN);
-    _steamBlendTable = _getColorBlendTable(COLOR_WHITE);
-    _energyBlendTable = _getColorBlendTable(COLOR_YELLOW_GREEN);
-    _redBlendTable = _getColorBlendTable(COLOR_RED);
-}
 
 // NOTE: Inlined.
 //
 // 0x48D2E8 obj_blend_table_exit
-static void _obj_blend_table_exit()
-{
-    _freeColorBlendTable(COLOR_PALE_BLUE);
-    _freeColorBlendTable(COLOR_CYAN);
-    _freeColorBlendTable(COLOR_WHITE);
-    _freeColorBlendTable(COLOR_YELLOW_GREEN);
-    _freeColorBlendTable(COLOR_RED);
-}
+
 
 // 0x48D348 obj_save_obj
 static int _obj_save_obj(File* stream, Object* object)
@@ -3744,7 +3651,22 @@ int _obj_load_dude(File* stream)
         return -1;
     }
 
+    // Free the current dude's carried inventory BEFORE the memcpy overwrites the
+    // data.inventory pointer (APPLYBLOB_TEARDOWN_PLAN step 1). gDude's items live
+    // only inside its Inventory (never in tile buckets), so the mapLoad → _obj_remove_all
+    // that precedes this on a co-op rebaseline SKIPS them — the memcpy below would then
+    // clobber the items[] pointer and leak the whole array (+ every carried item) every
+    // rebaseline. No-op on the first load (empty inventory) and on the single-player load
+    // path (the in-progress inventory is being replaced by the save's anyway); on the
+    // client _net is already cleared this teardown, so freeing these items strands no
+    // stale netId map entry.
+    _obj_inven_free(&(gDude->data.inventory));
+
     memcpy(gDude, temp, sizeof(*gDude));
+
+    if (serverLoopActive()) {
+        gDude->netId = 1;
+    }
 
     gDude->flags |= OBJECT_NO_SAVE;
 
@@ -3826,6 +3748,7 @@ static int objectAllocate(Object** objectPtr)
     object->sid = -1;
     object->owner = nullptr;
     object->scriptIndex = -1;
+    object->netId = 0;
 
     return 0;
 }
@@ -4734,482 +4657,10 @@ static int _obj_adjust_light(Object* obj, int a2, Rect* rect)
 }
 
 // 0x48EABC obj_render_outline
-static void objectDrawOutline(Object* object, Rect* rect)
-{
-    CacheEntry* cacheEntry;
-    Art* art = artLock(FrmId(object), &cacheEntry);
-    if (art == nullptr) {
-        return;
-    }
 
-    int frameWidth = 0;
-    int frameHeight = 0;
-    artGetSize(art, object->frame, object->rotation, &frameWidth, &frameHeight);
-
-    Rect visibleFrameRect;
-    visibleFrameRect.left = 0;
-    visibleFrameRect.top = 0;
-    visibleFrameRect.right = frameWidth - 1;
-
-    visibleFrameRect.bottom = frameHeight - 1;
-
-    Rect objectRect;
-    if (object->tile == -1) {
-        objectRect.left = object->sx;
-        objectRect.top = object->sy;
-        objectRect.right = object->sx + frameWidth - 1;
-        objectRect.bottom = object->sy + frameHeight - 1;
-    } else {
-        int x;
-        int y;
-        tileToScreenXY(object->tile, &x, &y);
-        x += 16;
-        y += 8;
-
-        x += art->xOffsets[object->rotation];
-        y += art->yOffsets[object->rotation];
-
-        x += object->x;
-        y += object->y;
-
-        objectRect.left = x - frameWidth / 2;
-        objectRect.top = y - (frameHeight - 1);
-        objectRect.right = objectRect.left + frameWidth - 1;
-        objectRect.bottom = y;
-
-        object->sx = objectRect.left;
-        object->sy = objectRect.top;
-    }
-
-    Rect expandedRect;
-    rectCopy(&expandedRect, rect);
-
-    expandedRect.left--;
-    expandedRect.top--;
-    expandedRect.right++;
-    expandedRect.bottom++;
-
-    rectIntersection(&expandedRect, &gObjectsWindowRect, &expandedRect);
-
-    if (rectIntersection(&objectRect, &expandedRect, &objectRect) == 0) {
-        visibleFrameRect.left += objectRect.left - object->sx;
-        visibleFrameRect.top += objectRect.top - object->sy;
-        visibleFrameRect.right = visibleFrameRect.left + (objectRect.right - objectRect.left);
-        visibleFrameRect.bottom = visibleFrameRect.top + (objectRect.bottom - objectRect.top);
-
-        unsigned char* src = artGetFrameData(art, object->frame, object->rotation);
-
-        // TODO: This base pointer is computed from unclipped object coordinates.
-        // Convert the outline scan to integer offsets so partially offscreen
-        // objects do not form out-of-bounds pointers before write-site checks.
-        unsigned char* dest = gObjectsWindowBuffer + gObjectsWindowPitch * object->sy + object->sx;
-        int destStep = gObjectsWindowPitch - frameWidth;
-
-        Color color;
-        Color* grayTable = nullptr;
-        Color* blendTable = nullptr;
-        int isOutlinePalleted = object->outline & OUTLINE_PALETTED;
-        OutlineType outlineType = object->outline & OUTLINE_TYPE_MAX;
-        int animatedColorCount = 0;
-        int animatedColorBandHeight;
-
-        switch (outlineType) {
-        case OUTLINE_TYPE_HOSTILE:
-            color = Color(243);
-            isOutlinePalleted = 0;
-            animatedColorCount = 5;
-            animatedColorBandHeight = frameHeight / 5;
-            break;
-        case OUTLINE_TYPE_SAME_TEAM:
-            color = COLOR_RED;
-            animatedColorBandHeight = 0;
-            if (isOutlinePalleted != 0) {
-                grayTable = _commonGrayTable;
-                blendTable = _redBlendTable;
-            }
-            break;
-        case OUTLINE_TYPE_BODY:
-            color = COLOR_GREY_2;
-            animatedColorBandHeight = 0;
-            if (isOutlinePalleted != 0) {
-                grayTable = _commonGrayTable;
-                blendTable = _wallBlendTable;
-            }
-            break;
-        case OUTLINE_TYPE_FRIENDLY:
-            animatedColorCount = 4;
-            animatedColorBandHeight = frameHeight / 4;
-            color = Color(229);
-            isOutlinePalleted = 0;
-            break;
-        case OUTLINE_TYPE_ITEM:
-            animatedColorBandHeight = 0;
-            color = COLOR_LIGHT_GOLD_2;
-            if (isOutlinePalleted != 0) {
-                grayTable = _commonGrayTable;
-                blendTable = _redBlendTable;
-            }
-            break;
-        case OUTLINE_TYPE_BLOCKED:
-            color = Color(61);
-            isOutlinePalleted = 0;
-            animatedColorCount = 1;
-            animatedColorBandHeight = frameHeight;
-            break;
-        default:
-            color = COLOR_MAGENTA;
-            isOutlinePalleted = 0;
-            animatedColorBandHeight = 0;
-            break;
-        }
-
-        Color outlineColor = color;
-        unsigned char* destPtr = dest;
-        unsigned char* srcPtr = src;
-        for (int y = 0; y < frameHeight; y++) {
-            bool cycle = true;
-            if (animatedColorBandHeight != 0) {
-                if (y % animatedColorBandHeight == 0) {
-                    outlineColor = static_cast<Color>((outlineColor + 1) & COLOR_LAST);
-                }
-
-                if (outlineColor > animatedColorCount + color - 1) {
-                    outlineColor = color;
-                }
-            }
-
-            bool yVisible = y >= visibleFrameRect.top && y <= visibleFrameRect.bottom;
-            Color* outlineBlendTable = isOutlinePalleted != 0
-                ? blendTable + (grayTable[outlineColor] << 8)
-                : nullptr;
-            for (int x = 0; x < frameWidth; x++) {
-                int destOffset = destPtr - gObjectsWindowBuffer;
-                if (*srcPtr != 0 && cycle) {
-                    if (yVisible && x >= visibleFrameRect.left && x <= visibleFrameRect.right && destOffset > 0 && destOffset % gObjectsWindowPitch != 0) {
-                        Color leftOutlineColor;
-                        if (isOutlinePalleted != 0) {
-                            leftOutlineColor = outlineBlendTable[*(destPtr - 1)];
-                        } else {
-                            leftOutlineColor = outlineColor;
-                        }
-                        *(destPtr - 1) = leftOutlineColor;
-                    }
-                    cycle = false;
-                } else if (*srcPtr == 0 && !cycle) {
-                    if (yVisible && x >= visibleFrameRect.left && x <= visibleFrameRect.right) {
-                        Color rightOutlineColor;
-                        if (isOutlinePalleted != 0) {
-                            rightOutlineColor = outlineBlendTable[*destPtr];
-                        } else {
-                            rightOutlineColor = outlineColor;
-                        }
-                        *destPtr = rightOutlineColor & COLOR_LAST;
-                    }
-                    cycle = true;
-                }
-                destPtr++;
-                srcPtr++;
-            }
-
-            if (*(srcPtr - 1) != 0) {
-                int rightOutlineDestOffset = destPtr - gObjectsWindowBuffer;
-                if (rightOutlineDestOffset >= 0 && rightOutlineDestOffset < gObjectsWindowBufferSize && rightOutlineDestOffset % gObjectsWindowPitch != 0) {
-                    int rightEdgeX = frameWidth - 1;
-                    if (yVisible && rightEdgeX >= visibleFrameRect.left && rightEdgeX <= visibleFrameRect.right) {
-                        if (isOutlinePalleted != 0) {
-                            *destPtr = outlineBlendTable[*destPtr];
-                        } else {
-                            *destPtr = outlineColor;
-                        }
-                    }
-                }
-            }
-
-            destPtr += destStep;
-        }
-
-        for (int x = 0; x < frameWidth; x++) {
-            if (x < visibleFrameRect.left || x > visibleFrameRect.right) {
-                continue;
-            }
-
-            bool cycle = true;
-            Color columnOutlineColor = color;
-            unsigned char* columnDestPtr = dest + x;
-            unsigned char* columnSrcPtr = src + x;
-            for (int y = 0; y < frameHeight; y++) {
-                if (animatedColorBandHeight != 0) {
-                    if (y % animatedColorBandHeight == 0) {
-                        columnOutlineColor = static_cast<Color>((columnOutlineColor + 1) & COLOR_LAST);
-                    }
-
-                    if (columnOutlineColor > color + animatedColorCount - 1) {
-                        columnOutlineColor = color;
-                    }
-                }
-
-                bool yVisible = y >= visibleFrameRect.top && y <= visibleFrameRect.bottom;
-                Color* columnOutlineBlendTable = isOutlinePalleted != 0
-                    ? blendTable + (grayTable[columnOutlineColor] << 8)
-                    : nullptr;
-                if (*columnSrcPtr != 0 && cycle) {
-                    if (yVisible) {
-                        unsigned char* aboveDestPtr = columnDestPtr - gObjectsWindowPitch;
-                        if (aboveDestPtr >= gObjectsWindowBuffer) {
-                            if (isOutlinePalleted) {
-                                *aboveDestPtr = columnOutlineBlendTable[*aboveDestPtr];
-                            } else {
-                                *aboveDestPtr = columnOutlineColor;
-                            }
-                        }
-                    }
-                    cycle = false;
-                } else if (*columnSrcPtr == 0 && !cycle) {
-                    if (yVisible) {
-                        if (isOutlinePalleted) {
-                            *columnDestPtr = columnOutlineBlendTable[*columnDestPtr];
-                        } else {
-                            *columnDestPtr = columnOutlineColor;
-                        }
-                    }
-                    cycle = true;
-                }
-
-                columnDestPtr += gObjectsWindowPitch;
-                columnSrcPtr += frameWidth;
-            }
-
-            if (columnSrcPtr[-frameWidth] != 0) {
-                int bottomOutlineDestOffset = columnDestPtr - gObjectsWindowBuffer;
-                if (bottomOutlineDestOffset >= 0 && bottomOutlineDestOffset < gObjectsWindowBufferSize) {
-                    int y = frameHeight - 1;
-                    if (y >= visibleFrameRect.top && y <= visibleFrameRect.bottom) {
-                        if (isOutlinePalleted) {
-                            Color* columnOutlineBlendTable = blendTable + (grayTable[columnOutlineColor] << 8);
-                            *columnDestPtr = columnOutlineBlendTable[*columnDestPtr];
-                        } else {
-                            *columnDestPtr = columnOutlineColor;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    artUnlock(cacheEntry);
-}
 
 // 0x48F1B0 obj_render_object
-static void _obj_render_object(Object* object, Rect* rect, int light)
-{
-    const FrmId frmId = FrmId(object);
-    ObjectType type = frmId.objectType();
-    if (artIsObjectTypeHidden(type)) {
-        return;
-    }
 
-    CacheEntry* cacheEntry;
-    Art* art = artLock(frmId, &cacheEntry);
-    if (art == nullptr) {
-        return;
-    }
-
-    int frameWidth = artGetWidth(art, object->frame, object->rotation);
-    int frameHeight = artGetHeight(art, object->frame, object->rotation);
-
-    Rect objectRect;
-    if (object->tile == -1) {
-        objectRect.left = object->sx;
-        objectRect.top = object->sy;
-        objectRect.right = object->sx + frameWidth - 1;
-        objectRect.bottom = object->sy + frameHeight - 1;
-    } else {
-        int objectScreenX;
-        int objectScreenY;
-        tileToScreenXY(object->tile, &objectScreenX, &objectScreenY);
-        objectScreenX += 16;
-        objectScreenY += 8;
-
-        objectScreenX += art->xOffsets[object->rotation];
-        objectScreenY += art->yOffsets[object->rotation];
-
-        objectScreenX += object->x;
-        objectScreenY += object->y;
-
-        objectRect.left = objectScreenX - frameWidth / 2;
-        objectRect.top = objectScreenY - (frameHeight - 1);
-        objectRect.right = objectRect.left + frameWidth - 1;
-        objectRect.bottom = objectScreenY;
-
-        object->sx = objectRect.left;
-        object->sy = objectRect.top;
-    }
-
-    if (rectIntersection(&objectRect, rect, &objectRect) != 0) {
-        artUnlock(cacheEntry);
-        return;
-    }
-
-    unsigned char* src = artGetFrameData(art, object->frame, object->rotation);
-    unsigned char* src2 = src;
-    int v50 = objectRect.left - object->sx;
-    int v49 = objectRect.top - object->sy;
-    src += frameWidth * v49 + v50;
-    int objectWidth = objectRect.right - objectRect.left + 1;
-    int objectHeight = objectRect.bottom - objectRect.top + 1;
-
-    if (type == OBJ_TYPE_INTERFACE) {
-        blitBufferToBufferTrans(src,
-            objectWidth,
-            objectHeight,
-            frameWidth,
-            gObjectsWindowBuffer + gObjectsWindowPitch * objectRect.top + objectRect.left,
-            gObjectsWindowPitch);
-        artUnlock(cacheEntry);
-        return;
-    }
-
-    if (type == OBJ_TYPE_SCENERY || type == OBJ_TYPE_WALL) {
-        if ((gDude->flags & OBJECT_HIDDEN) == OBJECT_NONE && (object->flags & OBJECT_FLAG_0xFC000) == OBJECT_NONE) {
-            Proto* proto;
-            protoGetProto(object, &proto);
-
-            bool v17;
-            ProtoExtendedFlags extendedFlags = proto->critter.extendedFlags;
-            if ((extendedFlags & PROTO_EXT_FLAG_HIDDEN) != PROTO_EXT_FLAG_NONE || (extendedFlags & PROTO_EXT_FLAG_WEST_CORNER) != PROTO_EXT_FLAG_NONE) {
-                // TODO: Verify this visibility branch against the original logic.
-                v17 = tileIsInFrontOf(object->tile, gDude->tile);
-                if (!v17
-                    || !tileIsToRightOf(object->tile, gDude->tile)
-                    || (object->flags & OBJECT_WALL_TRANS_END) == OBJECT_NONE) {
-                    // nothing
-                } else {
-                    v17 = false;
-                }
-            } else if ((extendedFlags & PROTO_EXT_FLAG_NORTH_CORNER) != PROTO_EXT_FLAG_NONE) {
-                // NOTE: Original code used bitwise OR here; logical OR is clearer.
-                v17 = tileIsInFrontOf(object->tile, gDude->tile)
-                    || tileIsToRightOf(gDude->tile, object->tile);
-            } else if ((extendedFlags & PROTO_EXT_FLAG_SOUTH_CORNER) != PROTO_EXT_FLAG_NONE) {
-                v17 = tileIsInFrontOf(object->tile, gDude->tile)
-                    && tileIsToRightOf(gDude->tile, object->tile);
-            } else {
-                v17 = tileIsToRightOf(gDude->tile, object->tile);
-                if (v17
-                    && tileIsInFrontOf(gDude->tile, object->tile)
-                    && (object->flags & OBJECT_WALL_TRANS_END) != OBJECT_NONE) {
-                    v17 = 0;
-                }
-            }
-
-            if (v17) {
-                CacheEntry* eggHandle;
-                Art* egg = artLock(FrmId(gEgg), &eggHandle);
-                if (egg == nullptr) {
-                    return;
-                }
-
-                int eggWidth;
-                int eggHeight;
-                artGetSize(egg, 0, ROTATION_NE, &eggWidth, &eggHeight);
-
-                int eggScreenX;
-                int eggScreenY;
-                tileToScreenXY(gEgg->tile, &eggScreenX, &eggScreenY);
-                eggScreenX += 16;
-                eggScreenY += 8;
-
-                eggScreenX += egg->xOffsets[0];
-                eggScreenY += egg->yOffsets[0];
-
-                eggScreenX += gEgg->x;
-                eggScreenY += gEgg->y;
-
-                Rect eggRect;
-                eggRect.left = eggScreenX - eggWidth / 2;
-                eggRect.top = eggScreenY - (eggHeight - 1);
-                eggRect.right = eggRect.left + eggWidth - 1;
-                eggRect.bottom = eggScreenY;
-
-                gEgg->sx = eggRect.left;
-                gEgg->sy = eggRect.top;
-
-                Rect updatedEggRect;
-                if (rectIntersection(&eggRect, &objectRect, &updatedEggRect) == 0) {
-                    Rect rects[4];
-
-                    rects[0].left = objectRect.left;
-                    rects[0].top = objectRect.top;
-                    rects[0].right = objectRect.right;
-                    rects[0].bottom = updatedEggRect.top - 1;
-
-                    rects[1].left = objectRect.left;
-                    rects[1].top = updatedEggRect.top;
-                    rects[1].right = updatedEggRect.left - 1;
-                    rects[1].bottom = updatedEggRect.bottom;
-
-                    rects[2].left = updatedEggRect.right + 1;
-                    rects[2].top = updatedEggRect.top;
-                    rects[2].right = objectRect.right;
-                    rects[2].bottom = updatedEggRect.bottom;
-
-                    rects[3].left = objectRect.left;
-                    rects[3].top = updatedEggRect.bottom + 1;
-                    rects[3].right = objectRect.right;
-                    rects[3].bottom = objectRect.bottom;
-
-                    for (int i = 0; i < 4; i++) {
-                        Rect* v21 = &(rects[i]);
-                        if (v21->left <= v21->right && v21->top <= v21->bottom) {
-                            unsigned char* sp = src + frameWidth * (v21->top - objectRect.top) + (v21->left - objectRect.left);
-                            _dark_trans_buf_to_buf(sp, v21->right - v21->left + 1, v21->bottom - v21->top + 1, frameWidth, gObjectsWindowBuffer, v21->left, v21->top, gObjectsWindowPitch, light);
-                        }
-                    }
-
-                    unsigned char* mask = artGetFrameData(egg);
-                    _intensity_mask_buf_to_buf(
-                        src + frameWidth * (updatedEggRect.top - objectRect.top) + (updatedEggRect.left - objectRect.left),
-                        updatedEggRect.right - updatedEggRect.left + 1,
-                        updatedEggRect.bottom - updatedEggRect.top + 1,
-                        frameWidth,
-                        gObjectsWindowBuffer + gObjectsWindowPitch * updatedEggRect.top + updatedEggRect.left,
-                        gObjectsWindowPitch,
-                        mask + eggWidth * (updatedEggRect.top - eggRect.top) + (updatedEggRect.left - eggRect.left),
-                        eggWidth,
-                        light);
-                    artUnlock(eggHandle);
-                    artUnlock(cacheEntry);
-                    return;
-                }
-
-                artUnlock(eggHandle);
-            }
-        }
-    }
-
-    switch (object->flags & OBJECT_FLAG_0xFC000) {
-    case OBJECT_TRANS_RED:
-        _dark_translucent_trans_buf_to_buf(src, objectWidth, objectHeight, frameWidth, gObjectsWindowBuffer, objectRect.left, objectRect.top, gObjectsWindowPitch, light, _redBlendTable, _commonGrayTable);
-        break;
-    case OBJECT_TRANS_WALL:
-        _dark_translucent_trans_buf_to_buf(src, objectWidth, objectHeight, frameWidth, gObjectsWindowBuffer, objectRect.left, objectRect.top, gObjectsWindowPitch, 0x10000, _wallBlendTable, _commonGrayTable);
-        break;
-    case OBJECT_TRANS_GLASS:
-        _dark_translucent_trans_buf_to_buf(src, objectWidth, objectHeight, frameWidth, gObjectsWindowBuffer, objectRect.left, objectRect.top, gObjectsWindowPitch, light, _glassBlendTable, _glassGrayTable);
-        break;
-    case OBJECT_TRANS_STEAM:
-        _dark_translucent_trans_buf_to_buf(src, objectWidth, objectHeight, frameWidth, gObjectsWindowBuffer, objectRect.left, objectRect.top, gObjectsWindowPitch, light, _steamBlendTable, _commonGrayTable);
-        break;
-    case OBJECT_TRANS_ENERGY:
-        _dark_translucent_trans_buf_to_buf(src, objectWidth, objectHeight, frameWidth, gObjectsWindowBuffer, objectRect.left, objectRect.top, gObjectsWindowPitch, light, _energyBlendTable, _commonGrayTable);
-        break;
-    default:
-        _dark_trans_buf_to_buf(src, objectWidth, objectHeight, frameWidth, gObjectsWindowBuffer, objectRect.left, objectRect.top, gObjectsWindowPitch, light);
-        break;
-    }
-
-    artUnlock(cacheEntry);
-}
 
 // Updates fid according to current violence level.
 //
@@ -5376,6 +4827,206 @@ int objectCreateWithFrmIdProtoId(UniqueObject& obj, const FrmId& frmId, const Pr
     int rc = objectCreateWithFrmIdProtoId(&raw, frmId, protoId);
     if (rc != -1) obj.reset(raw);
     return rc;
+}
+
+
+
+int objectReattach(Object* obj, int tile, MapElevation elevation)
+{
+    if (obj == nullptr) {
+        return -1;
+    }
+
+    ObjectListNode* node;
+    ObjectListNode* previousNode;
+    if (objectGetListNode(obj, &node, &previousNode) != 0) {
+        return _obj_connect(obj, tile, elevation, nullptr);
+    }
+
+    return objectSetLocation(obj, tile, elevation, nullptr);
+}
+
+Object* objectFindByNetId(int netId)
+{
+    if (netId <= 0) {
+        return nullptr;
+    }
+    Object* obj = objectFindFirst();
+    while (obj != nullptr) {
+        if (obj->netId == netId) {
+            return obj;
+        }
+        obj = objectFindNext();
+    }
+
+    return nullptr;
+}
+
+int _obj_save_player_actor(File* stream, Object* actor)
+{
+    if (actor == nullptr) {
+        return -1;
+    }
+
+    int savedSid = actor->sid;
+    ObjectFlags savedFlags = actor->flags;
+
+    actor->flags &= ~OBJECT_NO_SAVE;
+    actor->sid = -1;
+
+    int rc = _obj_save_obj(stream, actor);
+
+    actor->sid = savedSid;
+    actor->flags = savedFlags;
+
+    return rc;
+}
+
+void objectApplyWireFlags(Object* obj, unsigned int wireFlags)
+{
+    if (obj == nullptr) {
+        return;
+    }
+
+    const unsigned int kLocalLifecycleFlags = OBJECT_NO_REMOVE | OBJECT_NO_SAVE;
+    obj->flags = static_cast<ObjectFlags>((wireFlags & ~kLocalLifecycleFlags) | (obj->flags & kLocalLifecycleFlags));
+}
+
+int _obj_load_player_actor(File* stream, Object** actorPtr)
+{
+    Object* obj = nullptr;
+    if (_obj_load_obj(stream, &obj, MapElevation(-1), nullptr) != 0 || obj == nullptr) {
+        if (actorPtr != nullptr) {
+            *actorPtr = nullptr;
+        }
+        return -1;
+    }
+
+    obj->flags &= ~OBJECT_NO_REMOVE;
+    obj->flags |= OBJECT_NO_SAVE;
+
+    // ⚠ _obj_load_obj calls objectAllocate, NOT objectListNodeCreate: it hands
+    // back a bare Object* that belongs to NO object list. Every list-aware
+    // primitive fails CLOSED on such an object — objectSetLocation returns -1 at
+    // its objectGetListNode call and does nothing at all, silently — so the actor
+    // would render nowhere, never appear in the objectFindFirst walk (so the
+    // decoder's netId map never learns it and every MOVE addressed to it is
+    // dropped), and be invisible to the whole engine. Give it a node first, the
+    // way objectCreateWithFidPid does: insert at tile -1 (the "not placed yet"
+    // head list), then let objectSetLocation do the real placement with its
+    // lighting/connect work.
+    ObjectListNode* node;
+    if (objectListNodeCreate(&node) == -1) {
+        if (actorPtr != nullptr) {
+            *actorPtr = nullptr;
+        }
+        return -1;
+    }
+
+    int tile = obj->tile;
+    MapElevation elevation = obj->elevation;
+
+    node->obj = obj;
+    obj->tile = -1;
+    _obj_insert(node);
+
+    objectSetLocation(obj, tile, elevation, nullptr);
+    objectSetRotation(obj, obj->rotation, nullptr);
+
+    if (actorPtr != nullptr) {
+        *actorPtr = obj;
+    }
+
+    return 0;
+}
+
+int objectNextNetId()
+{
+    return gNextNetId++;
+}
+
+int objectGetNextNetId()
+{
+    return gNextNetId;
+}
+
+void objectSetNextNetId(int netId)
+{
+    gNextNetId = netId;
+}
+
+static void objectAssignInventoryNetIds(Object* owner)
+{
+    Inventory* inv = &(owner->data.inventory);
+    for (int i = 0; i < inv->length; ++i) {
+        Object* item = inv->items[i].item;
+        item->netId = objectNextNetId();
+        objectAssignInventoryNetIds(item);
+    }
+}
+
+static void objectZeroInventoryNetIds(Object* owner)
+{
+    Inventory* inv = &(owner->data.inventory);
+    for (int i = 0; i < inv->length; ++i) {
+        Object* item = inv->items[i].item;
+        item->netId = 0;
+        objectZeroInventoryNetIds(item);
+    }
+}
+
+void objectAssignAllNetIds()
+{
+    objectSetNextNetId(1);
+
+    // Player actors are numbered FIRST, in registry slot order, ahead of the
+    // tile walk (MP_PROPOSAL.md Ch 5.1). With nothing registered this is exactly
+    // the old "gDude then the walk" shape — playerActorCount() is 1 and slot 0
+    // resolves to gDude.
+    //
+    // ⚠ Slot k does NOT get netId k+1: each actor's inventory is numbered
+    // immediately after it. Never infer an actor's netId from its slot — read
+    // the roster (EVENT_PLAYER_ROSTER), which is re-announced after every
+    // baseline for exactly this reason.
+    for (int slot = 0; slot < playerActorCount(); slot++) {
+        Object* actor = playerActorAt(slot);
+        if (actor != nullptr) {
+            actor->netId = objectNextNetId();
+            objectAssignInventoryNetIds(actor);
+        }
+    }
+
+    Object* obj = objectFindFirst();
+    while (obj != nullptr) {
+        // Domain alignment (CLIENT_JOIN_DESIGN.md §C): the netId walk, the join
+        // blob (objectSaveAll, object.cc:674), and the delta layer (objectIsSyncable,
+        // object_delta.cc) must number the SAME object set, or a slot mismatch
+        // shifts every netId after it (the client cannot then reproduce the walk).
+        // OBJECT_NO_SAVE objects (cursors, the egg) are absent from the blob AND
+        // excluded from deltas, so they take no netId slot. Player actors are
+        // NO_SAVE but ARE primary actors: numbered first, above, and skipped here.
+        // Recruited party members are ALSO NO_SAVE but ARE in the sync domain — the
+        // join blob rides them in the map body under a prep bracket (mapSaveToStream)
+        // and objectIsSyncable tracks their deltas, so they must take one inline slot
+        // each here too, in the SAME tile-walk order the blob wrote them.
+        if (!playerActorIs(obj) && ((obj->flags & OBJECT_NO_SAVE) == 0 || objectIsPartyMember(obj))) {
+            obj->netId = objectNextNetId();
+            objectAssignInventoryNetIds(obj);
+        } else if (!playerActorIs(obj)) {
+            // Skipped NO_SAVE object: zero its netId so exactly the syncable set
+            // carries a nonzero netId after the walk. A NO_SAVE object that
+            // SURVIVES a rebaseline (e.g. gEgg, which follows the dude across
+            // maps) would otherwise retain a stale netId that could collide with
+            // a syncable object's freshly-renumbered value (1..N) — the wire
+            // would then LIE about which object a delta/move addresses. netId 0 =
+            // "no object" (presenter_network.cc:97), so such an object's lifecycle
+            // events are harmlessly skipped by the decoder. NO_SAVE objects that
+            // spawn LATER still get a fresh wire netId at creation (object.cc:761).
+            obj->netId = 0;
+            objectZeroInventoryNetIds(obj);
+        }
+        obj = objectFindNext();
+    }
 }
 
 } // namespace fallout

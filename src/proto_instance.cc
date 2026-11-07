@@ -1,3 +1,9 @@
+#include "combat_ap.h"
+#include "server_players.h"
+#include "object_delta.h" // objectDeltaNotePresentedFrame — suppress door/container frame double-stream
+#include "pres_record.h" // presRecord* — record the door slide as a presentation sequence
+#include "presenter.h"
+#include "server_loop.h"
 #include "proto_instance.h"
 
 #include <assert.h>
@@ -41,6 +47,15 @@
 #include "worldmap.h"
 
 namespace fallout {
+
+static void presenterConsoleMessageBridge(const char* string);
+
+void _obj_arm_explosive(Object* explosive, int seconds);
+
+static void doorPresentSlide(Object* door, bool opening, int actorNetId);
+
+void* protoInstanceDoorCloseCallbackPtr();
+
 
 static bool objectGetInvenSlot(Object* critter, Object* item, InvenSlot* slot);
 static int _obj_remove_from_inven(Object* critter, Object* item, bool runInvenWieldHook = true);
@@ -198,7 +213,11 @@ int objectSetScript(Object* obj, ScriptType scriptType, int scriptIndex)
 // 0x49AC3C
 int objectLookAt(Object* critter, Object* target)
 {
-    return objectLookAtFunc(critter, target, displayMonitorAddMessage);
+    // Address the description to whoever looked (see presenterConsoleMessageBridge).
+    // netId 0 — single player, a scripted critter, an actor with no wire identity —
+    // means broadcast, which is the pre-existing behavior verbatim.
+    PresenterNarrationScope narration(critter != nullptr ? critter->netId : 0);
+    return objectLookAtFunc(critter, target, presenterConsoleMessageBridge);
 }
 
 // 0x49AC4C
@@ -253,7 +272,10 @@ int objectLookAtFunc(Object* critter, Object* target, void (*fn)(const char* str
 // 0x49AD78
 int objectExamine(Object* critter, Object* target)
 {
-    return objectExamineFunc(critter, target, displayMonitorAddMessage);
+    // Same as objectLookAt: the examine text, including the Awareness HP/weapon line,
+    // belongs to the player who examined and to nobody else.
+    PresenterNarrationScope narration(critter != nullptr ? critter->netId : 0);
+    return objectExamineFunc(critter, target, presenterConsoleMessageBridge);
 }
 
 // Performs examine (reading description) action and passes resulting text
@@ -632,8 +654,8 @@ int objectPickup(Object* critter, Object* item)
         if (rc == 0) {
             Rect rect;
             _obj_disconnect(item, &rect);
-            tileWindowRefreshRect(&rect, item->elevation);
-        } else if (critter != gDude) {
+            presenter()->worldInvalidateRect(&rect, item->elevation);
+        } else if (!playerActorIs(critter)) {
             // SFALL: Fix for the incorrect message being displayed when the NPC
             // cannot pick up an item due to not enough space in the inventory
             // (the player's one).
@@ -653,7 +675,7 @@ int objectPickup(Object* critter, Object* item)
             // You cannot pick up that item. You are at your maximum weight capacity.
             messageListItem.num = 905;
             if (messageListGetItem(&gProtoMessageList, &messageListItem)) {
-                displayMonitorAddMessage(messageListItem.text);
+                presenter()->consoleMessage(messageListItem.text);
             }
         }
     }
@@ -727,11 +749,11 @@ static int _obj_remove_from_inven(Object* critter, Object* item, bool runInvenWi
     int rc = itemRemove(critter, item, 1);
 
     if (appearanceUpdateType >= 2) {
-        tileWindowRefreshRect(&updatedRect, critter->elevation);
+        presenter()->worldInvalidateRect(&updatedRect, critter->elevation);
     }
 
     if (appearanceUpdateType <= 2 && critter == gDude) {
-        interfaceUpdateItems(false, INTERFACE_ITEM_ACTION_DEFAULT, INTERFACE_ITEM_ACTION_DEFAULT);
+        presenter()->hudItems(false, INTERFACE_ITEM_ACTION_DEFAULT, INTERFACE_ITEM_ACTION_DEFAULT);
     }
 
     return rc;
@@ -792,7 +814,7 @@ int objectDrop(Object* invenObj, Object* itemObj)
 
         Rect updatedRect;
         _obj_connect(itemObj, owner->tile, owner->elevation, &updatedRect);
-        tileWindowRefreshRect(&updatedRect, owner->elevation);
+        presenter()->worldInvalidateRect(&updatedRect, owner->elevation);
     }
 
     return 0;
@@ -819,7 +841,7 @@ int objectDestroy(Object* obj)
     objectDestroy(obj, &rect);
 
     if (owner == nullptr) {
-        tileWindowRefreshRect(&rect, elev);
+        presenter()->worldInvalidateRect(&rect, elev);
     }
 
     return 0;
@@ -844,7 +866,7 @@ static UseItemResultCode _obj_use_book(Object* book)
         // You cannot do that in combat.
         messageListItem.num = 902;
         if (messageListGetItem(&gProtoMessageList, &messageListItem)) {
-            displayMonitorAddMessage(messageListItem.text);
+            presenter()->consoleMessage(messageListItem.text);
         }
 
         return USE_ITEM_RESULT_OK;
@@ -872,24 +894,26 @@ static UseItemResultCode _obj_use_book(Object* book)
         }
     }
 
-    paletteFadeTo(gPaletteBlack);
+    // Reading a book is the reader's hour, not everyone's: this runs inside the acting
+    // player's ServerActorScope, so gDude IS whoever opened the book.
+    presenter()->screenFadeOut(gDude != nullptr ? gDude->netId : 0);
 
     int intelligence = critterGetStat(gDude, STAT_INTELLIGENCE);
     gameTimeAddSeconds(3600 * (11 - intelligence));
 
     scriptsExecMapUpdateProc();
 
-    paletteFadeTo(_cmap);
+    presenter()->screenFadeIn(gDude != nullptr ? gDude->netId : 0);
 
     // You read the book.
     messageListItem.num = 800;
     if (messageListGetItem(&gProtoMessageList, &messageListItem)) {
-        displayMonitorAddMessage(messageListItem.text);
+        presenter()->consoleMessage(messageListItem.text);
     }
 
     messageListItem.num = messageId;
     if (messageListGetItem(&gProtoMessageList, &messageListItem)) {
-        displayMonitorAddMessage(messageListItem.text);
+        presenter()->consoleMessage(messageListItem.text);
     }
 
     return USE_ITEM_RESULT_REMOVE;
@@ -911,7 +935,7 @@ static UseItemResultCode _obj_use_flare(Object* critter, Object* flare)
             // The flare is already lit.
             messageListItem.num = 588;
             if (messageListGetItem(&gProtoMessageList, &messageListItem)) {
-                displayMonitorAddMessage(messageListItem.text);
+                presenter()->consoleMessage(messageListItem.text);
             }
         }
     } else {
@@ -934,7 +958,7 @@ static UseItemResultCode _obj_use_flare(Object* critter, Object* flare)
             // You light the flare.
             messageListItem.num = 587;
             if (messageListGetItem(&gProtoMessageList, &messageListItem)) {
-                displayMonitorAddMessage(messageListItem.text);
+                presenter()->consoleMessage(messageListItem.text);
             }
         }
 
@@ -982,49 +1006,12 @@ static UseItemResultCode _obj_use_explosive(Object* explosive)
         // The timer is already ticking.
         messageListItem.num = 590;
         if (messageListGetItem(&gProtoMessageList, &messageListItem)) {
-            displayMonitorAddMessage(messageListItem.text);
+            presenter()->consoleMessage(messageListItem.text);
         }
     } else {
         int seconds = inventorySetTimer(explosive);
         if (seconds != -1) {
-            // You set the timer.
-            messageListItem.num = 589;
-            if (messageListGetItem(&gProtoMessageList, &messageListItem)) {
-                displayMonitorAddMessage(messageListItem.text);
-            }
-
-            // SFALL
-            ProtoId explosiveProtoId = explosive;
-            explosiveActivate(explosiveProtoId);
-            explosive->pid = explosiveProtoId.pid();
-
-            int delay = 10 * seconds;
-
-            int roll;
-            if (perkHasRank(gDude, PERK_DEMOLITION_EXPERT)) {
-                roll = ROLL_SUCCESS;
-            } else {
-                roll = skillRoll(gDude, SKILL_TRAPS, 0, nullptr);
-            }
-
-            EventType eventType;
-            switch (roll) {
-            case ROLL_CRITICAL_FAILURE:
-                delay = 0;
-                eventType = EVENT_TYPE_EXPLOSION_FAILURE;
-                break;
-            case ROLL_FAILURE:
-                eventType = EVENT_TYPE_EXPLOSION_FAILURE;
-                delay /= 2;
-                break;
-            default:
-                eventType = EVENT_TYPE_EXPLOSION;
-                break;
-            }
-
-            if (scriptHooks_ExplosiveTimer(explosive, 10 * seconds, eventType) == -1) {
-                queueAddEvent(delay, explosive, nullptr, eventType);
-            }
+            _obj_arm_explosive(explosive, seconds);
         }
     }
 
@@ -1085,7 +1072,7 @@ static UseItemResultCode _obj_use_power_on_car(Object* item)
     }
 
     char* text = getmsg(&gProtoMessageList, &messageListItem, messageNum);
-    displayMonitorAddMessage(text);
+    presenter()->consoleMessage(text);
 
     return rc;
 }
@@ -1172,7 +1159,7 @@ UseItemResultCode objectUseItemInternal(Object* critter, Object* item)
         // "That does nothing"
         messageListItem.num = 582;
         if (messageListGetItem(&gProtoMessageList, &messageListItem)) {
-            displayMonitorAddMessage(messageListItem.text);
+            presenter()->consoleMessage(messageListItem.text);
         }
 
         rc = USE_ITEM_RESULT_ERROR;
@@ -1245,7 +1232,7 @@ UseItemResultCode objectUseItem(Object* userObj, Object* item)
                         rightItemAction = INTERFACE_ITEM_ACTION_DEFAULT;
                     }
                 }
-                interfaceUpdateItems(false, leftItemAction, rightItemAction);
+                presenter()->hudItems(false, leftItemAction, rightItemAction);
             }
         }
 
@@ -1254,7 +1241,7 @@ UseItemResultCode objectUseItem(Object* userObj, Object* item)
         } else if (root != nullptr) {
             Rect updatedRect;
             _obj_connect(item, root->tile, root->elevation, &updatedRect);
-            tileWindowRefreshRect(&updatedRect, root->elevation);
+            presenter()->worldInvalidateRect(&updatedRect, root->elevation);
             _protinstTestDroppedExplosive(item);
         }
 
@@ -1280,7 +1267,7 @@ static UseItemResultCode _protinst_default_use_item(Object* user, Object* target
                 // That does nothing
                 messageListItem.num = 582;
                 if (messageListGetItem(&gProtoMessageList, &messageListItem)) {
-                    displayMonitorAddMessage(messageListItem.text);
+                    presenter()->consoleMessage(messageListItem.text);
                 }
             }
             return USE_ITEM_RESULT_ERROR;
@@ -1293,7 +1280,7 @@ static UseItemResultCode _protinst_default_use_item(Object* user, Object* target
             // 586: That won't work on the dead.
             messageListItem.num = 583 + randomBetween(0, 3);
             if (messageListGetItem(&gProtoMessageList, &messageListItem)) {
-                displayMonitorAddMessage(messageListItem.text);
+                presenter()->consoleMessage(messageListItem.text);
             }
             return USE_ITEM_RESULT_ERROR;
         }
@@ -1312,11 +1299,11 @@ static UseItemResultCode _protinst_default_use_item(Object* user, Object* target
             }
 
             snprintf(formattedText, sizeof(formattedText), messageListItem.text, objectGetName(item), objectGetName(targetObj));
-            displayMonitorAddMessage(formattedText);
+            presenter()->consoleMessage(formattedText);
         }
 
         if (targetObj == gDude) {
-            interfaceRenderHitPoints(true);
+            presenter()->hudHitPoints(true);
         }
 
         return rc;
@@ -1347,7 +1334,7 @@ static UseItemResultCode _protinst_default_use_item(Object* user, Object* target
     messageListItem.num = 582;
     if (messageListGetItem(&gProtoMessageList, &messageListItem)) {
         snprintf(formattedText, sizeof(formattedText), "%s", messageListItem.text);
-        displayMonitorAddMessage(formattedText);
+        presenter()->consoleMessage(formattedText);
     }
     return USE_ITEM_RESULT_ERROR;
 }
@@ -1440,7 +1427,7 @@ UseItemResultCode objectUseItemOnInternal(Object* critter, Object* targetObj, Ob
         messageListItem.num = 902;
         if (critter == gDude) {
             if (messageListGetItem(&gProtoMessageList, &messageListItem)) {
-                displayMonitorAddMessage(messageListItem.text);
+                presenter()->consoleMessage(messageListItem.text);
             }
         }
         return USE_ITEM_RESULT_ERROR;
@@ -1458,7 +1445,7 @@ UseItemResultCode objectUseItemOnInternal(Object* critter, Object* targetObj, Ob
     messageListItem.num = messageId;
     if (critter == gDude) {
         if (messageListGetItem(&gProtoMessageList, &messageListItem)) {
-            displayMonitorAddMessage(messageListItem.text);
+            presenter()->consoleMessage(messageListItem.text);
         }
     }
 
@@ -1496,7 +1483,7 @@ UseItemResultCode objectUseItemOn(Object* user, Object* targetObj, Object* item)
                     }
                 }
 
-                interfaceUpdateItems(false, leftItemAction, rightItemAction);
+                presenter()->hudItems(false, leftItemAction, rightItemAction);
             }
         }
 
@@ -1519,12 +1506,18 @@ int checkSceneryUseActionPointCost(Object* obj, Object* _)
         return 0;
     }
 
+    // Policy switch, combat_ap.h: charging off → using and looting world objects
+    // in combat is free and never refused. One of the three charge points.
+    if (!kCombatApChargeEnabled) {
+        return 0;
+    }
+
     int actionPoints = obj->data.critter.combat.ap;
     if (actionPoints >= 3) {
         obj->data.critter.combat.ap = actionPoints - 3;
 
         if (obj == gDude) {
-            interfaceRenderActionPoints(gDude->data.critter.combat.ap, _combat_free_move);
+            presenter()->hudActionPoints(gDude->data.critter.combat.ap, _combat_free_move);
         }
 
         return 0;
@@ -1534,9 +1527,14 @@ int checkSceneryUseActionPointCost(Object* obj, Object* _)
     // You don't have enough action points.
     messageListItem.num = 700;
 
-    if (obj == gDude) {
+    // Generalized from `obj == gDude` to "any player actor", and ADDRESSED to that
+    // actor. The old test silently gave an extra player no feedback at all in
+    // co-op (they are not gDude), which is the same class of bug as every other
+    // hardwired gDude comparison — see mp-actor-architecture. Addressing keeps it
+    // off everyone else's log: this is a refusal, so nothing happened.
+    if (playerActorIs(obj)) {
         if (messageListGetItem(&gProtoMessageList, &messageListItem)) {
-            displayMonitorAddMessage(messageListItem.text);
+            presenter()->consoleMessageFor(obj->netId, messageListItem.text);
         }
     }
 
@@ -1607,7 +1605,7 @@ int objectUse(Object* user, Object* targetObj)
             char formattedText[260];
             const char* name = objectGetName(targetObj);
             snprintf(formattedText, sizeof(formattedText), messageListItem.text, name);
-            displayMonitorAddMessage(formattedText);
+            presenter()->consoleMessage(formattedText);
         }
     }
 
@@ -1644,7 +1642,7 @@ static int useLadderDown(Object* user, Object* ladder)
             return -1;
         }
 
-        tileWindowRefreshRect(&updatedRect, gElevation);
+        presenter()->worldInvalidateRect(&updatedRect, gElevation);
     }
 
     return 0;
@@ -1678,7 +1676,7 @@ static int useLadderUp(Object* user, Object* ladder)
             return -1;
         }
 
-        tileWindowRefreshRect(&updatedRect, gElevation);
+        presenter()->worldInvalidateRect(&updatedRect, gElevation);
     }
 
     return 0;
@@ -1712,7 +1710,7 @@ static int useStairs(Object* user, Object* stairs)
             return -1;
         }
 
-        tileWindowRefreshRect(&updatedRect, gElevation);
+        presenter()->worldInvalidateRect(&updatedRect, gElevation);
     }
 
     return 0;
@@ -1742,7 +1740,7 @@ static int _check_door_state(Object* door, Object* obj2)
         }
 
         _obj_rebuild_all_light();
-        tileWindowRefresh();
+        presenter()->worldInvalidate();
 
         if (door->frame == 0) {
             return 0;
@@ -1769,7 +1767,7 @@ static int _check_door_state(Object* door, Object* obj2)
         objectSetFrame(door, 0, &temp);
         rectUnion(&dirty, &temp, &dirty);
 
-        tileWindowRefreshRect(&dirty, gElevation);
+        presenter()->worldInvalidateRect(&dirty, gElevation);
 
         artUnlock(artHandle);
         return 0;
@@ -1780,7 +1778,7 @@ static int _check_door_state(Object* door, Object* obj2)
         }
 
         _obj_rebuild_all_light();
-        tileWindowRefresh();
+        presenter()->worldInvalidate();
 
         CacheEntry* artHandle;
         Art* art = artLock(FrmId(door), &artHandle);
@@ -1809,7 +1807,7 @@ static int _check_door_state(Object* door, Object* obj2)
         objectSetFrame(door, frameCount - 1, &temp);
         rectUnion(&dirty, &temp, &dirty);
 
-        tileWindowRefreshRect(&dirty, gElevation);
+        presenter()->worldInvalidateRect(&dirty, gElevation);
 
         artUnlock(artHandle);
         return 0;
@@ -1821,7 +1819,7 @@ int objectUseDoor(Object* user, Object* door, bool animateOnly)
 {
     if (objectIsLocked(door)) {
         const char* sfx = sfxBuildOpenName(door, SCENERY_SOUND_EFFECT_LOCKED);
-        soundPlayFile(sfx);
+        presenter()->sfxPlay(sfx);
     }
 
     bool scriptOverrides = false;
@@ -1842,7 +1840,7 @@ int objectUseDoor(Object* user, Object* door, bool animateOnly)
             if (_obj_blocking_at(nullptr, door->tile, door->elevation) != nullptr) {
                 MessageListItem messageListItem;
                 char* text = getmsg(&gProtoMessageList, &messageListItem, 597);
-                displayMonitorAddMessage(text);
+                presenter()->consoleMessage(text);
                 return -1;
             }
             start = 1;
@@ -1860,33 +1858,58 @@ int objectUseDoor(Object* user, Object* door, bool animateOnly)
             step = 1;
         }
 
-        reg_anim_begin(ANIMATION_REQUEST_RESERVED);
-
-        for (int i = start; i != end; i += step) {
-            if (i != 0) {
-                if (!animateOnly) {
-                    animationRegisterCallback(door, door, (AnimationCallback*)_set_door_state_closed, -1);
+        if (serverLoopActive()) {
+            // Headless: the reg_anim completion callbacks below never fire
+            // (no animation drives them), so the door's open/closed state
+            // would silently never change. Apply the same outcome functions
+            // directly — mirrors actionExplode(animate=false) /
+            // _combat_apply_attack_results(animated=false). animateOnly keeps
+            // its legacy meaning (play the animation only, no logical flip);
+            // _check_door_state still re-syncs the frame from openFlags.
+            if (!animateOnly) {
+                if (door->frame != 0) {
+                    _set_door_state_closed(door, door);
+                } else {
+                    _set_door_state_open(door, door);
                 }
-
-                const char* sfx = sfxBuildOpenName(door, SCENERY_SOUND_EFFECT_CLOSED);
-                animationRegisterPlaySoundEffect(door, sfx, -1);
-
-                animationRegisterAnimateReversed(door, ANIM_STAND, 0);
-            } else {
-                if (!animateOnly) {
-                    animationRegisterCallback(door, door, (AnimationCallback*)_set_door_state_open, -1);
-                }
-
-                const char* sfx = sfxBuildOpenName(door, SCENERY_SOUND_EFFECT_OPEN);
-                animationRegisterPlaySoundEffect(door, sfx, -1);
-
-                animationRegisterAnimate(door, ANIM_STAND, 0);
             }
+            _check_door_state(door, door);
+            if (!animateOnly) {
+                // Present the door slide to viewers. The open/closed STATE rode
+                // objectDelta (flags), but the art FRAME does not, so without this
+                // cue the door snaps and critters warp through. step>0 = opening;
+                // door->frame is now the settled terminal frame. Base no-op.
+                doorPresentSlide(door, step > 0, user != nullptr ? user->netId : 0);
+            }
+        } else {
+            reg_anim_begin(ANIMATION_REQUEST_RESERVED);
+
+            for (int i = start; i != end; i += step) {
+                if (i != 0) {
+                    if (!animateOnly) {
+                        animationRegisterCallback(door, door, (AnimationCallback*)_set_door_state_closed, -1);
+                    }
+
+                    const char* sfx = sfxBuildOpenName(door, SCENERY_SOUND_EFFECT_CLOSED);
+                    animationRegisterPlaySoundEffect(door, sfx, -1);
+
+                    animationRegisterAnimateReversed(door, ANIM_STAND, 0);
+                } else {
+                    if (!animateOnly) {
+                        animationRegisterCallback(door, door, (AnimationCallback*)_set_door_state_open, -1);
+                    }
+
+                    const char* sfx = sfxBuildOpenName(door, SCENERY_SOUND_EFFECT_OPEN);
+                    animationRegisterPlaySoundEffect(door, sfx, -1);
+
+                    animationRegisterAnimate(door, ANIM_STAND, 0);
+                }
+            }
+
+            animationRegisterCallbackForced(door, door, (AnimationCallback*)_check_door_state, -1);
+
+            reg_anim_end();
         }
-
-        animationRegisterCallbackForced(door, door, (AnimationCallback*)_check_door_state, -1);
-
-        reg_anim_end();
     }
 
     return 0;
@@ -1910,7 +1933,7 @@ int objectUseContainer(Object* critter, Object* item)
 
     if (objectIsLocked(item)) {
         const char* sfx = sfxBuildOpenName(item, SCENERY_SOUND_EFFECT_LOCKED);
-        soundPlayFile(sfx);
+        presenter()->sfxPlay(sfx);
 
         if (critter == gDude) {
             MessageListItem messageListItem;
@@ -1920,7 +1943,7 @@ int objectUseContainer(Object* critter, Object* item)
                 return -1;
             }
 
-            displayMonitorAddMessage(messageListItem.text);
+            presenter()->consoleMessage(messageListItem.text);
         }
 
         return -1;
@@ -1938,6 +1961,61 @@ int objectUseContainer(Object* critter, Object* item)
 
     if (overriden) {
         return -1;
+    }
+
+    if (serverLoopActive()) {
+        bool opening = (item->frame == 0);
+        const char* sfx = sfxBuildOpenName(item, opening ? SCENERY_SOUND_EFFECT_OPEN : SCENERY_SOUND_EFFECT_CLOSED);
+
+        // ►►►► DELIBERATE VANILLA DIVERGENCE — THIS IS THE "CAR TRUNK DISAPPEARED" BUG.
+        // Vanilla assigns item->frame directly here, bypassing objectSetFrame — which
+        // would have REFUSED it (`if (frame >= framesPerDirection) return -1`,
+        // object.cc:1555). Most container art has 2 frames (closed/open) so frame 1 is
+        // fine. But `cartrunk.frm` has framesPerDirection == 1, so opening the car trunk
+        // ONCE sets frame=1, which is out of range, and an out-of-range frame renders
+        // NOTHING — the trunk becomes permanently invisible (and unclickable, its rect
+        // being derived from art it no longer has). frame is serialized, so the save
+        // carries the damage forever. Owner-hit: a visible car with no trunk, surviving
+        // reloads and map cycles, while every server-side field looked perfectly healthy.
+        //
+        // Fix: only advance to the open frame when the art actually HAS one. A 1-frame
+        // container just stays on frame 0 — it plays its sound and opens its inventory,
+        // it simply has no distinct "open" sprite to show, which is the truth about its
+        // art. Same class as [[frame-index-render-gotcha]] (the S5 corpse bug).
+        int frameCount = 1;
+        CacheEntry* frameArtHandle;
+        Art* frameArt = artLock(FrmId(item), &frameArtHandle);
+        if (frameArt != nullptr) {
+            frameCount = artGetFrameCount(frameArt);
+            artUnlock(frameArtHandle);
+        }
+        item->frame = (opening && frameCount > 1) ? 1 : 0;
+
+        presRecordSectionBegin();
+        reg_anim_begin(ANIMATION_REQUEST_RESERVED);
+        animationRegisterPlaySoundEffect(item, sfx, 0);
+        if (opening) {
+            animationRegisterAnimate(item, ANIM_STAND, 0);
+        } else {
+            animationRegisterAnimateReversed(item, ANIM_STAND, 0);
+        }
+        reg_anim_end();
+        presRecordSectionEnd();
+        presenter()->presSeq(presRecordData(), presRecordSize(), presRecordOpCount());
+        // The open/close slide above already streams this container's frame change;
+        // suppress the redundant OBJECT_DELTA_FRAME (would snap past the animation).
+        objectDeltaNotePresentedFrame(item);
+
+        if (critter == gDude) {
+            MessageListItem messageListItem;
+            messageListItem.num = opening ? 486 : 485;
+            if (messageListGetItem(&gProtoMessageList, &messageListItem)) {
+                char formattedText[260];
+                snprintf(formattedText, sizeof(formattedText), messageListItem.text, objectGetName(item));
+                presenter()->consoleMessage(formattedText);
+            }
+        }
+        return 0;
     }
 
     reg_anim_begin(ANIMATION_REQUEST_RESERVED);
@@ -1966,7 +2044,7 @@ int objectUseContainer(Object* critter, Object* item)
         char formattedText[260];
         const char* objectName = objectGetName(item);
         snprintf(formattedText, sizeof(formattedText), messageListItem.text, objectName);
-        displayMonitorAddMessage(formattedText);
+        presenter()->consoleMessage(formattedText);
     }
 
     return 0;
@@ -1980,7 +2058,7 @@ int objectUseSkillOn(Object* source, Object* target, Skill skill)
             MessageListItem messageListItem;
             messageListItem.num = 2001;
             if (messageListGetItem(&gMiscMessageList, &messageListItem)) {
-                displayMonitorAddMessage(messageListItem.text);
+                presenter()->consoleMessage(messageListItem.text);
             }
         }
         return -1;
@@ -2178,26 +2256,41 @@ static int objectOpenClose(Object* obj)
 
     objectUnjamLock(obj);
 
-    reg_anim_begin(ANIMATION_REQUEST_RESERVED);
-
-    if (obj->frame != 0) {
-        animationRegisterCallbackForced(obj, obj, (AnimationCallback*)_set_door_state_closed, -1);
-
-        const char* sfx = sfxBuildOpenName(obj, SCENERY_SOUND_EFFECT_CLOSED);
-        animationRegisterPlaySoundEffect(obj, sfx, -1);
-
-        animationRegisterAnimateReversed(obj, ANIM_STAND, 0);
+    if (serverLoopActive()) {
+        // Headless: apply the open/close outcome directly instead of via the
+        // reg_anim completion callbacks (same decouple as objectUseDoor).
+        bool opening = obj->frame == 0; // capture BEFORE the flip
+        if (obj->frame != 0) {
+            _set_door_state_closed(obj, obj);
+        } else {
+            _set_door_state_open(obj, obj);
+        }
+        _check_door_state(obj, obj);
+        // Present the slide to viewers (see objectUseDoor). No approaching user here
+        // (scripted / bump-open), so actorNetId = 0 → the slide plays on arrival.
+        doorPresentSlide(obj, opening, 0);
     } else {
-        animationRegisterCallbackForced(obj, obj, (AnimationCallback*)_set_door_state_open, -1);
+        reg_anim_begin(ANIMATION_REQUEST_RESERVED);
 
-        const char* sfx = sfxBuildOpenName(obj, SCENERY_SOUND_EFFECT_OPEN);
-        animationRegisterPlaySoundEffect(obj, sfx, -1);
-        animationRegisterAnimate(obj, ANIM_STAND, 0);
+        if (obj->frame != 0) {
+            animationRegisterCallbackForced(obj, obj, (AnimationCallback*)_set_door_state_closed, -1);
+
+            const char* sfx = sfxBuildOpenName(obj, SCENERY_SOUND_EFFECT_CLOSED);
+            animationRegisterPlaySoundEffect(obj, sfx, -1);
+
+            animationRegisterAnimateReversed(obj, ANIM_STAND, 0);
+        } else {
+            animationRegisterCallbackForced(obj, obj, (AnimationCallback*)_set_door_state_open, -1);
+
+            const char* sfx = sfxBuildOpenName(obj, SCENERY_SOUND_EFFECT_OPEN);
+            animationRegisterPlaySoundEffect(obj, sfx, -1);
+            animationRegisterAnimate(obj, ANIM_STAND, 0);
+        }
+
+        animationRegisterCallbackForced(obj, obj, (AnimationCallback*)_check_door_state, -1);
+
+        reg_anim_end();
     }
-
-    animationRegisterCallbackForced(obj, obj, (AnimationCallback*)_check_door_state, -1);
-
-    reg_anim_end();
 
     return 0;
 }
@@ -2353,7 +2446,7 @@ int objectAttemptPlacement(Object* obj, int tile, MapElevation elevation, int ra
         rectUnion(&updatedRect, &temp, &updatedRect);
 
         if (elevation == gElevation) {
-            tileWindowRefreshRect(&updatedRect, elevation);
+            presenter()->worldInvalidateRect(&updatedRect, elevation);
         }
     }
 
@@ -2396,6 +2489,81 @@ int objectAttemptPlacementPartyMember(Object* obj, int tile, MapElevation elevat
     objectSetLocation(obj, destinationTile, elevation, nullptr);
 
     return 0;
+}
+
+
+
+static void presenterConsoleMessageBridge(const char* string)
+{
+    presenter()->consoleMessageFor(presenterNarrationAddress(), string);
+}
+
+void _obj_arm_explosive(Object* explosive, int seconds)
+{
+    MessageListItem messageListItem;
+
+    // You set the timer.
+    messageListItem.num = 589;
+    if (messageListGetItem(&gProtoMessageList, &messageListItem)) {
+        presenter()->consoleMessage(messageListItem.text);
+    }
+
+    // SFALL
+    ProtoId explosiveProtoId(explosive);
+    explosiveActivate(explosiveProtoId);
+    explosive->pid = explosiveProtoId.pid();
+
+    int delay = 10 * seconds;
+
+    int roll;
+    if (perkHasRank(gDude, PERK_DEMOLITION_EXPERT)) {
+        roll = ROLL_SUCCESS;
+    } else {
+        roll = skillRoll(gDude, SKILL_TRAPS, 0, nullptr);
+    }
+
+    int eventType;
+    switch (roll) {
+    case ROLL_CRITICAL_FAILURE:
+        delay = 0;
+        eventType = EVENT_TYPE_EXPLOSION_FAILURE;
+        break;
+    case ROLL_FAILURE:
+        eventType = EVENT_TYPE_EXPLOSION_FAILURE;
+        delay /= 2;
+        break;
+    default:
+        eventType = EVENT_TYPE_EXPLOSION;
+        break;
+    }
+
+    queueAddEvent(delay, explosive, nullptr, static_cast<EventType>(eventType));
+}
+
+static void doorPresentSlide(Object* door, bool opening, int actorNetId)
+{
+    presRecordSectionBegin();
+    reg_anim_begin(ANIMATION_REQUEST_RESERVED);
+    if (opening) {
+        const char* sfx = sfxBuildOpenName(door, SCENERY_SOUND_EFFECT_OPEN);
+        animationRegisterPlaySoundEffect(door, sfx, -1);
+        animationRegisterAnimate(door, ANIM_STAND, 0);
+    } else {
+        const char* sfx = sfxBuildOpenName(door, SCENERY_SOUND_EFFECT_CLOSED);
+        animationRegisterPlaySoundEffect(door, sfx, -1);
+        animationRegisterAnimateReversed(door, ANIM_STAND, 0);
+    }
+    reg_anim_end();
+    presRecordSectionEnd();
+    presenter()->presSeq(presRecordData(), presRecordSize(), presRecordOpCount(), actorNetId);
+    // The slide above already streams this door's frame change; suppress the redundant
+    // OBJECT_DELTA_FRAME so a viewer doesn't snap past the animation.
+    objectDeltaNotePresentedFrame(door);
+}
+
+void* protoInstanceDoorCloseCallbackPtr()
+{
+    return (void*)(AnimationCallback*)_set_door_state_closed;
 }
 
 } // namespace fallout

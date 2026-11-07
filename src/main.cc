@@ -1,3 +1,42 @@
+#include <vector>
+#include "actions.h"
+#include "skilldex.h"
+#include "animation.h"
+#include "automap.h" // automapShow — the Motion Sensor opens OUR automap
+#include "barter_intent.h"
+#include "character_editor.h" // characterEditorShow — the creation screen, reused for co-op joins
+#include "character_transaction.h"
+#include "client_present.h"
+#include "client_dialog.h"
+#include "client_barter.h"
+#include "client_steal.h" // viewer half of a server-owned steal session
+#include "client_net.h"
+#include "client_say.h"
+#include "combat.h" // _combat_attack_this + combatSetViewerAttackHook (§3.b crosshair attack)
+#include "combat_intent.h"
+#include "command.h"
+#include "critter.h"
+#include "dbox.h" // showDialogBox — vanilla pipboy-in-combat refusal
+#include "dialog_intent.h"
+#include "elevator.h" // elevatorPickLevel — the co-op elevator panel
+#include "game_dialog.h"
+#include "input_replay.h"
+#include "interface.h" // weapon-slot hit-mode cycle / hand swap (viewer attack UX)
+#include "inventory.h" // inventoryOpen — viewer inventory screen (player-UI Slice 3)
+#include "item.h"
+#include "loot_highlight.h"
+#include "party_member.h"
+#include "perk.h"
+#include "pipboy.h"
+#include "proto_instance.h"
+#include "stat.h"
+#include "server_loop.h"
+#include "sim_clock.h"
+#include "skill.h"
+#include "sfall_config.h"
+#include "state_dump.h"
+#include "trait.h"
+#include "worldmap_ui.h"
 #include "main.h"
 
 #include <algorithm>
@@ -47,6 +86,43 @@
 
 namespace fallout {
 
+static int mainHeadlessProbe();
+
+static int mainClientViewer(const char* connectSpec);
+
+static constexpr unsigned int kViewerFadeBlackMaxMs = 6000;
+
+static unsigned int gViewerFadeBlackSinceMs = 0;
+
+static int gViewerPendingLootNetId = 0;
+
+static unsigned int gViewerPendingLootSince = 0;
+
+static const unsigned int kViewerLootApproachTimeoutMs = 16000;
+
+static int mainHeadlessProbe();
+
+static void viewerArmPendingLoot(ClientConnection& conn, int netId);
+
+static void viewerPollPendingLoot(ClientConnection& conn);
+
+static void viewerSendActionMenuVerb(ClientConnection& conn, int menuItem, Object* target);
+
+static void viewerSendPrimaryVerb(ClientConnection& conn, Object* target);
+
+static int viewerSkillModeForKey(int keyCode);
+
+static int viewerSkillModeForSkilldexRc(int rc);
+
+static int viewerSkillForMode(int mode);
+
+static void viewerEnterSkillMode(int mode);
+
+static bool viewerKeepRunning();
+
+static int mainClientViewer(const char* connectSpec);
+
+
 static bool falloutInit(int argc, char** argv);
 static int main_reset_system();
 static void main_exit_system();
@@ -93,6 +169,26 @@ int falloutMain(int argc, char** argv)
     }
 
     mainParseCommandLineArguments(argc, argv);
+    // Phase 0 headless probe (REWRITE_PLAN.md): boot straight into a map,
+    // tick the simulation, dump canonical state, exit. Bypasses movies,
+    // main menu and character selector entirely.
+    if (getenv("F2_HEADLESS_PROBE") != nullptr) {
+        int probeRc = mainHeadlessProbe();
+        main_exit_system();
+        autorunMutexClose();
+        return probeRc;
+    }
+
+    // STEP-4 live viewer (CLIENT_JOIN_DESIGN.md §A/§E): F2_CLIENT_CONNECT=host:port
+    // connects to a running f2_server, receives the binary join snapshot, becomes
+    // present on the server's map, and renders the live wire stream as a read-only
+    // viewer. Bypasses the menu/character selector like the headless probe.
+    if (const char* connectSpec = getenv("F2_CLIENT_CONNECT")) {
+        int viewerRc = mainClientViewer(connectSpec);
+        main_exit_system();
+        autorunMutexClose();
+        return viewerRc;
+    }
 
     // SFALL: Allow to skip intro movies
     int skipOpeningMovies = settings.ui.skip_opening_movies;
@@ -428,6 +524,11 @@ static void mainLoop()
 
         gameHandleKey(keyCode, false);
 
+        // LALT toggles the yellow highlight-lootables overlay (corpses,
+        // containers, ground items). Polled here so it works in solo and as the
+        // co-op viewer (both drive this loop).
+        lootHighlightUpdate();
+
         scriptsHandleRequests();
 
         mapHandleTransition();
@@ -701,6 +802,1738 @@ static int _mainDeathWordWrap(char* text, int width, short* beginnings, short* c
         }
     }
 
+    return 0;
+}
+
+
+
+static int mainHeadlessProbe()
+{
+    // Mark the whole probe run headless so modal UI drivers (e.g. the pipboy
+    // rest loop) skip window/render/real-time pacing on BOTH the legacy
+    // F2_PROBE_ACTIONS pump and the F2_SERVER_LOOP path.
+    headlessProbeSetActive(true);
+
+    const char* mapName = getenv("F2_PROBE_MAP");
+    if (mapName == nullptr) {
+        mapName = "artemple.map";
+    }
+
+    const char* ticksValue = getenv("F2_PROBE_TICKS");
+    int ticks = ticksValue != nullptr ? atoi(ticksValue) : 100;
+
+    const char* dumpPath = getenv("F2_PROBE_DUMP");
+    if (dumpPath == nullptr) {
+        dumpPath = "state_dump.txt";
+    }
+
+    const char* seedValue = getenv("F2_PROBE_SEED");
+    int seed = seedValue != nullptr ? atoi(seedValue) : 1337;
+
+    // Same dude setup the character selector performs on "Take".
+    char gcdPath[COMPAT_MAX_PATH];
+    strcpy(gcdPath, "premade\\combat.gcd");
+    if (_proto_dude_init(gcdPath) == -1) {
+        debugPrint("headless-probe: dude init failed\n");
+        return 1;
+    }
+
+    randomSeedPrerandom(seed);
+
+    char* mapNameCopy = compat_strdup(mapName);
+    _main_load_new(mapNameCopy);
+    free(mapNameCopy);
+
+    debugPrint("headless-probe: map '%s' loaded, running %d ticks (pump iteration %u)\n",
+        mapName, ticks, inputReplayGetIteration());
+
+    // F2_PROBE_AGGRO=N: make the N critters nearest to the dude hostile and
+    // request combat — a deterministic combat fixture exercising turn order,
+    // AI, to-hit, damage and death without any UI-coordinate scripting.
+    // Dude turns must be ended by the input trace (SPACE key events).
+    const char* aggroValue = getenv("F2_PROBE_AGGRO");
+    if (aggroValue != nullptr) {
+        probeApplyAggro(atoi(aggroValue));
+    }
+
+    // F2_PROBE_LISTMAPS=1: print the worldmap's map index -> file name table
+    // and exit (helper for authoring golden cases).
+    if (getenv("F2_PROBE_LISTMAPS") != nullptr) {
+        char mapName16[32];
+        for (int mapIdx = 0; mapIdx < wmMapMaxCount(); mapIdx++) {
+            if (wmMapIdxToName(static_cast<Map>(mapIdx), mapName16, sizeof(mapName16)) == 0) {
+                debugPrint("headless-probe: map %d = %s\n", mapIdx, mapName16);
+            }
+        }
+        return 0;
+    }
+
+    // F2_PROBE_ACTIONS="tick:action:arg,..." — invoke core entry points at
+    // scheduled loop iterations so golden traces cover sim paths that have
+    // no UI-free trigger (coverage-before-conversion rule, WORKLIST_P1.md).
+    // Actions: xp:N, rad:N, poison:N, drug:PID, hurt:N, useskill:SKILL,
+    // useskillon:SKILL (use skill on nearest wounded critter),
+    // usedoor:0, give:PID, drop:PID, usedrug:PID, useitem:PID, unload:PID,
+    // wmtravel:XXXXYYYY (worldmap travel to destX*10000+destY),
+    // rest:N (rest N game minutes), restopt:N (rest-menu option N).
+    struct ProbeAction {
+        int tick;
+        char name[16];
+        int arg;
+        // Optional 4th field (tick:name:arg:arg2). Barter verbs use it as the
+        // item quantity; -1 means "unspecified" (the drain moves a full stack).
+        int arg2;
+    };
+    std::vector<ProbeAction> probeActions;
+
+    const char* actionsValue = getenv("F2_PROBE_ACTIONS");
+    if (actionsValue != nullptr) {
+        char* copy = compat_strdup(actionsValue);
+        for (char* token = strtok(copy, ","); token != nullptr; token = strtok(nullptr, ",")) {
+            ProbeAction action;
+            action.arg2 = -1;
+            if (sscanf(token, "%d:%15[^:]:%d:%d", &(action.tick), action.name, &(action.arg), &(action.arg2)) >= 3) {
+                probeActions.push_back(action);
+            } else {
+                debugPrint("headless-probe: bad action '%s'\n", token);
+            }
+        }
+        free(copy);
+    }
+
+    scriptsEnable();
+
+    // Apply the probe actions scheduled for tick `i` by calling core entry
+    // points directly (no key/mouse events). Shared by the legacy pump loop and
+    // the server loop, where it IS the intent-drain step (SERVER_LOOP_DESIGN.md
+    // §4: F2_PROBE_ACTIONS is the tick-indexed intent queue v0).
+    auto applyProbeActions = [&](int i) {
+        for (const ProbeAction& action : probeActions) {
+            if (action.tick == i) {
+                // Reify the scheduled action as a Command and dispatch it
+                // through the unified handler (command.{h,cc}) — the single
+                // choke point that later becomes the network command reader.
+                Command command;
+                command.tick = i;
+                strncpy(command.name, action.name, sizeof(command.name));
+                command.arg = action.arg;
+                command.arg2 = action.arg2;
+                commandDispatch(command);
+            }
+        }
+    };
+
+    // STEP-4 join-snapshot round-trip modes (CLIENT_JOIN_DESIGN.md build slice
+    // S1). Both short-circuit the tick loop — they exercise the blob save/load
+    // pipeline, not the sim — and dump with netid= (state_dump gate) so the
+    // harness can assert the §C walk reproduces IDENTICAL netIds on both sides.
+    if (const char* blobOut = getenv("F2_SERVER_BLOB_OUT")) {
+        // Producer ("server truth"): the map is loaded; number the syncable set
+        // (§C), then serialize [map body][dude] and dump the resulting state.
+        objectAssignAllNetIds();
+        File* stream = fileOpen(blobOut, "wb");
+        if (stream == nullptr || mapSaveToStream(stream) == -1) {
+            debugPrint("headless-probe: blob write to '%s' FAILED\n", blobOut);
+            if (stream != nullptr) {
+                fileClose(stream);
+            }
+            return 1;
+        }
+        fileClose(stream);
+        if (!stateDumpWrite(dumpPath)) {
+            return 1;
+        }
+        main_unload_new();
+        return 0;
+    }
+    if (const char* blobIn = getenv("F2_CLIENT_BLOB_IN")) {
+        // Loader ("client"): drop the throwaway probe map and become present on
+        // the blob's map. Null the current map name so the inner mapLoad's
+        // _map_save_in_game early-returns (no .SAV write / exit procs on the
+        // probe map — B4). S4: adopt the server clock before load so map-enter
+        // procs read it, not the client's.
+        if (const char* blobTime = getenv("F2_CLIENT_BLOB_TIME")) {
+            gameTimeSetTime((unsigned int)strtoul(blobTime, nullptr, 10));
+        }
+        gMapHeader.name[0] = '\0';
+        File* stream = fileOpen(blobIn, "rb");
+        if (stream == nullptr) {
+            debugPrint("headless-probe: blob open '%s' FAILED\n", blobIn);
+            return 1;
+        }
+        mapSetViewerLoad(true); // §E: no map-enter procs — the viewer is a puppet
+        int loadRc = mapLoad(stream);
+        mapSetViewerLoad(false);
+        if (loadRc == -1) {
+            debugPrint("headless-probe: blob map load FAILED\n");
+            fileClose(stream); // mapLoad does not close on error (err: label)
+            return 1;
+        }
+        // Stream is positioned exactly at the dude blob (mapLoad reads only the
+        // map body; the caller owns the handle — map.cc:602). Apply the dude and
+        // repoint gDude (B1). _obj_load_dude closes the stream on its OWN error
+        // paths, so only close here on success.
+        if (_obj_load_dude(stream) == -1) {
+            debugPrint("headless-probe: dude blob load FAILED\n");
+            return 1;
+        }
+        fileClose(stream);
+        // The saved-bit blob skips mapLoad's first-run _map_fix_critter_combat_data;
+        // run it so dangling whoHitMe back-pointers are nulled (matches the
+        // producer, whose first-run load nulled them). No active combat on a
+        // fresh join → every whoHitMeCid is -1 → all nulled.
+        _map_fix_critter_combat_data();
+        objectAssignAllNetIds(); // §C: reproduce the walk → identical netIds
+        scriptsDisable();        // S1: the viewer is a puppet, sim stays frozen
+        if (!stateDumpWrite(dumpPath)) {
+            return 1;
+        }
+        main_unload_new();
+        return 0;
+    }
+
+    if (const char* streamIn = getenv("F2_CLIENT_STREAM_IN")) {
+        // S2 headless joining client (CLIENT_JOIN_DESIGN.md §D): decode a captured
+        // F2NS wire — load the blob, apply the live event stream — then dump the
+        // reconstructed state. The blob-load path already dumps with netid=.
+        if (!clientApplyStreamFile(streamIn)) {
+            debugPrint("headless-probe: stream apply from '%s' FAILED\n", streamIn);
+            return 1;
+        }
+        if (!stateDumpWrite(dumpPath)) {
+            return 1;
+        }
+        main_unload_new();
+        return 0;
+    }
+
+    // F2_SERVER_LOOP=1: run the fixed-timestep server loop
+    // (SERVER_LOOP_DESIGN.md) instead of the legacy frame-driven pump. The
+    // server loop installs the sim clock + InstantAnimationScheduler +
+    // NullPresenter + movie guard + combat auto-end-turn as one interlocked
+    // whole; state dumps legitimately shift (game_time / queue timestamps / RNG
+    // cadence) and are re-blessed against the semantic-diff gate. The legacy
+    // path stays the default and is byte-identical to before.
+    if (getenv("F2_SERVER_SERVE") != nullptr) {
+        // P5-A serverServe() smoke: the same interlocked server loop as
+        // F2_SERVER_LOOP, but driven by the OPEN-ENDED serve loop instead of a
+        // fixed tick count. The command queue (applyProbeActions) is fed
+        // identically; the stop condition stands in for a real server's
+        // "shutdown command / no clients": keep serving until the game requests
+        // quit (e.g. the endgame verb sets _game_user_wants_to_quit), with
+        // `ticks` retained as a hard safety cap so a headless run can't hang.
+        // For any non-quitting case this drains the same beats as serverRun, so
+        // its dump matches the F2_SERVER_LOOP golden; the endgame case shuts
+        // down early on the quit signal — the server-shaped path's smoke test.
+        serverServe(applyProbeActions, [&](int tick) {
+            if (_game_user_wants_to_quit != 0) {
+                return false;
+            }
+            return tick + 1 < ticks;
+        });
+    } else if (getenv("F2_SERVER_LOOP") != nullptr) {
+        serverRun(ticks, applyProbeActions);
+    } else {
+        for (int i = 0; i < ticks; i++) {
+            applyProbeActions(i);
+
+            // mainLoop() pump minus rendering. gameHandleKey also dispatches
+            // mouse events (event code -2) — required for replayed clicks.
+            int keyCode = inputGetInput();
+            gameHandleKey(keyCode, false);
+            scriptsHandleRequests();
+            mapHandleTransition();
+        }
+    }
+    scriptsDisable();
+
+    if (!stateDumpWrite(dumpPath)) {
+        debugPrint("headless-probe: state dump to '%s' FAILED\n", dumpPath);
+        return 1;
+    }
+    debugPrint("headless-probe: state dumped to '%s'\n", dumpPath);
+
+    // NOTE: Uninline.
+    main_unload_new();
+
+    return 0;
+}
+
+static void viewerArmPendingLoot(ClientConnection& conn, int netId)
+{
+    char cmd[32];
+    snprintf(cmd, sizeof(cmd), "loot %d", netId);
+    conn.sendLine(cmd);
+    gViewerPendingLootNetId = netId;
+    gViewerPendingLootSince = getTicks();
+}
+
+static void viewerPollPendingLoot(ClientConnection& conn)
+{
+    // ►► THE SERVER'S ANSWER OUTRANKS OUR GUESS. It fires the loot interaction (on
+    // arrival, or immediately when the dude is already adjacent) and now says so with
+    // an addressed grant; that is the authoritative "the container is open". The
+    // adjacency poll below stays as the fallback for a container opened without a
+    // grant, but the grant is what normally lands, and it ends the deadlock where the
+    // server thought we had arrived and we did not.
+    int granted = conn.takeLootGrant();
+    if (granted != 0) {
+        gViewerPendingLootNetId = granted;
+    }
+    if (gViewerPendingLootNetId == 0) {
+        return;
+    }
+    Object* container = objectFindByNetId(gViewerPendingLootNetId);
+    if (container == nullptr || gDude == nullptr || container->elevation != gDude->elevation) {
+        // ►► NOT SILENTLY. These three bail-outs (gone / wrong floor / timeout) used to
+        // drop the pending open without a word, so "I clicked and no screen appeared"
+        // had four indistinguishable causes and no way to tell them apart.
+        if (getenv("F2_TRACE_EVENTS") != nullptr) {
+            fprintf(stderr, "[loot-drop] net=%d reason=%s\n", gViewerPendingLootNetId,
+                container == nullptr ? "no such object in the mirror"
+                    : gDude == nullptr ? "no dude"
+                                       : "different elevation");
+        }
+        gViewerPendingLootNetId = 0;
+        return;
+    }
+    if (granted != 0 || objectGetDistanceBetween(gDude, container) <= 1) {
+        gViewerPendingLootNetId = 0;
+        // The client's belief at the moment it decides to open the screen, to be read
+        // against the server's "not adjacent" line (server_control.cc). If the tiles
+        // here disagree with the server's, the mirror is wrong and the sprite is drawn
+        // somewhere the object is not; if they AGREE, the desync is elsewhere and the
+        // glide/offset theory is dead. Also prints the sub-tile pixel offset, since a
+        // stale glide offset moves the SPRITE without moving obj->tile — the case where
+        // the tiles match yet the body still looks misplaced.
+        if (getenv("F2_TRACE_EVENTS") != nullptr) {
+            fprintf(stderr,
+                "[loot-open] net=%d dude tile=%d elev=%d off=%d/%d |"
+                " target tile=%d elev=%d off=%d/%d | dist=%d\n",
+                container->netId, gDude->tile, gDude->elevation, gDude->x, gDude->y,
+                container->tile, container->elevation, container->x, container->y,
+                objectGetDistanceBetween(gDude, container));
+        }
+        // In combat the server already opened the container authoritatively and
+        // charged the 3 AP for it (server_control.cc kInteractLoot), so this
+        // screen is sanctioned and must survive the service ticker's combat
+        // force-ESC — otherwise looting mid-fight would cost AP and show nothing.
+        bool inCombat = conn.inCombat();
+        if (inCombat) {
+            conn.setCombatModalOpen(true);
+        }
+        inventoryOpenLooting(gDude, container);
+        if (inCombat) {
+            conn.setCombatModalOpen(false);
+        }
+        // Reap items the reconcile unlinked but deferred freeing while the modal could
+        // still hold them (same lifetime safety as the 'I' inventory screen). A blob
+        // buffered while the modal was open is drained by the main loop below.
+        clientViewerFlushDeferredItemFrees();
+    } else if (getTicksSince(gViewerPendingLootSince) >= kViewerLootApproachTimeoutMs) {
+        if (getenv("F2_TRACE_EVENTS") != nullptr) {
+            fprintf(stderr, "[loot-drop] net=%d reason=approach timed out (dude tile=%d"
+                            " target tile=%d dist=%d — no grant arrived)\n",
+                gViewerPendingLootNetId, gDude->tile, container->tile,
+                objectGetDistanceBetween(gDude, container));
+        }
+        gViewerPendingLootNetId = 0;
+    }
+}
+
+static void viewerSendActionMenuVerb(ClientConnection& conn, int menuItem, Object* target)
+{
+    char cmd[48];
+    switch (menuItem) {
+    case GAME_MOUSE_ACTION_MENU_ITEM_USE:
+        // Vanilla USE forks on target type: scenery=use, item=pickup-or-loot, critter=loot.
+        switch (FrmId(target).objectType()) {
+        case OBJ_TYPE_SCENERY:
+            snprintf(cmd, sizeof(cmd), "use %d", target->netId);
+            conn.sendLine(cmd);
+            break;
+        case OBJ_TYPE_ITEM:
+            // A container ITEM opens the loot screen (walk-then-open); any other item
+            // is a ground pickup.
+            if (itemGetType(target) == ITEM_TYPE_CONTAINER) {
+                viewerArmPendingLoot(conn, target->netId);
+            } else {
+                snprintf(cmd, sizeof(cmd), "get %d", target->netId);
+                conn.sendLine(cmd);
+            }
+            break;
+        default:
+            // Critter USE = loot a corpse (loot slice); a live critter is not lootable
+            // this way (pickpocket/steal is a separate path).
+            if (critterIsDead(target)) {
+                viewerArmPendingLoot(conn, target->netId);
+            }
+            break;
+        }
+        break;
+    case GAME_MOUSE_ACTION_MENU_ITEM_LOOK:
+        snprintf(cmd, sizeof(cmd), "look %d", target->netId);
+        conn.sendLine(cmd);
+        break;
+    case GAME_MOUSE_ACTION_MENU_ITEM_ROTATE:
+        conn.sendLine("rot");
+        break;
+    case GAME_MOUSE_ACTION_MENU_ITEM_PUSH:
+        snprintf(cmd, sizeof(cmd), "push %d", target->netId);
+        conn.sendLine(cmd);
+        break;
+    case GAME_MOUSE_ACTION_MENU_ITEM_USE_SKILL: {
+        // Run the local skilldex modal (pure UI); map its choice to the wire verb.
+        // SNEAK is a self-toggle (no target) — deferred; the seven targeted skills
+        // route to `skill <netId> <skillId>`.
+        int skill = -1;
+        switch (skilldexOpen()) {
+        case SKILLDEX_RC_LOCKPICK: skill = SKILL_LOCKPICK; break;
+        case SKILLDEX_RC_STEAL: skill = SKILL_STEAL; break;
+        case SKILLDEX_RC_TRAPS: skill = SKILL_TRAPS; break;
+        case SKILLDEX_RC_FIRST_AID: skill = SKILL_FIRST_AID; break;
+        case SKILLDEX_RC_DOCTOR: skill = SKILL_DOCTOR; break;
+        case SKILLDEX_RC_SCIENCE: skill = SKILL_SCIENCE; break;
+        case SKILLDEX_RC_REPAIR: skill = SKILL_REPAIR; break;
+        default: break; // canceled / sneak / error
+        }
+        if (skill != -1) {
+            snprintf(cmd, sizeof(cmd), "skill %d %d", target->netId, skill);
+            conn.sendLine(cmd);
+        }
+        break;
+    }
+    case GAME_MOUSE_ACTION_MENU_ITEM_TALK:
+        snprintf(cmd, sizeof(cmd), "talk %d", target->netId);
+        conn.sendLine(cmd);
+        break;
+    case GAME_MOUSE_ACTION_MENU_ITEM_INVENTORY:
+        // Use-an-inventory-item-ON the target (the vanilla backpack action). Open the
+        // local use-item-on picker modal (pure UI over the dude's mirror); its picked-
+        // item leaf sends `useitemon <netId> <pid>` and skips the local action
+        // (inventory_ui.cc clientViewerActive gate). The service ticker keeps the wire
+        // pumping inside the modal + force-closes on combat entry / rebaseline (kUseOn ∈
+        // kViewerModalMask). Out-of-combat only (the server drops the verb in combat —
+        // in-combat item-use needs the AP barrier, a later slice). Reap deferred frees
+        // after; a rebaseline buffered while open drains next main-loop iteration.
+        if (!conn.inCombat()) {
+            inventoryOpenUseItemOn(target);
+            clientViewerFlushDeferredItemFrees();
+        }
+        break;
+    // CANCEL / not-shown: nothing.
+    default:
+        break;
+    }
+}
+
+static void viewerSendPrimaryVerb(ClientConnection& conn, Object* target)
+{
+    char cmd[48];
+    // ►► THE DECIDING INPUTS, NOT THE OUTCOME. Every "I clicked it and nothing happened"
+    // report ends here, and the branch below is chosen from four values the player
+    // cannot see — and which can DISAGREE with each other, because the art type and the
+    // proto type are independent (an ITEM-proto gravesite can wear scenery art) and
+    // because a pid can change under a live object. Printing the outcome alone would
+    // just restate the symptom; printing the inputs says which one lied.
+    if (getenv("F2_TRACE_EVENTS") != nullptr) {
+        fprintf(stderr, "[primary] net=%d pid=%d(type=%d) fid=0x%X(fidType=%d)"
+                        " itemType=%d canUse=%d canUseOn=%d\n",
+            target->netId, target->pid, ProtoId(target).objectType(), target->fid,
+            FrmId(target).objectType(),
+            ProtoId(target).objectType() == OBJ_TYPE_ITEM ? itemGetType(target) : -1,
+            _obj_action_can_use(target) ? 1 : 0,
+            _proto_action_can_use_on(ProtoId(target)) ? 1 : 0);
+    }
+    switch (FrmId(target).objectType()) {
+    case OBJ_TYPE_ITEM:
+        // Container → loot (walk-then-open); any other item → ground pickup.
+        if (itemGetType(target) == ITEM_TYPE_CONTAINER) {
+            viewerArmPendingLoot(conn, target->netId);
+        } else {
+            snprintf(cmd, sizeof(cmd), "get %d", target->netId);
+            conn.sendLine(cmd);
+        }
+        break;
+    case OBJ_TYPE_SCENERY:
+        if (_obj_action_can_use(target)) {
+            snprintf(cmd, sizeof(cmd), "use %d", target->netId);
+        } else {
+            snprintf(cmd, sizeof(cmd), "look %d", target->netId);
+        }
+        conn.sendLine(cmd);
+        break;
+    case OBJ_TYPE_CRITTER:
+        if (target == gDude) {
+            conn.sendLine("rot");
+        } else if (critterIsDead(target)) {
+            // Primary on a corpse is LOOT (loot slice).
+            viewerArmPendingLoot(conn, target->netId);
+        } else {
+            // Primary on a live critter is TALK in vanilla.
+            snprintf(cmd, sizeof(cmd), "talk %d", target->netId);
+            conn.sendLine(cmd);
+        }
+        break;
+    default: // WALL and the rest → examine.
+        snprintf(cmd, sizeof(cmd), "look %d", target->netId);
+        conn.sendLine(cmd);
+        break;
+    }
+}
+
+static int viewerSkillModeForKey(int keyCode)
+{
+    switch (keyCode) {
+    case KEY_2: case KEY_AT: return GAME_MOUSE_MODE_USE_LOCKPICK;
+    case KEY_3: case KEY_NUMBER_SIGN: return GAME_MOUSE_MODE_USE_STEAL;
+    case KEY_4: case KEY_DOLLAR: return GAME_MOUSE_MODE_USE_TRAPS;
+    case KEY_5: case KEY_PERCENT: return GAME_MOUSE_MODE_USE_FIRST_AID;
+    case KEY_6: case KEY_CARET: return GAME_MOUSE_MODE_USE_DOCTOR;
+    case KEY_7: case KEY_AMPERSAND: return GAME_MOUSE_MODE_USE_SCIENCE;
+    case KEY_8: case KEY_ASTERISK: return GAME_MOUSE_MODE_USE_REPAIR;
+    default: return -1;
+    }
+}
+
+static int viewerSkillModeForSkilldexRc(int rc)
+{
+    switch (rc) {
+    case SKILLDEX_RC_LOCKPICK: return GAME_MOUSE_MODE_USE_LOCKPICK;
+    // STEAL is live: the click sends `skill <netId> STEAL` like every other skill,
+    // the server walks the thief over and answers SCRIPT_REQUEST_STEALING with a
+    // real session (inventory_ui.cc stealSessionRun) that rolls the skill and
+    // streams the screen to everyone. It was parked for as long as that request
+    // was a silent no-op.
+    case SKILLDEX_RC_STEAL: return GAME_MOUSE_MODE_USE_STEAL;
+    case SKILLDEX_RC_TRAPS: return GAME_MOUSE_MODE_USE_TRAPS;
+    case SKILLDEX_RC_FIRST_AID: return GAME_MOUSE_MODE_USE_FIRST_AID;
+    case SKILLDEX_RC_DOCTOR: return GAME_MOUSE_MODE_USE_DOCTOR;
+    case SKILLDEX_RC_SCIENCE: return GAME_MOUSE_MODE_USE_SCIENCE;
+    case SKILLDEX_RC_REPAIR: return GAME_MOUSE_MODE_USE_REPAIR;
+    default: return -1; // SKILLDEX_RC_SNEAK (deferred), _ERROR, cancel
+    }
+}
+
+static int viewerSkillForMode(int mode)
+{
+    switch (mode) {
+    case GAME_MOUSE_MODE_USE_LOCKPICK: return SKILL_LOCKPICK;
+    case GAME_MOUSE_MODE_USE_STEAL: return SKILL_STEAL;
+    case GAME_MOUSE_MODE_USE_TRAPS: return SKILL_TRAPS;
+    case GAME_MOUSE_MODE_USE_FIRST_AID: return SKILL_FIRST_AID;
+    case GAME_MOUSE_MODE_USE_DOCTOR: return SKILL_DOCTOR;
+    case GAME_MOUSE_MODE_USE_SCIENCE: return SKILL_SCIENCE;
+    case GAME_MOUSE_MODE_USE_REPAIR: return SKILL_REPAIR;
+    default: return -1;
+    }
+}
+
+static void viewerEnterSkillMode(int mode)
+{
+    gameMouseSetCursor(MOUSE_CURSOR_USE_CROSSHAIR);
+    gameMouseSetMode(static_cast<GameMouseMode>(mode));
+}
+
+static bool viewerKeepRunning()
+{
+    if (_game_user_wants_to_quit == GAME_QUIT_REQUEST_END_COMBAT) {
+        fprintf(stderr, "[viewer] consumed a stray in-band quit signal (=1); NOT exiting. "
+                        "Something outside the viewer's own loops raised it — see object.cc's "
+                        "exit-grid guard for the shape of this bug.\n");
+        _game_user_wants_to_quit = GAME_QUIT_REQUEST_NONE;
+    }
+    return _game_user_wants_to_quit == GAME_QUIT_REQUEST_NONE;
+}
+
+static int mainClientViewer(const char* connectSpec)
+{
+    // Parse host:port.
+    char host[256];
+    int port = 0;
+    const char* colon = strrchr(connectSpec, ':');
+    if (colon == nullptr || colon == connectSpec || (size_t)(colon - connectSpec) >= sizeof(host)) {
+        debugPrint("client-viewer: F2_CLIENT_CONNECT must be host:port (got '%s')\n", connectSpec);
+        return 1;
+    }
+    size_t hostLen = (size_t)(colon - connectSpec);
+    memcpy(host, connectSpec, hostLen);
+    host[hostLen] = '\0';
+    port = atoi(colon + 1);
+    if (port <= 0 || port > 65535) {
+        debugPrint("client-viewer: bad port in '%s'\n", connectSpec);
+        return 1;
+    }
+
+    // Viewer flag for the process lifetime — gates focus behavior (an unfocused
+    // viewer keeps pumping + rendering; see clientViewerActive in client_net.h).
+    // Set before ANY inputGetInput (the blob-wait loop below pumps too).
+    clientViewerSetActive(true);
+
+    // A valid dude must exist before the snapshot's mapLoad (it references gDude);
+    // the blob's dude then replaces it (_obj_load_dude). Mirror the probe/new-game
+    // setup so gDude is fully formed.
+    char gcdPath[COMPAT_MAX_PATH];
+    strcpy(gcdPath, "premade\\combat.gcd");
+    if (_proto_dude_init(gcdPath) == -1) {
+        debugPrint("client-viewer: dude init failed\n");
+        return 1;
+    }
+
+    // F2_PLAYER_CREATE=ask: ROLL A CHARACTER before joining, using vanilla's own
+    // creation editor (ACCOUNT_IDENTITY_DESIGN.md stage 2). Reusing
+    // characterEditorShow(1) rather than building a second creation UI means the
+    // player gets the real screen — stat picker, tag skills, traits, the lot.
+    //
+    // ►► RUNS BEFORE THE PRESENTATION SCAFFOLDING BELOW, and it must: that block's
+    // full-screen window is WINDOW_MOVE_ON_TOP, so it stays above every window
+    // opened after it — the editor draws underneath and the player gets a black
+    // screen with working sound. What the editor DOES need is the setup vanilla's
+    // character selector does before calling it (characterSelectorOpen): a shown
+    // cursor and color.pal faded in. Without those it is a mouseless keyboard-only
+    // screen. Both bugs were live-reported; do not "tidy" this back together.
+    //
+    // Pre-connection by design: the editor edits the LOCAL gDude and the join blob
+    // overwrites that a moment later, so the local edits are only a vehicle for
+    // reading the numbers back out. The server owns the character — we send the
+    // spec and it builds the sheet.
+    //
+    // The `create` line is composed now and sent with the login below, once the
+    // world is present.
+    char createFromUi[192];
+    createFromUi[0] = '\0';
+    {
+        const char* createEnv = getenv("F2_PLAYER_CREATE");
+        if (createEnv != nullptr && (strcmp(createEnv, "ask") == 0 || strcmp(createEnv, "ui") == 0)) {
+            // Mirrors characterSelectorOpen's bracket exactly, so the editor sees
+            // the environment it was written against.
+            bool cursorWasHidden = cursorIsHidden();
+            if (cursorWasHidden) {
+                mouseShowCursor();
+            }
+            colorPaletteLoad("color.pal");
+            paletteFadeTo(_cmap);
+
+            // _ResetPlayer first, exactly as the character selector's "Create"
+            // does — otherwise the editor opens on the premade rather than a
+            // blank character.
+            _ResetPlayer();
+
+            int editorRc = characterEditorShow(1);
+
+            paletteFadeTo(gPaletteBlack);
+            if (cursorWasHidden) {
+                mouseHideCursor();
+            }
+
+            if (editorRc == 0) {
+                // SPECIAL is read as DISPLAYED (critterGetStat, trait modifiers
+                // included) because that is precisely what the server's applier
+                // expects: it sets traits first, and critterSetBaseStat subtracts
+                // the trait modifier from the value it is handed. Displayed-in,
+                // displayed-out — the round trip is exact.
+                int special[7];
+                for (int i = 0; i < 7; i++) {
+                    special[i] = critterGetStat(gDude, static_cast<Stat>(STAT_STRENGTH + i));
+                }
+
+                Skill tagged[NUM_TAGGED_SKILLS];
+                for (int i = 0; i < NUM_TAGGED_SKILLS; i++) {
+                    tagged[i] = static_cast<Skill>(-1);
+                }
+                skillsGetTagged(tagged, NUM_TAGGED_SKILLS);
+
+                Trait trait1 = static_cast<Trait>(-1);
+                Trait trait2 = static_cast<Trait>(-1);
+                traitsGetSelected(&trait1, &trait2);
+
+                snprintf(createFromUi, sizeof(createFromUi),
+                    "%d %d %d %d %d %d %d %d %d %d %d %d",
+                    special[0], special[1], special[2], special[3],
+                    special[4], special[5], special[6],
+                    static_cast<int>(tagged[0]), static_cast<int>(tagged[1]),
+                    static_cast<int>(tagged[2]), static_cast<int>(trait1), static_cast<int>(trait2));
+                debugPrint("client-viewer: created character -> create %s\n", createFromUi);
+            } else {
+                // Cancelled: join as whatever the account already is (or a clone
+                // of the host for a brand-new name). Never silently invent a
+                // character the player backed out of.
+                debugPrint("client-viewer: character creation cancelled\n");
+            }
+        }
+    }
+
+    // Presentation scaffolding — the subset of _main_load_new that stands up the
+    // iso window + palette WITHOUT loading a map (the blob provides the map).
+    // ⚠ `win` is MOVE_ON_TOP: nothing that needs to be SEEN may open after it.
+    gDude->flags &= ~OBJECT_FLAT;
+    objectShow(gDude, nullptr);
+    mouseHideCursor();
+
+    int win = windowCreate(0, 0, screenGetWidth(), screenGetHeight(), _colorTable[0], WINDOW_MODAL | WINDOW_MOVE_ON_TOP);
+    windowRefresh(win);
+
+    colorPaletteLoad("color.pal");
+    paletteFadeTo(_cmap);
+    mapInit();
+    gameMouseSetCursor(MOUSE_CURSOR_NONE);
+    mouseShowCursor();
+
+    ClientConnection conn;
+    if (!conn.connect(host, port)) {
+        debugPrint("client-viewer: connect to %s:%d failed\n", host, port);
+        windowDestroy(win);
+        main_unload_new();
+        return 1;
+    }
+    debugPrint("client-viewer: connected to %s:%d — awaiting join snapshot...\n", host, port);
+
+    // Block (while keeping the window alive) until the join snapshot has been
+    // received and loaded — the world becomes present via the decoder's mapLoad.
+    while (conn.blobLoaded() == false) {
+        sharedFpsLimiter.mark();
+        if (!conn.pump()) {
+            debugPrint("client-viewer: stream error before snapshot\n");
+            conn.close();
+            windowDestroy(win);
+            main_unload_new();
+            return 1;
+        }
+        int keyCode = inputGetInput();
+        if (keyCode == KEY_ESCAPE || _game_user_wants_to_quit != 0) {
+            conn.close();
+            windowDestroy(win);
+            main_unload_new();
+            return 0;
+        }
+        renderPresent();
+        sharedFpsLimiter.throttle();
+    }
+
+    debugPrint("client-viewer: snapshot loaded, entering viewer loop\n");
+
+    // The blob's mapLoad drew the world under the loading backdrop; drop it and
+    // fade in, matching _main_load_new's tail.
+    windowDestroy(win);
+    colorPaletteLoad("color.pal");
+    paletteFadeTo(_cmap);
+
+    // §E puppet levers. scriptsDisable() sets gScriptsEnabled = false, which neuters
+    // _doBkProcesses — its AI / timed-event / queue work is all guarded on that flag,
+    // so no sim advances even though the ticker stays registered. Then strip the local
+    // animation tickers isoEnable re-added during the blob's mapLoad (they fight the
+    // authoritative OBJECT_DELTA_FID/MOVE from the wire), and disable the gmouse
+    // object-interaction handler worldEnable() turned on: the viewer never routes mouse
+    // input through gameHandleKey, but don't let that be the ONLY thing between a viewer
+    // and a sim mutation.
+    scriptsDisable();
+    tickersRemove(_object_animate);
+    tickersRemove(_dude_fidget);
+    // STEP 6 (controllable client): ENABLE the mouse in a pinned MOVE mode rather
+    // than disabling it. The gameMouseRefresh ticker (registered by mapInit) then
+    // renders the hex + bouncing cursor, which mutate ONLY the OBJECT_NO_SAVE cursor
+    // objects the netId walk skips — presentation-safe. We never call
+    // _gmouse_handle_event, so a click never drives _dude_move/_dude_run on the
+    // mirror; the frame loop below captures the click and sends it UPSTREAM as an
+    // intent. Edge scrolling stays on (_gmouse_enable turns it on) so the camera
+    // follows the dude. Mode is pinned MOVE: it can only change via 'M'/right-click,
+    // neither of which the viewer routes into the sim.
+    _gmouse_enable();
+    gameMouseSetMode(GAME_MOUSE_MODE_MOVE);
+    gameMouseObjectsShow();
+
+    // Presentation layer (client_present): glide critters between tiles on stepped
+    // MOVE hops, replay the vanilla attack/hit/death choreography from
+    // EVENT_ATTACK_RESULT, and slide doors open/closed from EVENT_DOOR_STATE — so the
+    // viewer paces the pixels instead of snapping. Viewer-only — the flag defaults off,
+    // so the headless joining client's decode path is untouched.
+    presSetEnabled(true);
+
+    // F2_VIEWER_SHOT_EVERY=N: dump a screenshot (scrNNNNN.bmp in the game dir, via
+    // the normal screenshot machinery — correct palette) every N rendered frames.
+    // A capture hook for verifying the live render off-line; unset = no dumps.
+    const char* shotEveryValue = getenv("F2_VIEWER_SHOT_EVERY");
+    int shotEvery = shotEveryValue != nullptr ? atoi(shotEveryValue) : 0;
+    int frameNo = 0;
+
+    // Register this connection as the viewer's upstream so shared combat code can
+    // forward verbs through it: the crosshair click runs the real _combat_attack_this,
+    // whose commit fork (combat.cc §3.b) calls clientViewerCommitAttack → `cattack`.
+    clientViewerSetConnection(&conn);
+    combatSetViewerAttackHook(clientViewerCommitAttack);
+    // Keep the wire pumping inside modal screens (inventory/skilldex/char/pipboy) and
+    // force-close them on combat entry / rebaseline — those loops don't call conn.pump().
+    clientViewerInstallServiceTicker();
+
+    // Claim authoritative control of the actor once, now that the world is present.
+    // The server binds the claim to this connection for its lifetime (a rebaseline
+    // does not drop it), so this is sent exactly once.
+    //
+    // F2_PLAYER_NAME set → bind by ACCOUNT NAME via `login <name> [token]`
+    // (ACCOUNT_IDENTITY_DESIGN.md): the server maps the name to a slot, so the
+    // same human returns to the same character across reconnects. Unset → the
+    // legacy bare `claim` (host/dev affordance, slot-0-preferred) — this keeps the
+    // headless/golden path byte-identical since no name is ever sent there.
+    // Tell the server which OS this client runs on, so the join greeting can show
+    // "X joined the game (Linux/Windows/...)". Compile-time; sent before login (and
+    // before bare claim) so it is stored by the time the greeting is composed. Extra
+    // control line only — it never changes any server-emitted wire bytes the goldens
+    // compare.
+#if defined(_WIN32)
+    conn.sendLine("platform Windows");
+#elif defined(__APPLE__)
+    conn.sendLine("platform macOS");
+#elif defined(__linux__)
+    conn.sendLine("platform Linux");
+#else
+    conn.sendLine("platform Unknown");
+#endif
+
+    const char* playerName = getenv("F2_PLAYER_NAME");
+    if (playerName != nullptr && playerName[0] != '\0') {
+        // F2_PLAYER_CREATE="S P E C I A L [tag tag tag] [trait trait]": state the
+        // character to BE, for a name the server has never seen. Sent BEFORE the
+        // login that commits it, and ignored by the server for an existing account
+        // (you do not re-roll by reconnecting).
+        //
+        // This is the headless/CLI way to express creation intent; a creation
+        // SCREEN would fill in the same spec and send the same line. Unset = join
+        // as a copy of the host, which is the unchanged default.
+        // Either the spec the creation editor produced above (F2_PLAYER_CREATE=ask)
+        // or a literal spec passed straight in the env (headless / scripted).
+        const char* createSpec = createFromUi[0] != '\0' ? createFromUi : getenv("F2_PLAYER_CREATE");
+        if (createSpec != nullptr && createSpec[0] != '\0'
+            && strcmp(createSpec, "ask") != 0 && strcmp(createSpec, "ui") != 0) {
+            char createLine[224];
+            snprintf(createLine, sizeof(createLine), "create %s", createSpec);
+            conn.sendLine(createLine);
+        }
+
+        const char* playerToken = getenv("F2_PLAYER_TOKEN");
+        char loginLine[128];
+        if (playerToken != nullptr && playerToken[0] != '\0') {
+            snprintf(loginLine, sizeof(loginLine), "login %s %s", playerName, playerToken);
+        } else {
+            snprintf(loginLine, sizeof(loginLine), "login %s", playerName);
+        }
+        conn.sendLine(loginLine);
+    } else {
+        conn.sendLine("claim");
+    }
+
+    // Name the window WHO and WHERE, so a co-op player running several clients on one
+    // machine can tell them apart at a glance: "FALLOUT II - [name] - server host:port".
+    // playerName is the account we just logged in as; without it (the bare `claim`
+    // path) the title still carries the server, so windows stay distinct. This retitle
+    // only happens on the live-viewer path — the headless/golden client never reaches
+    // here, and the offline game keeps the plain "FALLOUT II" set at gameInit.
+    {
+        char titleBuf[320];
+        if (playerName != nullptr && playerName[0] != '\0') {
+            snprintf(titleBuf, sizeof(titleBuf), "FALLOUT II - [%s] - server %s:%d", playerName, host, port);
+        } else {
+            snprintf(titleBuf, sizeof(titleBuf), "FALLOUT II - server %s:%d", host, port);
+        }
+        programWindowSetTitle(titleBuf);
+    }
+
+    _game_user_wants_to_quit = GAME_QUIT_REQUEST_NONE;
+    int puppetLoadCount = conn.loadCount();
+
+    // Combat presentation gate (COMBAT_CLIENT_DESIGN.md §3.c). While the viewer owes
+    // combat animation — it is not our turn, an attack replay is playing/queued, or
+    // we just committed an action the server hasn't answered yet — vanilla shows the
+    // animated pocket-watch cursor and eats input. `actionPending` is the local
+    // send-prediction that blocks AP-spam in the network round-trip gap: set when we
+    // send a combat verb, cleared once the world confirms it (presentation busy /
+    // turn changed) or a short timeout elapses.
+    bool combatBusy = false;
+    bool watchCursorShown = false;
+    bool actionPending = false;
+    unsigned int actionPendingSince = 0;
+    // A weapon-slot left-click issued out of combat: cstart sent, switch to the crosshair
+    // (target) cursor once combat actually opens (the per-frame guard force-resets
+    // CROSSHAIR→MOVE until then). Mirrors vanilla left-click-weapon = enter combat + arm.
+    bool pendingEnterCrosshair = false;
+    const unsigned int kActionPendingTimeoutMs = 1200;
+    // OUT-OF-COMBAT input block (feature A — the out-of-combat twin of combatBusy). While
+    // set, world clicks and the 'B' hand-swap are eaten and the watch cursor shows, just
+    // like vanilla blocks the game loop for a weapon holster/ready. It is driven by a
+    // pending hand switch (RTT latch) OR the local replay of our own draw animation.
+    bool oocBusy = false;
+    bool handSwitchPending = false;
+    unsigned int handSwitchSince = 0;
+
+    while (viewerKeepRunning()) {
+        sharedFpsLimiter.mark();
+
+        // ►► RECONCILE DIALOG WINDOWS TO THE LATCHED WIRE STATE (viewer-modal I2/I6).
+        // The wire decoder only latches "conversation live / node payload / trade
+        // open"; this single owner builds and tears down the dialog session + node
+        // subwindows to match, and then applies any pending node content. Runs before
+        // the barter-enter check below so node subwindows are already down (or up)
+        // when the trade window opens/closes, replacing the old order-of-arrival
+        // guesswork that made the barter<->dialog transition flicker and orphan windows.
+        clientModalWindowsSync();
+        clientDialogRenderPendingNode();
+
+        // Barter streaming: the decoder opened a trade session (mirrors built from
+        // EVENT_BARTER_STATE). Put the vanilla trade window up over the dialog
+        // window and hold it until the server ends the trade. Entered here, beside
+        // the worldmap, because both are server-driven modals that must run from
+        // the main loop rather than from inside the decoder — applying wire events
+        // from within a blocking modal is how the world gets freed under an open
+        // screen. Driver and spectators alike; the window is read-only for now.
+        if (clientBarterActive() && (GameMode::getCurrentGameMode() & GameMode::kBarter) == 0) {
+            inventoryOpenTradeViewer(clientBarterMerchant(),
+                clientBarterPlayerTable(), clientBarterMerchantTable());
+        }
+        // Tear down a trade the server ENDED. onBarterEnd only latches the end (it
+        // is decoded from inside the trade loop, where freeing the mirrors would
+        // dangle the drag gesture / quantity dial); the trade loop above has since
+        // broken and returned, so this is the safe point to actually free them.
+        clientBarterFinalize();
+
+        // Steal streaming: the server opened a steal session. EVERY viewer puts up
+        // the same screen — the thief drives it, the rest of the party watches
+        // someone's pockets being emptied — and it comes down on EVENT_STEAL_END.
+        // Entered here for the barter reason: a blocking modal must not be entered
+        // from inside the wire decoder that would then run under it.
+        if (clientStealActive() && (GameMode::getCurrentGameMode() & GameMode::kLoot) == 0) {
+            inventoryOpenStealingViewer(clientStealThief(), clientStealTarget());
+        }
+        // The screen's loop broke on the latched end; this is the safe point to
+        // clear the session state it was reading (client_barter's rule).
+        clientStealFinalize();
+
+        // Worldmap streaming: the wire decoder sets gPendingWorldmapEnter when the
+        // server enters the worldmap travel driver. Enter the worldmap modal loop
+        // (blocking, with viewerServiceTicker wire pump via kViewerModalMask) before
+        // consuming input for this frame.
+        if (gPendingWorldmapEnter) {
+            gPendingWorldmapEnter = false;
+            gWorldmapStreaming = true;
+            wmWorldMap();
+            gWorldmapStreaming = false;
+
+            // wmInterfaceInit black-fills gIsoWindow and disables the tile engine;
+            // wmInterfaceExit only re-ENABLES it — it never repaints. Vanilla gets
+            // away with that because the worldmap can only be left by entering a
+            // location, so mapLoadById always follows and redraws. Our streaming
+            // exit has paths that change NO map (the player escaped, or the server
+            // driver bailed with map == -1), and then nothing ever redraws the
+            // world: the viewer sits on a black window over a perfectly good map.
+            // Repaint here — but not when a rebaseline is queued, since that path
+            // reloads the map and repaints on its own a few lines below.
+            if (!conn.blobDeferred()) {
+                tileWindowRefresh();
+            }
+        }
+
+        // Loot open-on-approach: if a `loot` verb walked the dude to a container/corpse,
+        // open the loot modal now that it has arrived (blocking; the ticker pumps the
+        // wire inside). Checked before input so it opens the same frame the dude lands.
+        viewerPollPendingLoot(conn);
+
+        // Pump input so the window stays responsive and ESC quits. No gameplay keys
+        // or clicks are dispatched (gameHandleKey is deliberately NOT called), so the
+        // viewer can never mutate the sim; the standard mouse pump still runs harmlessly.
+        int keyCode = inputGetInput();
+        gameHandleFirstPersonPreviewInput(keyCode);
+        if (keyCode == KEY_F11) {
+            gameToggleFirstPersonPreview();
+            keyCode = -1;
+        }
+
+        // LALT toggles the highlight-lootables overlay. Safe in the viewer: it only
+        // sets client-side outlines (rendering), never touches the sim.
+        lootHighlightUpdate();
+
+        // ─── Player chat (SAY) ───────────────────────────────────────────────────
+        // Non-blocking overlay, so it lives here in the frame loop rather than in a
+        // modal of its own (viewer-modal design of record: a new screen copies
+        // DIALOG's flag+dispatch shape, never barter's blocking loop). Order matters:
+        //
+        // 1. COMBAT FORCE-CLOSES IT, before any key is read. Combat entry clears the
+        //    screen of UI, and an open box would otherwise keep eating the keys that
+        //    drive the fight — including the RETURN that ends combat. The draft is
+        //    discarded: it was written for a peacetime room.
+        // 2. While it IS open it gets first refusal on every key, so typing cannot
+        //    leak into the gameplay dispatch below ("a" toggling combat mid-sentence).
+        // 3. RETURN opens it, but only OUT of combat and only when no dialog owns the
+        //    screen — in combat RETURN already means "attempt to end combat", and that
+        //    binding is load-bearing (it is also what the interface-bar button posts).
+        if (conn.inCombat() && clientSayActive()) {
+            clientSayCancel();
+        }
+        bool sayConsumedKey = false;
+        if (clientSayActive()) {
+            sayConsumedKey = clientSayHandleKey(keyCode);
+        } else if (keyCode == KEY_RETURN && !conn.inCombat() && !clientDialogActive()) {
+            clientSayOpen();
+            sayConsumedKey = true;
+        }
+        if (sayConsumedKey) {
+            keyCode = -1; // swallow it: nothing below may act on a typed character
+        }
+        clientSayRender();
+
+        if (clientDialogActive()) {
+            clientDialogHandleKey(keyCode);
+        } else if (keyCode == KEY_ESCAPE) {
+            // ►► ESC ASKS; IT DOES NOT QUIT. This used to `break` straight out of the
+            // frame loop, so one keypress ended the session with no confirmation and no
+            // way back — and it read as a CRASH, because a clean exit and a segfault look
+            // identical from the outside (no core dump was the tell).
+            //
+            // What makes a bare `break` untenable is that ESC is also the "get me out of
+            // this screen" key, and on a STREAMED modal the screen does not close on the
+            // keypress: the viewer sends its intent (worldmap_ui.cc -> `wmesc`) and waits
+            // for the server to end the session. So the natural thing a player does —
+            // press ESC until something happens — sends the intent, the modal closes when
+            // the server answers, and the NEXT buffered ESC lands here and kills the
+            // client. Every server-driven modal has that hazard.
+            //
+            // Vanilla never quits on a bare ESC either: game_ui.cc routes KEY_ESCAPE to
+            // showOptions(), whose Exit goes through this same confirmation. We ask
+            // directly instead of opening Options, because a viewer must not offer local
+            // Save/Load — the server owns the state. Confirming sets
+            // _game_user_wants_to_quit, which the loop condition picks up next iteration.
+            showQuitConfirmationDialog();
+        } else if (keyCode == KEY_LOWERCASE_O || keyCode == KEY_UPPERCASE_O) {
+            // The HUD Options button posts O. Save/Load belong to the dedicated
+            // server, so do not expose vanilla's outer Options menu; open its
+            // Preferences page directly instead. This keeps client-local controls
+            // such as autorun, sound, brightness, text speed, and mouse sensitivity.
+            // kPreferences is in kViewerModalMask, so the wire continues pumping
+            // inside this blocking vanilla dialog and combat/map changes can close it.
+            doPreferences(false);
+        }
+
+        if (!clientDialogActive()) {
+
+        // Vanilla combat input, driven from the viewer frame loop (COMBAT_CLIENT_DESIGN.md
+        // §3.a/§3.b). No bespoke keys/widgets: the end-turn / end-combat interface-bar
+        // buttons post keycodes 32 (SPACE) / 13 (RETURN) into the SAME input queue as the
+        // vanilla keyboard keys, so handling the keycodes covers the buttons AND the keys
+        // for free. Verbs are claim-gated upstream and drained by the resumable barrier on
+        // the dude's turn. Gated on !combatBusy so you cannot queue another action while an
+        // animation plays or before the last is answered — vanilla blocks input for the
+        // whole attack (this also stops spamming AP away in a blink, §3.c).
+        if (conn.inCombat()) {
+            // END intents are escape hatches and must not depend on presentation state.
+            // A stale `_myTurn` or wedged replay is exactly when SPACE is needed most;
+            // the server now accepts only the actual current actor and de-duplicates
+            // key repeat, so sending is safe even when the mirror is wrong.
+            if (keyCode == KEY_SPACE) {
+                conn.sendLine("cendturn"); // 32: end-turn button / SPACE
+                actionPending = true;
+                actionPendingSince = getTicks();
+            } else if (keyCode == KEY_RETURN) {
+                // 13: end-combat button / RETURN — vanilla "attempt to end combat"
+                // (the server refuses with a console message if hostiles remain).
+                conn.sendLine("cendcombat");
+                actionPending = true;
+                actionPendingSince = getTicks();
+            }
+        } else if (keyCode == KEY_LOWERCASE_A || keyCode == KEY_UPPERCASE_A) {
+            // Out of combat, vanilla 'A' toggles combat (game_ui.cc → _combat(nullptr)).
+            // The wire equivalent is cstart; the server enters combat on its idle tick.
+            conn.sendLine("cstart");
+        }
+
+        // Weapon interface-bar controls, in OR out of combat (vanilla lets you set these
+        // anytime): 'N' / right-click the weapon slot cycles the active hand's attack
+        // mode (primary→aimed→secondary→burst; e.g. punch↔kick is the two empty hands),
+        // 'B' swaps the active hand. Both mutate ONLY local interface state
+        // (gInterfaceCurrentHand / .action) — the same state the local _combat_attack_this
+        // reads and forwards in `cattack` (hitMode + aimed hitLocation, which the server
+        // validates and applies), so nothing races the sim and no desync is possible.
+        // Non-animated swap: the animated put-away/take-out mutates gDude->fid, which would
+        // fight the server-authoritative fid stream (§3). A swap can drop crosshair→move
+        // mode (interface.cc:1195), and cycling changes what a highlighted target means, so
+        // recompute outlines after either while in combat (#8).
+        if (keyCode == KEY_LOWERCASE_N || keyCode == KEY_UPPERCASE_N) {
+            interfaceCycleItemAction();
+            if (conn.inCombat()) {
+                conn.recomputeCombatOutlines();
+            }
+        } else if (keyCode == KEY_LOWERCASE_B || keyCode == KEY_UPPERCASE_B) {
+            // 'B' swaps the active weapon hand. Feature A: this now drives the authoritative
+            // server switch (put-away/take-out streamed back as a recorded sequence), no
+            // longer a local-only cosmetic flip. Flip gInterfaceCurrentHand IMMEDIATELY for
+            // responsiveness (the local _combat_attack_this reads it for the hitMode it
+            // forwards), send `hand <n>`, and lock input until the server answers. On a
+            // refusal (server busy) the flip is reverted below. In combat the existing
+            // combatBusy gate applies + the server queues it for our turn; out of combat the
+            // new oocBusy gate applies. Blocked while already busy (no spamming the swap).
+            bool busy = conn.inCombat() ? combatBusy : oocBusy;
+            if (!busy) {
+                interfaceBarSwapHands(false);
+                int newHand = interfaceGetCurrentHand();
+                char cmd[16];
+                snprintf(cmd, sizeof(cmd), "hand %d", newHand);
+                conn.sendLine(cmd);
+                if (conn.inCombat()) {
+                    actionPending = true;
+                    actionPendingSince = getTicks();
+                    conn.recomputeCombatOutlines();
+                } else {
+                    handSwitchPending = true;
+                    handSwitchSince = getTicks();
+                    clientViewerTakeRefusal(); // clear any stale refusal edge before we wait
+                }
+            }
+        } else if (keyCode == KEY_LOWERCASE_G || keyCode == KEY_UPPERCASE_G) {
+            // Co-op ground-item convenience: ask the authoritative server to pick one
+            // eligible loose item from the tile OUR actor currently occupies. The client
+            // deliberately sends no tile or netId — either can be stale while a streamed
+            // walk is still catching up visually, and the feature exists specifically to
+            // avoid having to pixel-pick an obscured object. One item per press preserves
+            // the normal pickup gesture/AP/carry-cap semantics; repeated G clears a pile.
+            bool busy = conn.inCombat() ? combatBusy : oocBusy;
+            if (!busy && (!conn.inCombat() || conn.myTurn())) {
+                conn.sendLine("gethere");
+                if (conn.inCombat()) {
+                    actionPending = true;
+                    actionPendingSince = getTicks();
+                }
+            }
+        } else if (keyCode == -20) {
+            // Left-click the weapon/attack slot (interface.cc:505). Vanilla
+            // (_intface_use_item) branches on the slot's CYCLED action: RELOAD reloads
+            // (out of combat WITHOUT entering combat, interface.cc:1322), any attack
+            // action arms the crosshair + enters combat. Match that split here rather
+            // than always doing the attack path (which was forcing a combat-enter on a
+            // reload, and never reloading — owner-reported).
+            InterfaceItemAction leftAction = INTERFACE_ITEM_ACTION_DEFAULT;
+            InterfaceItemAction rightAction = INTERFACE_ITEM_ACTION_DEFAULT;
+            interfaceGetItemActions(&leftAction, &rightAction);
+            int curHand = interfaceGetCurrentHand();
+            int action = curHand == HAND_LEFT ? leftAction : rightAction;
+            // ►► WHAT IS IN THE HAND DECIDES, AND IT IS NOT ALWAYS A WEAPON. Vanilla's
+            // _intface_use_item (interface.cc) branches on isWeapon FIRST and has three
+            // arms, of which this handler had implemented one: a weapon attacks, an item
+            // that can be used ON something arms the USE crosshair, and a self-use item is
+            // simply used. Treating every hand item as a weapon meant the slot's one
+            // remaining behaviour was "start a fight" — equip a shovel, click it, and you
+            // drew on the room instead of digging (owner, live). None of the other two arms
+            // enters combat, in vanilla or here.
+            Object* handItem = nullptr;
+            if (interfaceGetActiveItem(&handItem) == -1) {
+                handItem = nullptr;
+            }
+            const bool handIsWeapon = handItem == nullptr
+                || itemGetType(handItem) == ITEM_TYPE_WEAPON;
+            // ►► AND WHEN NONE OF THE THREE APPLY, VANILLA DOES NOTHING AT ALL.
+            // _intface_use_item is three ifs with NO else: a hand item that is not a
+            // weapon, cannot be used on anything, and cannot be used on its own is
+            // simply not a usable thing, and clicking it is a no-op. Letting the
+            // non-weapon case fall through to the arms below made the slot do the one
+            // thing it must never do by accident — equip a pair of BOOTS, click the
+            // greyed-out slot, and you drew on the room (owner, live). Weapon-ness
+            // decides the branch first; nothing after this point is reachable for a
+            // non-weapon.
+            if (!handIsWeapon) {
+                // Use-on (shovel, lockpick, a stimpak on someone else): arm the vanilla
+                // USE crosshair. Pure local cursor state — the click that follows
+                // resolves the target and sends `useitemon`, the same split every skill
+                // cursor uses.
+                if (_proto_action_can_use_on(ProtoId(handItem))) {
+                    gameMouseSetCursor(MOUSE_CURSOR_USE_CROSSHAIR);
+                    gameMouseSetMode(GAME_MOUSE_MODE_USE_CROSSHAIR);
+                } else if (_obj_action_can_use(handItem)) {
+                    // Self-use (a stimpak in hand): the whole point of the hand slot is
+                    // not having to open the pack mid-fight. The server owns the consume
+                    // + heal, so send the verb and skip vanilla's local objectUseItem;
+                    // in combat the server queues it for our own turn and charges the AP.
+                    char cmd[32];
+                    snprintf(cmd, sizeof(cmd), "useitem %d", handItem->pid);
+                    conn.sendLine(cmd);
+                }
+                // No third case on purpose — see above.
+            } else if (action == INTERFACE_ITEM_ACTION_RELOAD) {
+                // Reload runs against the authoritative dude on the server; the loaded
+                // rounds / consumed ammo stream back via OBJECT_DELTA_INVENTORY. Do NOT
+                // enter combat and do NOT arm the crosshair.
+                char cmd[32];
+                snprintf(cmd, sizeof(cmd), "reload %d", curHand);
+                conn.sendLine(cmd);
+            } else if (conn.inCombat()) {
+                // Attack action: arm the crosshair. In combat it sticks immediately;
+                gameMouseSetMode(GAME_MOUSE_MODE_CROSSHAIR);
+                conn.recomputeCombatOutlines();
+            } else {
+                // out of combat the CROSSHAIR→MOVE guard below holds until COMBAT_ENTER,
+                // so enter combat via cstart, then defer the crosshair.
+                conn.sendLine("cstart");
+                pendingEnterCrosshair = true;
+            }
+        } else if ((keyCode == KEY_LOWERCASE_I || keyCode == KEY_UPPERCASE_I) && conn.inCombat()) {
+            // IN COMBAT the open is the priced act (4 AP, 2 with Quick Pockets) and
+            // only the server can rule on it, so ask instead of opening: it checks
+            // that it is our turn, charges, and answers with EVENT_INVENTORY_GRANT,
+            // which the branch below turns into the actual screen. A refusal
+            // (someone else's turn, or not enough AP) simply never grants, and the
+            // server streams the reason to the console.
+            //
+            // ►► GATED ON combatBusy LIKE EVERY OTHER PRICED KEY, AND THE REASON IS
+            // THE ONE THING A VIEWER KNOWS THAT THE SERVER DOES NOT. The server's
+            // turn gate (_combat_whose_turn) is the truth, but the SCREEN is behind
+            // it: the previous actor's shots are still replaying out of the pres
+            // queue when the wire has already moved the turn to us. Ungated, an
+            // 'I' pressed during that window was a legal on-your-turn open — priced
+            // 4 AP — for a turn the player had not been shown yet, so you arrived at
+            // your own turn with 1 AP and no idea where it went (owner, live). Two
+            // misclicks emptied a turn. combatBusy is exactly "the presentation has
+            // not handed the turn over yet" (!myTurn || pres queue busy || an action
+            // in flight || our own glide), the same latch SPACE and RETURN wait on.
+            if (conn.myTurn() && !combatBusy) {
+                conn.sendLine("invopen");
+            }
+        } else if ((keyCode == KEY_LOWERCASE_I || keyCode == KEY_UPPERCASE_I) && !conn.inCombat()) {
+            // Open the vanilla inventory screen (player-UI Slice 3). Equip/drop are wired
+            // (Slice 3b): each drop-resolution leaf fires a claim-gated wire verb and skips
+            // the local mutation, so the server-authoritative inventory stays the source of
+            // truth; USE/UNLOAD are still deferred (3c). It runs its own blocking loop; the
+            // service ticker keeps the wire pumping inside it and force-closes on combat
+            // entry / rebaseline (a rebaseline is deferred so mapLoad can't free gDude under
+            // the open screen).
+            inventoryOpen();
+            // The screen is closed now: reap items the reconcile unlinked but deferred
+            // freeing while a handler could still hold them (Slice 3b lifetime safety).
+            clientViewerFlushDeferredItemFrees();
+            // A rebaseline buffered while the screen was open is drained by the main loop
+            // below (conn.blobDeferred), uniformly for every modal.
+        } else if (keyCode == KEY_UPPERCASE_C || keyCode == KEY_LOWERCASE_C) {
+            // 'C' → the character sheet. The interface bar's character button is
+            // registered with KEY_LOWERCASE_C (interface.cc), so this one branch
+            // serves the hotkey AND the button.
+            //
+            // VIEW-ONLY (characterEditorShowViewOnly): the server owns the sheet,
+            // so local edits are drift the next rebaseline reverts — see that
+            // function. It shows THIS client's actor because the viewer's gDude is
+            // the local actor role, and the stats resolve through the actor's own
+            // sheet pid, not the host's.
+            //
+            // Allowed in combat: vanilla's character screen is free, and kEditor is
+            // already in kViewerModalMask so the wire keeps pumping underneath.
+            characterEditorShowViewOnly();
+            // Uniform with 'I'/'S': reap deferred frees, let the main loop drain a
+            // blob that buffered while the screen blocked.
+            clientViewerFlushDeferredItemFrees();
+        } else if (keyCode == KEY_UPPERCASE_P || keyCode == KEY_LOWERCASE_P) {
+            // 'P' → the pipboy. Owner-reported as a dead button: this dispatch is the
+            // viewer's OWN and deliberately never calls gameHandleKey, so until now there
+            // was no 'P' branch — and the interface bar's PIP button is registered with
+            // KEY_LOWERCASE_P (interface.cc), so the hotkey AND the button both fell
+            // through to nothing. Same one-branch-serves-both shape as 'C' above.
+            //
+            // This is where a player reads their HOLODISKS and QUEST list, both of which
+            // are rendered from gvars — so it only became worth opening once gvars were
+            // actually streamed (they used to freeze at the client's baseline).
+            //
+            // Status and automaps are read-only. REST is not, and it is refused inside the
+            // pipboy itself (pipboy.cc: it advances gameTime and heals, which the server
+            // owns) — player-initiated rest stays unimplemented for viewers until it
+            // becomes a server-driven verb, exactly as it was while this button was dead.
+            if (conn.inCombat()) {
+                // Vanilla refuses the pipboy in combat with this same sound + message
+                // (game_ui.cc). Mirrored rather than silently ignored — a dead button is
+                // what got reported in the first place.
+                soundPlayFile("iisxxxx1");
+                MessageListItem messageListItem;
+                char title[128];
+                strcpy(title, getmsg(&gMiscMessageList, &messageListItem, 7));
+                showDialogBox(title, nullptr, 0, 192, 116, _colorTable[32328], nullptr, _colorTable[32328], 0);
+            } else {
+                soundPlayFile("ib1p1xx1");
+                pipboyOpen(PIPBOY_OPEN_INTENT_UNSPECIFIED);
+                // Uniform with 'I'/'C'/'S': reap deferred frees, let the main loop drain a
+                // blob that buffered while the screen blocked.
+                clientViewerFlushDeferredItemFrees();
+            }
+        } else if (keyCode == KEY_UPPERCASE_S || keyCode == KEY_LOWERCASE_S) {
+            // 'S' → skilldex (player-UI skill hotkeys). Runs the vanilla read-only
+            // selector; its blocking loop is pump-and-bailed by the service ticker
+            // (kSkilldex ∈ kViewerModalMask). Map the chosen skill to a local target
+            // mode; the click handler below fires the `skill` wire verb.
+            //
+            // Allowed IN COMBAT since Stage 4. The selector itself is read-only and
+            // free — vanilla prices the inventory screen, not this one — and the
+            // skill it arms is answered honestly on use: msg 902 for the seven
+            // combat-forbidden skills, a real toggle for Sneak.
+            int rc = skilldexOpen();
+            int mode = viewerSkillModeForSkilldexRc(rc);
+            // The ticker may have applied dude-inv deltas while the modal blocked — reap
+            // deferred frees + let the main loop drain a deferred blob (uniform with 'I').
+            clientViewerFlushDeferredItemFrees();
+            if (rc == SKILLDEX_RC_SNEAK) {
+                conn.sendLine("sneak");
+            } else if (mode != -1) {
+                viewerEnterSkillMode(mode);
+            }
+        } else if (keyCode == KEY_1 || keyCode == KEY_EXCLAMATION) {
+            // Sneak (vanilla's '1'): a self-toggle with no target, so it goes straight
+            // out as its own verb instead of arming a target cursor. The authority
+            // flips the flag on OUR sheet row and streams it back — the indicator bar
+            // is repainted from the row that arrives, never optimistically here.
+            conn.sendLine("sneak");
+        } else if (viewerSkillModeForKey(keyCode) != -1) {
+            // Number keys 2-8 → skill target mode directly (vanilla game_ui.cc:349).
+            viewerEnterSkillMode(viewerSkillModeForKey(keyCode));
+        }
+
+        // Mouse. inputGetInput returns -2 on a mouse-button event (input.cc). We keep the
+        // capture-don't-dispatch discipline (never _gmouse_handle_event — its ARROW branch
+        // mutates the sim); each button is interpreted here into an upstream verb, and the
+        // authoritative result returns on the wire like any other.
+        if (keyCode == -2) {
+            int mouseEvent = mouseGetEvent();
+            int mx = 0;
+            int my = 0;
+            mouseGetPosition(&mx, &my);
+
+            bool inCombat = conn.inCombat();
+            int mode = gameMouseGetMode();
+
+            // Right-click cycles the cursor mode. In combat: MOVE→CROSSHAIR→ARROW
+            // (move / attack / view — ARROW is view+LOOK only in combat; the acting
+            // verbs are AP-gated and deferred). Out of combat: MOVE↔ARROW (ARROW
+            // unlocks the vanilla action menu + primary-action hover icon; CROSSHAIR
+            // is combat-only).
+            if ((mouseEvent & MOUSE_EVENT_RIGHT_BUTTON_DOWN) != 0) {
+                if (viewerSkillForMode(mode) != -1) {
+                    // Right-click cancels an active skill target mode → back to MOVE
+                    // (vanilla drops the skill cursor on a non-target action).
+                    gameMouseSetCursor(MOUSE_CURSOR_NONE);
+                    gameMouseSetMode(GAME_MOUSE_MODE_MOVE);
+                } else if (inCombat) {
+                    gameMouseSetMode(mode == GAME_MOUSE_MODE_MOVE ? GAME_MOUSE_MODE_CROSSHAIR
+                            : mode == GAME_MOUSE_MODE_CROSSHAIR ? GAME_MOUSE_MODE_ARROW
+                                                               : GAME_MOUSE_MODE_MOVE);
+                    // Outlines follow the cursor mode: crosshair (attack) highlights all
+                    // in-LOS critters, move/view clears them (vanilla, #8).
+                    conn.recomputeCombatOutlines();
+                } else {
+                    gameMouseSetMode(mode == GAME_MOUSE_MODE_ARROW
+                            ? GAME_MOUSE_MODE_MOVE
+                            : GAME_MOUSE_MODE_ARROW);
+                }
+            } else if (mode == GAME_MOUSE_MODE_ARROW
+                && (mouseEvent & MOUSE_EVENT_LEFT_BUTTON_DOWN_REPEAT) == MOUSE_EVENT_LEFT_BUTTON_DOWN_REPEAT
+                && windowGetAtPoint(mx, my) == gIsoWindow
+                && !oocBusy) { // feature A: eat world input while an action animation is owed
+                // ARROW-mode left-HOLD → the vanilla action menu. Build + run it
+                // locally (pure-read on the mirror, via the shared game_mouse helpers),
+                // then map the picked item to a wire verb (§3.2). Works in combat too:
+                // since Stage 4 the acting verbs LAND there — the server queues them
+                // as combat intents and runs them on our own turn, charging the
+                // vanilla AP. (Before Stage 4 only LOOK landed and the rest were
+                // dropped at the wire.) The run loop owns its own input/render spin;
+                // conn.pump() catches up on release. netId 0 = unsynced → ignore.
+                Object* targetObj = gameMouseGetObjectUnderCursor(OBJ_TYPE_INVALID, true, gElevation);
+                if (targetObj != nullptr && targetObj->netId > 0) {
+                    int actionMenuItems[6];
+                    int count = gameMouseBuildActionMenu(targetObj, actionMenuItems);
+                    int selectedItem = gameMouseRunActionMenu(mx, my, actionMenuItems, count);
+                    viewerSendActionMenuVerb(conn, selectedItem, targetObj);
+                }
+            } else if ((mouseEvent & MOUSE_EVENT_LEFT_BUTTON_UP) != 0
+                && windowGetAtPoint(mx, my) == gIsoWindow
+                && !oocBusy) { // feature A: eat world input while an action animation is owed
+                // Only clicks inside the iso window act (game_mouse.cc pattern); the
+                // viewer's gIsoWindow spans the whole screen at (0,0).
+                if (inCombat && mode == GAME_MOUSE_MODE_CROSSHAIR) {
+                    // Crosshair attack. Resolve the target exactly as vanilla's in-window
+                    // handler (game_mouse.cc:1001: critter first, then any object) and run
+                    // the REAL _combat_attack_this — its whole selection UX (turn guard, hit
+                    // mode from the bar, bad-shot messages, called-shot picker) runs locally,
+                    // and its commit fork forwards `cattack` upstream (§3.b).
+                    if (conn.myTurn() && !combatBusy) {
+                        Object* targetObj = gameMouseGetObjectUnderCursor(OBJ_TYPE_CRITTER, false, gElevation);
+                        if (targetObj == nullptr) {
+                            targetObj = gameMouseGetObjectUnderCursor(OBJ_TYPE_INVALID, false, gElevation);
+                        }
+                        if (targetObj != nullptr) {
+                            // _combat_attack_this runs the vanilla selection UX and
+                            // only forwards a `cattack` at its commit point. Arm the
+                            // input-lock ONLY if a verb actually went out — a bad-shot
+                            // message / out-of-range / picker-cancel sends nothing and
+                            // must not freeze input for the round-trip timeout.
+                            _combat_attack_this(targetObj);
+                            if (clientViewerTakeAttackCommitted()) {
+                                actionPending = true;
+                                actionPendingSince = getTicks();
+                            }
+                        }
+                    }
+                } else if (mode == GAME_MOUSE_MODE_USE_CROSSHAIR) {
+                    // ►► THE OTHER HALF OF THE HAND SLOT. Vanilla answers this click in
+                    // game_mouse.cc with _action_use_an_item_on_object(gDude, object,
+                    // handItem); the viewer must not — that walks and mutates the local
+                    // mirror. Send `useitemon <netId> <pid>` instead, which is the verb the
+                    // inventory screen's use-on leaf already speaks, and let the server do
+                    // the approach + the 2 AP. Without this branch the click fell through to
+                    // MOVE and the shovel just walked you somewhere.
+                    Object* targetObj = gameMouseGetObjectUnderCursor(OBJ_TYPE_INVALID, true, gElevation);
+                    Object* handItem = nullptr;
+                    if (interfaceGetActiveItem(&handItem) == -1) {
+                        handItem = nullptr;
+                    }
+                    if (targetObj != nullptr && targetObj->netId > 0 && handItem != nullptr) {
+                        char cmd[48];
+                        snprintf(cmd, sizeof(cmd), "useitemon %d %d", targetObj->netId, handItem->pid);
+                        conn.sendLine(cmd);
+                    }
+                    // Back to MOVE either way, exactly as vanilla drops the cursor after a
+                    // use-crosshair click (game_mouse.cc) and as the skill modes do below.
+                    gameMouseSetCursor(MOUSE_CURSOR_NONE);
+                    gameMouseSetMode(GAME_MOUSE_MODE_MOVE);
+                } else if (viewerSkillForMode(mode) != -1) {
+                    // Skill target-mode click (player-UI skill hotkeys): resolve the
+                    // object under the cursor and fire `skill <netId> <skillId>`. The
+                    // server validates the id, walks the dude adjacent, and runs the
+                    // real actionUseSkill. Clicking your own dude self-casts (First
+                    // Aid/Doctor on self). Drop back to MOVE like vanilla afterward
+                    // (game_mouse.cc:1192-1196), whether or not a target was hit.
+                    //
+                    // Allowed in combat since Stage 4: the verb is queued for our own
+                    // turn, where actionUseSkill answers seven of the eight skills
+                    // with msg 902 and toggles Sneak. The refusal is the feedback.
+                    Object* targetObj = gameMouseGetObjectUnderCursor(OBJ_TYPE_INVALID, true, gElevation);
+                    if (targetObj != nullptr && targetObj->netId > 0) {
+                        char cmd[48];
+                        snprintf(cmd, sizeof(cmd), "skill %d %d", targetObj->netId, viewerSkillForMode(mode));
+                        conn.sendLine(cmd);
+                    }
+                    gameMouseSetCursor(MOUSE_CURSOR_NONE);
+                    gameMouseSetMode(GAME_MOUSE_MODE_MOVE);
+                } else if (mode == GAME_MOUSE_MODE_ARROW) {
+                    // ARROW-mode left-CLICK → the target's primary verb (the action
+                    // the hover icon shows), in OR out of combat. In combat the verb
+                    // is queued for our own turn and charged the vanilla AP (Stage 4);
+                    // it used to degrade to LOOK here because the server dropped every
+                    // acting verb mid-fight, which made view mode a dead end once a
+                    // fight started.
+                    Object* targetObj = gameMouseGetObjectUnderCursor(OBJ_TYPE_INVALID, true, gElevation);
+                    if (targetObj != nullptr && targetObj->netId > 0) {
+                        viewerSendPrimaryVerb(conn, targetObj);
+                    }
+                } else {
+                    // MOVE-mode left click → a move. Run iff shift XOR the running
+                    // preference; mirror ONLY the SELECTION half of game_mouse.cc's move
+                    // logic (never _dude_move/_dude_run, which animate the local mirror).
+                    // Objects (doors included) are used via ARROW mode now — the slice-1
+                    // MOVE-mode door special case is retired; MOVE means move (vanilla).
+                    int tile = tileFromScreenXY(mx, my, gElevation);
+                    if (tile >= 0) {
+                        bool shift = gPressedPhysicalKeys[SDL_SCANCODE_LSHIFT]
+                            || gPressedPhysicalKeys[SDL_SCANCODE_RSHIFT];
+                        bool run = shift != (settings.preferences.running != 0);
+                        char cmd[32];
+                        if (inCombat) {
+                            // In-combat MOVE (AP-limited) → cmove for the barrier. Gated
+                            // like the attack: no moves while busy (§3.c).
+                            if (!combatBusy) {
+                                snprintf(cmd, sizeof(cmd), "cmove %d %d", tile, run ? 1 : 0);
+                                conn.sendLine(cmd);
+                                actionPending = true;
+                                actionPendingSince = getTicks();
+                            }
+                        } else {
+                            // VANILLA PARITY: game_mouse's click-to-move preamble
+                            // (_dude_move_prep, animation.cc) runs reg_anim_clear(gDude)
+                            // under settings.system.interrupt_walk — that is what cancels
+                            // the dude's in-flight IDLE (fidget) animation when you click
+                            // to walk. We deliberately don't call _dude_move/_dude_run
+                            // (they animate the local mirror), and so we silently skipped
+                            // this cancel too.
+                            //
+                            // Consequence (owner-found "he runs on one leg"): the fidget
+                            // SAD stays live in the local animation registry while the
+                            // server-driven glide plays, and BOTH drive the same sprite —
+                            // _object_animate_pass re-applies the fidget's STAND fid +
+                            // frame 0 every pass (animation.cc:2369), the glide re-asserts
+                            // its walk fid, and the walk cycle never advances past ~frame 3
+                            // of 10. The tell is that the fidget visibly FINISHES after the
+                            // run ends: it outlived the walk that should have cancelled it.
+                            //
+                            // Local presentation only — no sim state, and the glide owns the
+                            // sprite from here. Honors the vanilla setting, so a player who
+                            // turned interrupt_walk off keeps vanilla's (janky) behavior.
+                            if (settings.system.interrupt_walk) {
+                                reg_anim_clear(gDude);
+                            }
+                            snprintf(cmd, sizeof(cmd), "mv %d %d", tile, run ? 1 : 0);
+                            conn.sendLine(cmd);
+                        }
+                    }
+                }
+            }
+        }
+
+        } // if (!clientDialogActive())
+
+        // A rebaseline that arrived while a modal screen was open was buffered (onBlobEnd
+        // deferred it so mapLoad couldn't free gDude under the screen). The modal has since
+        // closed (we're back in the main loop), so apply it now — BEFORE this frame's pump,
+        // so fresh events land on the rebuilt world. Uniform drain for every modal (Slice 3a
+        // review MEDIUM: the per-'I'-site drain didn't cover skilldex/char/pipboy).
+        if (conn.blobDeferred()) {
+            conn.applyDeferredBlob();
+        }
+
+        // The server granted the in-combat inventory screen we asked for on our
+        // turn, and has already charged the AP. Open it HERE rather than in the
+        // decoder that received the grant: the screen runs its own blocking loop,
+        // and entering it from inside conn.pump() would re-enter the pump that is
+        // still decoding the frame. This is the same no-modal-open point the
+        // deferred rebaseline above uses, for the same reason.
+        // The server offered this player an elevator panel. Opened HERE, at the same
+        // no-modal-open point as the inventory grant, because the panel runs a blocking
+        // input loop that must not be entered from inside pump() (client_net.h).
+        //
+        // The panel is the only part of an elevator ride the client owns: it answers
+        // with a BUTTON INDEX and the server resolves what that button means against
+        // its own destination table, then rides the whole party there. Escaping sends
+        // nothing, which is exactly vanilla's cancel.
+        {
+            int elevator;
+            int startLevel;
+            if (conn.takeElevatorPrompt(&elevator, &startLevel)) {
+                int level = elevatorPickLevel(elevator, startLevel);
+                if (level >= 0) {
+                    clientViewerElevatorRide(level);
+                }
+            }
+        }
+
+        // ►► SCREEN FADES, with a WATCHDOG. A fade-out whose matching fade-in never
+        // arrives is a black screen forever — a bricked client — and the ways to lose
+        // the pair are all real: the script that opened it errors out, the actor dies
+        // mid-sequence, the sequence outlives our connection. So the black period is
+        // BOUNDED here: if nothing has faded us back in within kFadeBlackMaxMs we do it
+        // ourselves and say so. Fading back early costs a visual beat; staying black
+        // costs the session, and that trade is never close.
+        //
+        // ►► THE FADE ITSELF IS NOT APPLIED HERE ANY MORE, and that move is the fix for
+        // "the grave opened and THEN the screen went black". Object deltas are applied
+        // at DECODE; a fade applied out here ran after every delta in the frame, so the
+        // change the fade exists to hide was already on screen. It is now applied in the
+        // decoder, in wire order, next to the deltas it brackets. What is left here is
+        // only the watchdog.
+        if (conn.fadeWatchdogExpired(getTicks(), kViewerFadeBlackMaxMs)) {
+            debugPrint("client-viewer: no fade-in after %u ms — fading back in (watchdog)\n",
+                kViewerFadeBlackMaxMs);
+            paletteFadeTo(_cmap);
+            conn.clearFadeBlack();
+        }
+
+        // The server says we used a Motion Sensor: open OUR automap, with scanner
+        // detail. Same no-modal-open point and the same reason as the elevator panel.
+        {
+            bool usingScanner = false;
+            if (conn.takeAutomapOpen(&usingScanner)) {
+                automapShow(true, usingScanner);
+                clientViewerFlushDeferredItemFrees();
+            }
+        }
+
+        if (conn.takeInventoryGrant()) {
+            conn.setCombatModalOpen(true); // exempts it from the ticker's combat force-ESC
+            inventoryOpen();
+            conn.setCombatModalOpen(false);
+            // Tell the server the session is over, so the next 'I' is priced again
+            // — vanilla charges per OPEN, and reopening is a second 4 AP.
+            conn.sendLine("invclose");
+            clientViewerFlushDeferredItemFrees(); // uniform with the out-of-combat 'I' path
+        }
+
+        // Apply the live wire: decode every frame that has arrived and mutate the
+        // local sim (pure state setters). objectSetLocation etc. invalidate the
+        // tile rects, so the next renderPresent redraws the moved objects.
+        if (!conn.pump()) {
+            debugPrint("client-viewer: server disconnected\n");
+            // ►► SAY WHY, ON STDERR. If we were never bound to a slot, the server refused
+            // our login and closed the socket rather than leave us connected-but-unbound —
+            // and by far the most common reason is that this ACCOUNT NAME IS ALREADY LOGGED
+            // IN (the server kicks the second attempt; see server_control.cc). The wire has
+            // no per-session channel to carry a reason, so this is reported from our side
+            // rather than quoted from the server; the server prints the authoritative line.
+            if (!conn.everBoundToSlot()) {
+                const char* who = getenv("F2_PLAYER_NAME");
+                fprintf(stderr, "client-viewer: disconnected WITHOUT ever being bound to a player"
+                                " slot — the server refused this login.\n");
+                fprintf(stderr, "client-viewer: ►► most likely ALREADY LOGGED IN%s%s%s."
+                                " One session per account; close the other client or use a"
+                                " different F2_PLAYER_NAME. The server log has the reason.\n",
+                    who != nullptr ? " as '" : "", who != nullptr ? who : "", who != nullptr ? "'" : "");
+            } else {
+                fprintf(stderr, "client-viewer: server disconnected.\n");
+            }
+            break;
+        }
+
+        // A rebaseline blob was applied mid-run (another viewer joined, or a map
+        // transition): that mapLoad re-registered the animation tickers and
+        // re-enabled gmouse, exactly like the first load did. Re-apply the §E
+        // puppet levers or the viewer stops being a puppet.
+        if (conn.loadCount() != puppetLoadCount) {
+            puppetLoadCount = conn.loadCount();
+            scriptsDisable();
+            tickersRemove(_object_animate);
+            tickersRemove(_dude_fidget);
+            // Re-apply the STEP 6 input enablement: the rebaseline's mapLoad
+            // re-enabled gmouse and re-added the tickers, exactly like the first
+            // load. The server still holds our claim (same connection) — do NOT
+            // re-claim.
+            _gmouse_enable();
+            gameMouseSetMode(GAME_MOUSE_MODE_MOVE);
+            gameMouseObjectsShow();
+            // The re-pin reset the cursor to the MOVE hex; drop our watch-cursor
+            // latch so the combat-busy check below re-applies it if still needed.
+            watchCursorShown = false;
+        }
+
+        // S4: drive combat presentation. presentationTick starts the next queued
+        // attack replay once the previous is idle (serialized, one hit per animation)
+        // and applies the deferred end-of-combat chrome after the queue drains.
+        conn.presentationTick();
+
+        // Step the whole presentation layer: glides (pure render offsets/frames; sim
+        // state was already applied by the decoder above), then the attack/hit/death/
+        // door reg_anim sequences via _object_animate, then reap completed replays and
+        // door slides. The internal ordering (glide → _object_animate → reap) is
+        // load-bearing; presAdvance owns it (client_present.cc).
+        presAdvance();
+
+        // CROSSHAIR is a combat-only cursor: on combat exit, snap it back to MOVE so
+        // the hex cursor returns and a stray click can't try to attack. MOVE and ARROW
+        // are legal in both phases (ARROW is view+LOOK in combat), so neither is
+        // force-snapped; the player re-picks CROSSHAIR with right-click in combat.
+        if (!conn.inCombat() && gameMouseGetMode() == GAME_MOUSE_MODE_CROSSHAIR) {
+            gameMouseSetMode(GAME_MOUSE_MODE_MOVE);
+        }
+
+        // Skill target modes survive combat entry since Stage 4: the `skill` verb
+        // now lands in combat, where vanilla answers seven of the eight skilldex
+        // skills with proto msg 902 ("you cannot use that skill in combat") and
+        // toggles the eighth — Sneak — normally (actions.cc:1662ff, 1760). The
+        // mode is therefore no longer dead in combat, so it is not snapped back:
+        // the refusal message IS the feedback, and silently dropping the cursor
+        // gave the player none.
+
+        // Deferred crosshair from an out-of-combat weapon-slot left-click: once the cstart
+        // we sent has opened combat, switch to the target cursor (vanilla left-click-weapon
+        // enters combat AND arms the crosshair in one gesture). The reset guard above kept
+        // us on MOVE until now; runs after it so it wins the frame combat opens.
+        if (pendingEnterCrosshair && conn.inCombat()) {
+            gameMouseSetMode(GAME_MOUSE_MODE_CROSSHAIR);
+            conn.recomputeCombatOutlines();
+            pendingEnterCrosshair = false;
+        }
+
+        // Recompute the combat-busy gate now that this frame's wire + replay state
+        // is settled, and reflect it on the cursor. Busy = in combat AND (not our
+        // turn, OR a replay is playing/queued/exit-deferred, OR we have an unanswered
+        // action in flight). The animated pocket-watch cursor is a vanilla-faithful
+        // "wait" cue; it also stops the hex/crosshair cursor being drawn while busy.
+        if (actionPending
+            && (conn.combatPresentationBusy() || !conn.myTurn()
+                || getTicksBetween(getTicks(), actionPendingSince) >= kActionPendingTimeoutMs)) {
+            actionPending = false;
+        }
+        // clientAnimActiveFor(gDude): S5 in-combat move glide. The dude's committed
+        // combat move (cmove) plays as a tile-by-tile glide; lock input for its whole
+        // duration (vanilla blocks input while walking), which also covers a long move
+        // that outlasts the actionPending round-trip timeout.
+        combatBusy = conn.inCombat()
+            && (!conn.myTurn() || conn.combatPresentationBusy() || actionPending
+                || clientAnimActiveFor(gDude));
+
+        // Feature A: out-of-combat input block (the twin of combatBusy). Resolve the
+        // pending hand switch first — a refusal (server busy) flips the local hand back;
+        // otherwise the RTT timeout releases the latch, by which point the authoritative
+        // draw has streamed and animationIsBusy(gDude) keeps the block for its duration.
+        if (handSwitchPending) {
+            if (clientViewerTakeRefusal()) {
+                interfaceBarSwapHands(false); // server rejected the switch — undo the flip
+                handSwitchPending = false;
+            } else if (getTicksBetween(getTicks(), handSwitchSince) >= kActionPendingTimeoutMs) {
+                handSwitchPending = false;
+            }
+        }
+        oocBusy = !conn.inCombat() && (handSwitchPending || animationIsBusy(gDude));
+        // Softlock diagnostic (F2_TRACE_EVENTS): if the wait cursor holds for a long
+        // stretch, name WHICH component keeps combatBusy latched — a stuck myTurn flip,
+        // an un-idle replay/door, a queue that won't drain, an unanswered action, or the
+        // dude's own glide. One trace beats a stack of hypotheses (viewer has no oracle).
+        //
+        // The clock measures NO PROGRESS, not "not my turn". Those were the same thing
+        // in single player, where !myTurn means AI turns that resolve in seconds — but
+        // with a second human on the roster, waiting a minute for them to think is not a
+        // softlock, and reporting it as one buries the real thing. Any presentation
+        // progress (a drained event, an advancing glide hop — the other player moving
+        // one hex) restarts it; a genuine stall makes no progress by definition.
+        if (getenv("F2_TRACE_EVENTS") != nullptr) {
+            static unsigned int busySince = 0;
+            static unsigned int lastBusyTrace = 0;
+            static unsigned int busyProgressMark = 0;
+            unsigned int nowT = getTicks();
+            if (!combatBusy) {
+                busySince = 0;
+            } else {
+                unsigned int progressTick = clientAnimLastProgressTick();
+                if (busySince == 0 || progressTick != busyProgressMark) {
+                    busySince = nowT;
+                    busyProgressMark = progressTick;
+                }
+                if (getTicksBetween(nowT, busySince) >= 3000
+                    && getTicksBetween(nowT, lastBusyTrace) >= 2000) {
+                    lastBusyTrace = nowT;
+                    fprintf(stderr, "[busy] STUCK %ums myTurn=%d presBusy=%d combatAnim=%d actionPending=%d dudeGlide=%d\n",
+                        getTicksBetween(nowT, busySince), conn.myTurn() ? 1 : 0,
+                        conn.combatPresentationBusy() ? 1 : 0, clientCombatAnimActive() ? 1 : 0,
+                        actionPending ? 1 : 0,
+                        clientAnimActiveFor(gDude) ? 1 : 0);
+                }
+            }
+        }
+        if ((combatBusy || oocBusy) && !watchCursorShown) {
+            gameMouseSetCursor(MOUSE_CURSOR_WAIT_WATCH);
+            watchCursorShown = true;
+        } else if (!combatBusy && !oocBusy && watchCursorShown) {
+            // Hand the cursor back to the pinned MOVE hex (gameMouseRefresh rebuilds
+            // it once the animated cursor is cleared and the objects are shown).
+            gameMouseSetCursor(MOUSE_CURSOR_NONE);
+            gameMouseObjectsShow();
+            watchCursorShown = false;
+        }
+
+        // Authoritative full-view redraw: the wire may have moved/spawned/connected
+        // any object this frame, and the per-event rect refreshes (objectSetLocation
+        // etc.) don't cover every path (a freshly _obj_connect'd item, say). A viewer
+        // is a pure mirror, so just repaint the whole iso window from current object
+        // state each frame — simple and complete.
+        tileWindowRefresh();
+
+        renderPresent();
+
+        if (shotEvery > 0 && (frameNo % shotEvery) == 0) {
+            takeScreenshot();
+        }
+        frameNo++;
+
+        sharedFpsLimiter.throttle();
+    }
+
+    clientViewerRemoveServiceTicker(); // unregister the modal ticker before conn is destroyed
+    conn.close();
+    scriptsDisable();
+    presReset(); // end any in-flight replay/door reg_anim before the world unloads
+    presSetEnabled(false); // also drops any lingering glide (formerly leaked at shutdown)
+    main_unload_new();
     return 0;
 }
 

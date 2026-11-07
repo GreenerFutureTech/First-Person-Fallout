@@ -39,6 +39,7 @@ int objectCreateWithProtoId(Object** objectPtr, const ProtoId& protoId);
 int _obj_copy(Object** a1, Object* a2);
 int _obj_connect(Object* obj, int tile_index, MapElevation elev, Rect* rect);
 int _obj_disconnect(Object* obj, Rect* rect);
+int objectReattach(Object* obj, int tile, MapElevation elevation);
 int _obj_offset(Object* obj, int x, int y, Rect* rect);
 int _obj_move(Object* a1, int a2, int a3, MapElevation elevation, Rect* a5);
 int objectSetLocation(Object* obj, int tile, MapElevation elevation, Rect* rect);
@@ -66,6 +67,7 @@ bool _obj_action_can_use(Object* obj);
 bool _obj_action_can_talk_to(Object* obj);
 bool _obj_portal_is_walk_thru(Object* obj);
 Object* objectFindById(int a1);
+Object* objectFindByNetId(int netId);
 Object* objectGetOwner(Object* obj);
 void _obj_remove_all();
 Object* objectFindFirst();
@@ -105,6 +107,9 @@ void _obj_preload_art_cache(MapHeaderFlags flags);
 int _obj_save_dude(File* stream);
 int _obj_load_dude(File* stream);
 void _obj_fix_violence_settings(int* frmId);
+void objectApplyWireFlags(Object* obj, unsigned int wireFlags);
+int _obj_save_player_actor(File* stream, Object* actor);
+int _obj_load_player_actor(File* stream, Object** actorPtr);
 
 Object* objectTypedFindById(int id, ObjectType type);
 bool isExitGridAt(int tile, MapElevation elevation);
@@ -140,6 +145,11 @@ private:
 };
 
 int objectCreateWithFrmIdProtoId(UniqueObject& obj, const FrmId& frmId, const ProtoId& protoId);
+
+int objectNextNetId();
+int objectGetNextNetId();
+void objectSetNextNetId(int netId);
+void objectAssignAllNetIds();
 
 } // namespace fallout
 

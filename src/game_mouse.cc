@@ -1,3 +1,4 @@
+#include "sfall_config.h"
 #include "game_mouse.h"
 
 #include <assert.h>
@@ -41,6 +42,11 @@
 #include "window_manager.h"
 
 namespace fallout {
+
+int gameMouseBuildActionMenu(Object* target, int* actionMenuItems);
+
+int gameMouseRunActionMenu(int mouseX, int mouseY, int* actionMenuItems, int actionMenuItemsCount);
+
 
 enum ScrollableDirections : int {
     SCROLLABLE_NONE = 0x00,
@@ -1363,7 +1369,6 @@ void _gmouse_handle_event(int mouseX, int mouseY, int mouseState)
     }
 }
 
-// 0x44C840 gmouse_set_cursor
 int gameMouseSetCursor(MouseCursorType cursor)
 {
     if (!gGameMouseInitialized) {
@@ -2765,6 +2770,145 @@ void gameMouseRefreshImmediately()
 Object* gmouse_get_outlined_object()
 {
     return gGameMouseHighlightedItem;
+}
+
+
+
+int gameMouseBuildActionMenu(Object* target, int* actionMenuItems)
+{
+    int actionMenuItemsCount = 0;
+    switch (FrmId(target).objectType()) {
+    case OBJ_TYPE_ITEM:
+        actionMenuItems[actionMenuItemsCount++] = GAME_MOUSE_ACTION_MENU_ITEM_USE;
+        actionMenuItems[actionMenuItemsCount++] = GAME_MOUSE_ACTION_MENU_ITEM_LOOK;
+        if (itemGetType(target) == ITEM_TYPE_CONTAINER) {
+            actionMenuItems[actionMenuItemsCount++] = GAME_MOUSE_ACTION_MENU_ITEM_INVENTORY;
+            actionMenuItems[actionMenuItemsCount++] = GAME_MOUSE_ACTION_MENU_ITEM_USE_SKILL;
+        }
+        actionMenuItems[actionMenuItemsCount++] = GAME_MOUSE_ACTION_MENU_ITEM_CANCEL;
+        break;
+    case OBJ_TYPE_CRITTER:
+        if (target == gDude) {
+            actionMenuItems[actionMenuItemsCount++] = GAME_MOUSE_ACTION_MENU_ITEM_ROTATE;
+        } else {
+            if (_obj_action_can_talk_to(target)) {
+                if (!isInCombat()) {
+                    actionMenuItems[actionMenuItemsCount++] = GAME_MOUSE_ACTION_MENU_ITEM_TALK;
+                }
+            } else {
+                if (!critterFlagCheck(target, CRITTER_NO_STEAL)) {
+                    actionMenuItems[actionMenuItemsCount++] = GAME_MOUSE_ACTION_MENU_ITEM_USE;
+                }
+            }
+
+            if (actionCheckPush(gDude, target)) {
+                actionMenuItems[actionMenuItemsCount++] = GAME_MOUSE_ACTION_MENU_ITEM_PUSH;
+            }
+        }
+
+        actionMenuItems[actionMenuItemsCount++] = GAME_MOUSE_ACTION_MENU_ITEM_LOOK;
+        actionMenuItems[actionMenuItemsCount++] = GAME_MOUSE_ACTION_MENU_ITEM_INVENTORY;
+        actionMenuItems[actionMenuItemsCount++] = GAME_MOUSE_ACTION_MENU_ITEM_USE_SKILL;
+        actionMenuItems[actionMenuItemsCount++] = GAME_MOUSE_ACTION_MENU_ITEM_CANCEL;
+        break;
+    case OBJ_TYPE_SCENERY:
+        if (_obj_action_can_use(target)) {
+            actionMenuItems[actionMenuItemsCount++] = GAME_MOUSE_ACTION_MENU_ITEM_USE;
+        }
+
+        actionMenuItems[actionMenuItemsCount++] = GAME_MOUSE_ACTION_MENU_ITEM_LOOK;
+        actionMenuItems[actionMenuItemsCount++] = GAME_MOUSE_ACTION_MENU_ITEM_INVENTORY;
+        actionMenuItems[actionMenuItemsCount++] = GAME_MOUSE_ACTION_MENU_ITEM_USE_SKILL;
+        actionMenuItems[actionMenuItemsCount++] = GAME_MOUSE_ACTION_MENU_ITEM_CANCEL;
+        break;
+    case OBJ_TYPE_WALL:
+        actionMenuItems[actionMenuItemsCount++] = GAME_MOUSE_ACTION_MENU_ITEM_LOOK;
+        if (_obj_action_can_use(target)) {
+            actionMenuItems[actionMenuItemsCount++] = GAME_MOUSE_ACTION_MENU_ITEM_INVENTORY;
+        }
+        actionMenuItems[actionMenuItemsCount++] = GAME_MOUSE_ACTION_MENU_ITEM_CANCEL;
+        break;
+    }
+    return actionMenuItemsCount;
+}
+
+int gameMouseRunActionMenu(int mouseX, int mouseY, int* actionMenuItems, int actionMenuItemsCount)
+{
+    if (actionMenuItemsCount <= 0 || actionMenuItemsCount > GAME_MOUSE_ACTION_MENU_ITEM_COUNT) return -1;
+    GameMouseActionMenuItem typedItems[GAME_MOUSE_ACTION_MENU_ITEM_COUNT];
+    for (int i = 0; i < actionMenuItemsCount; ++i) typedItems[i] = static_cast<GameMouseActionMenuItem>(actionMenuItems[i]);
+    if (gameMouseRenderActionMenuItems(mouseX, mouseY, typedItems, actionMenuItemsCount, _scr_size.right - _scr_size.left + 1, _scr_size.bottom - _scr_size.top - 99) != 0) {
+        return -1;
+    }
+
+    Rect cursorRect;
+    InterfaceFrmId fid = InterfaceFrameId::ActionMenu;
+    // NOTE: Uninline.
+    if (gameMouse3dSetFlatFrmId(fid, &cursorRect) != 0 || _gmouse_3d_move_to(mouseX, mouseY, gElevation, &cursorRect) != 0) {
+        return -1;
+    }
+
+    tileWindowRefreshRect(&cursorRect, gElevation);
+    isoDisable();
+
+    int newMouseY = mouseY;
+    int actionIndex = 0;
+    while ((mouseGetEvent() & MOUSE_EVENT_LEFT_BUTTON_UP) == 0) {
+        sharedFpsLimiter.mark();
+
+        inputGetInput();
+
+        if (_game_user_wants_to_quit != 0) {
+            actionMenuItems[actionIndex] = 0;
+        }
+
+        int updatedMouseX;
+        int updatedMouseY;
+        mouseGetPosition(&updatedMouseX, &updatedMouseY);
+
+        if (abs(updatedMouseY - newMouseY) > 10) {
+            if (newMouseY >= updatedMouseY) {
+                actionIndex -= 1;
+            } else {
+                actionIndex += 1;
+            }
+
+            // Clamp to the valid item range. Without this actionIndex drifts past
+            // the menu ends on continued mouse movement (highlight just no-ops
+            // out of range), and the `return actionMenuItems[actionIndex]` at the
+            // end then reads off the end of the caller's fixed array — ASAN
+            // stack-buffer-overflow, hit by dragging past the action menu's edge.
+            // count is always >= 1 (CANCEL is always present).
+            if (actionIndex < 0) {
+                actionIndex = 0;
+            } else if (actionIndex >= actionMenuItemsCount) {
+                actionIndex = actionMenuItemsCount - 1;
+            }
+
+            if (gameMouseHighlightActionMenuItemAtIndex(actionIndex) == 0) {
+                tileWindowRefreshRect(&cursorRect, gElevation);
+            }
+            newMouseY = updatedMouseY;
+        }
+
+        renderPresent();
+        sharedFpsLimiter.throttle();
+    }
+
+    isoEnable();
+
+    _gmouse_3d_hover_test = false;
+    gGameMouseLastX = mouseX;
+    gGameMouseLastY = mouseY;
+    _gmouse_3d_last_move_time = getTicks();
+
+    _mouse_set_position(mouseX, newMouseY);
+
+    if (gameMouseUpdateHexCursorFid(&cursorRect) == 0) {
+        tileWindowRefreshRect(&cursorRect, gElevation);
+    }
+
+    return actionMenuItems[actionIndex];
 }
 
 } // namespace fallout

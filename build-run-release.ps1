@@ -12,9 +12,9 @@ $game = 'C:\Users\Flyin\source\repos\Fo2Build'
 $build = 'C:\Users\Flyin\source\repos\First-Person-Fallout\out\build\windows-x64-vs18'
 
 Write-Host "Copying EXE..."
-Copy-Item "$build\Release\fallout2-ce.exe" "$game\fallout2-FPS.exe" -Force
+Copy-Item "$build\Release\Fallout2-FPS.exe" "$game\Fallout2-FPS.exe" -Force
 
 
 
 Write-Host "Launching game..."
-Start-Process "$game\fallout2-FPS.exe" -WorkingDirectory $game
+Start-Process "$game\Fallout2-FPS.exe" -WorkingDirectory $game

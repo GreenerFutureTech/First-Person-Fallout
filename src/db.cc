@@ -1,3 +1,4 @@
+
 #include "db.h"
 
 #include <assert.h>
@@ -9,6 +10,15 @@
 #include "xfile.h"
 
 namespace fallout {
+
+File* fileOpenMemory(const void* data, size_t size);
+
+File* fileOpenMemoryWrite();
+
+const unsigned char* fileMemoryData(File* stream);
+
+long fileMemorySize(File* stream);
+
 
 typedef struct FileList {
     XList xlist;
@@ -743,6 +753,28 @@ void fileSetReadProgressHandler(FileReadProgressHandler* handler, int size)
 int _db_list_compare(const void* p1, const void* p2)
 {
     return compat_stricmp(*(const char**)p1, *(const char**)p2);
+}
+
+
+
+File* fileOpenMemory(const void* data, size_t size)
+{
+    return xfileOpenMemory(data, size);
+}
+
+File* fileOpenMemoryWrite()
+{
+    return xfileOpenMemoryWrite();
+}
+
+const unsigned char* fileMemoryData(File* stream)
+{
+    return xfileMemoryData(stream);
+}
+
+long fileMemorySize(File* stream)
+{
+    return xfileMemorySize(stream);
 }
 
 } // namespace fallout

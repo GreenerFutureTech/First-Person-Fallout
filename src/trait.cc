@@ -1,3 +1,4 @@
+#include "server_players.h" // playerActorSlotOf — per-actor trait rows
 #include "trait.h"
 
 #include <stdio.h>
@@ -19,6 +20,27 @@
 #include <string>
 
 namespace fallout {
+
+static Trait gPlayerActorTraits[kMaxPlayerActors - 1][TRAITS_MAX_SELECTED_COUNT];
+
+static Trait* traitRow(Object* subject);
+
+void traitsPlayerActorSeed();
+
+void traitsPlayerActorSeedSlot(int slot);
+
+static Trait* traitsPlayerActorRow(int slot);
+
+int traitsPlayerActorRowWrite(File* stream, int slot);
+
+int traitsPlayerActorRowRead(File* stream, int slot);
+
+void traitsMutateDrop(Trait* traits, int traitCount, int pickedLine, Trait firstListedTrait);
+
+void traitsMutateGain(Trait* traits, int traitCount, Trait newTrait);
+
+static bool traitHas(Object* subject, Trait trait);
+
 
 // Provides metadata about traits.
 typedef struct TraitDescription {
@@ -139,6 +161,15 @@ void traitsReset()
     for (int index = 0; index < TRAITS_MAX_SELECTED_COUNT; index++) {
         gSelectedTraits[index] = TRAIT_INVALID;
     }
+
+    // Extras reset with the host — file statics, not malloc'd per run, so a new
+    // game would otherwise inherit the previous one's traits (same trap as
+    // perkResetRanks and pcStatsReset).
+    for (int slot = 0; slot < kMaxPlayerActors - 1; slot++) {
+        for (int index = 0; index < TRAITS_MAX_SELECTED_COUNT; index++) {
+            gPlayerActorTraits[slot][index] = TRAIT_INVALID;
+        }
+    }
 }
 
 // 0x4B3AF8 trait_exit
@@ -168,19 +199,21 @@ int traitsSave(File* stream)
 // Sets selected traits.
 //
 // 0x4B3B48 trait_set
-void traitsSetSelected(Trait trait1, Trait trait2)
+void traitsSetSelected(Trait trait1, Trait trait2, Object* subject)
 {
-    gSelectedTraits[0] = trait1;
-    gSelectedTraits[1] = trait2;
+    Trait* row = traitRow(subject);
+    row[0] = trait1;
+    row[1] = trait2;
 }
 
 // Returns selected traits.
 //
 // 0x4B3B54 trait_get
-void traitsGetSelected(Trait* trait1, Trait* trait2)
+void traitsGetSelected(Trait* trait1, Trait* trait2, Object* subject)
 {
-    *trait1 = gSelectedTraits[0];
-    *trait2 = gSelectedTraits[1];
+    Trait* row = traitRow(subject);
+    *trait1 = row[0];
+    *trait2 = row[1];
 }
 
 // Returns a name of the specified trait, or `NULL` if the specified trait is
@@ -213,14 +246,15 @@ SkillDexFrmId traitGetFrmId(Trait trait)
 // Returns `true` if the specified trait is selected.
 //
 // 0x4B3BC8 trait_level
-bool traitIsSelected(Trait trait)
+bool traitIsSelected(Trait trait, Object* subject)
 {
-    return gSelectedTraits[0] == trait || gSelectedTraits[1] == trait;
+    Trait* row = traitRow(subject);
+    return row[0] == trait || row[1] == trait;
 }
 
-bool traitIsSelectedAndActive(Trait trait)
+bool traitIsSelectedAndActive(Trait trait, Object* subject)
 {
-    return traitIsValid(trait) && traitIsSelected(trait) && !traitHardcodeDisabled[trait];
+    return traitIsValid(trait) && traitIsSelected(trait, subject) && !traitHardcodeDisabled[trait];
 }
 
 static void traitsLoadSfallConfig()
@@ -323,13 +357,13 @@ static void traitsLoadSfallPairBonuses(Config* config, const char* sectionKey, c
 // Returns stat modifier depending on selected traits.
 //
 // 0x4B3C7C trait_adjust_stat
-int traitGetStatModifier(Stat stat)
+int traitGetStatModifier(Stat stat, Object* subject)
 {
     int modifier = 0;
 
     if (traitOverridesEnabled && statIsValid(stat)) {
         for (int index = 0; index < TRAITS_MAX_SELECTED_COUNT; index++) {
-            Trait trait = gSelectedTraits[index];
+            Trait trait = traitRow(subject)[index];
             if (traitIsValid(trait)) {
                 modifier += traitStatBonuses[trait][stat];
             }
@@ -338,94 +372,94 @@ int traitGetStatModifier(Stat stat)
 
     switch (stat) {
     case STAT_STRENGTH:
-        if (traitIsSelectedAndActive(TRAIT_GIFTED)) {
+        if (traitIsSelectedAndActive(TRAIT_GIFTED, subject)) {
             modifier += 1;
         }
-        if (traitIsSelectedAndActive(TRAIT_BRUISER)) {
+        if (traitIsSelectedAndActive(TRAIT_BRUISER, subject)) {
             modifier += 2;
         }
         break;
     case STAT_PERCEPTION:
-        if (traitIsSelectedAndActive(TRAIT_GIFTED)) {
+        if (traitIsSelectedAndActive(TRAIT_GIFTED, subject)) {
             modifier += 1;
         }
         break;
     case STAT_ENDURANCE:
-        if (traitIsSelectedAndActive(TRAIT_GIFTED)) {
+        if (traitIsSelectedAndActive(TRAIT_GIFTED, subject)) {
             modifier += 1;
         }
         break;
     case STAT_CHARISMA:
-        if (traitIsSelectedAndActive(TRAIT_GIFTED)) {
+        if (traitIsSelectedAndActive(TRAIT_GIFTED, subject)) {
             modifier += 1;
         }
         break;
     case STAT_INTELLIGENCE:
-        if (traitIsSelectedAndActive(TRAIT_GIFTED)) {
+        if (traitIsSelectedAndActive(TRAIT_GIFTED, subject)) {
             modifier += 1;
         }
         break;
     case STAT_AGILITY:
-        if (traitIsSelectedAndActive(TRAIT_GIFTED)) {
+        if (traitIsSelectedAndActive(TRAIT_GIFTED, subject)) {
             modifier += 1;
         }
-        if (traitIsSelectedAndActive(TRAIT_SMALL_FRAME)) {
+        if (traitIsSelectedAndActive(TRAIT_SMALL_FRAME, subject)) {
             modifier += 1;
         }
         break;
     case STAT_LUCK:
-        if (traitIsSelectedAndActive(TRAIT_GIFTED)) {
+        if (traitIsSelectedAndActive(TRAIT_GIFTED, subject)) {
             modifier += 1;
         }
         break;
     case STAT_MAXIMUM_ACTION_POINTS:
-        if (traitIsSelectedAndActive(TRAIT_BRUISER)) {
+        if (traitIsSelectedAndActive(TRAIT_BRUISER, subject)) {
             modifier -= 2;
         }
         break;
     case STAT_ARMOR_CLASS:
-        if (traitIsSelectedAndActive(TRAIT_KAMIKAZE)) {
-            modifier -= critterGetBaseStat(gDude, STAT_ARMOR_CLASS);
+        if (traitIsSelectedAndActive(TRAIT_KAMIKAZE, subject)) {
+            modifier -= critterGetBaseStat(subject, STAT_ARMOR_CLASS);
         }
         break;
     case STAT_MELEE_DAMAGE:
-        if (traitIsSelectedAndActive(TRAIT_HEAVY_HANDED)) {
+        if (traitIsSelectedAndActive(TRAIT_HEAVY_HANDED, subject)) {
             modifier += 4;
         }
         break;
     case STAT_CARRY_WEIGHT:
-        if (traitIsSelectedAndActive(TRAIT_SMALL_FRAME)) {
-            modifier -= 10 * critterGetBaseStat(gDude, STAT_STRENGTH);
+        if (traitIsSelectedAndActive(TRAIT_SMALL_FRAME, subject)) {
+            modifier -= 10 * critterGetBaseStat(subject, STAT_STRENGTH);
         }
         break;
     case STAT_SEQUENCE:
-        if (traitIsSelectedAndActive(TRAIT_KAMIKAZE)) {
+        if (traitIsSelectedAndActive(TRAIT_KAMIKAZE, subject)) {
             modifier += 5;
         }
         break;
     case STAT_HEALING_RATE:
-        if (traitIsSelectedAndActive(TRAIT_FAST_METABOLISM)) {
+        if (traitIsSelectedAndActive(TRAIT_FAST_METABOLISM, subject)) {
             modifier += 2;
         }
         break;
     case STAT_CRITICAL_CHANCE:
-        if (traitIsSelectedAndActive(TRAIT_FINESSE)) {
+        if (traitIsSelectedAndActive(TRAIT_FINESSE, subject)) {
             modifier += 10;
         }
         break;
     case STAT_BETTER_CRITICALS:
-        if (traitIsSelectedAndActive(TRAIT_HEAVY_HANDED)) {
+        if (traitIsSelectedAndActive(TRAIT_HEAVY_HANDED, subject)) {
             modifier -= 30;
         }
         break;
     case STAT_RADIATION_RESISTANCE:
-        if (traitIsSelectedAndActive(TRAIT_FAST_METABOLISM)) {
-            modifier -= critterGetBaseStat(gDude, STAT_RADIATION_RESISTANCE);
+        if (traitIsSelectedAndActive(TRAIT_FAST_METABOLISM, subject)) {
+            modifier -= critterGetBaseStat(subject, STAT_RADIATION_RESISTANCE);
         }
         break;
     case STAT_POISON_RESISTANCE:
-        if (traitIsSelectedAndActive(TRAIT_FAST_METABOLISM)) {
-            modifier -= critterGetBaseStat(gDude, STAT_POISON_RESISTANCE);
+        if (traitIsSelectedAndActive(TRAIT_FAST_METABOLISM, subject)) {
+            modifier -= critterGetBaseStat(subject, STAT_POISON_RESISTANCE);
         }
         break;
     default:
@@ -438,24 +472,24 @@ int traitGetStatModifier(Stat stat)
 // Returns skill modifier depending on selected traits.
 //
 // 0x4B40FC trait_adjust_skill
-int traitGetSkillModifier(Skill skill)
+int traitGetSkillModifier(Skill skill, Object* subject)
 {
     int modifier = 0;
 
     if (traitOverridesEnabled && skillIsValid(skill)) {
         for (int index = 0; index < TRAITS_MAX_SELECTED_COUNT; index++) {
-            Trait trait = gSelectedTraits[index];
+            Trait trait = traitRow(subject)[index];
             if (traitIsValid(trait)) {
                 modifier += traitSkillBonuses[trait][skill];
             }
         }
     }
 
-    if (traitIsSelectedAndActive(TRAIT_GIFTED)) {
+    if (traitIsSelectedAndActive(TRAIT_GIFTED, subject)) {
         modifier -= 10;
     }
 
-    if (traitIsSelectedAndActive(TRAIT_GOOD_NATURED)) {
+    if (traitIsSelectedAndActive(TRAIT_GOOD_NATURED, subject)) {
         switch (skill) {
         case SKILL_SMALL_GUNS:
         case SKILL_BIG_GUNS:
@@ -477,6 +511,106 @@ int traitGetSkillModifier(Skill skill)
     }
 
     return modifier;
+}
+
+
+
+static Trait* traitRow(Object* subject)
+{
+    int slot = playerActorSlotOf(subject != nullptr ? subject : gDude);
+    return slot > 0 ? gPlayerActorTraits[slot - 1] : gSelectedTraits;
+}
+
+void traitsPlayerActorSeed()
+{
+    for (int slot = 1; slot < kMaxPlayerActors; slot++) {
+        traitsPlayerActorSeedSlot(slot);
+    }
+}
+
+void traitsPlayerActorSeedSlot(int slot)
+{
+    if (slot < 1 || slot >= kMaxPlayerActors) {
+        return;
+    }
+
+    for (int index = 0; index < TRAITS_MAX_SELECTED_COUNT; index++) {
+        gPlayerActorTraits[slot - 1][index] = gSelectedTraits[index];
+    }
+}
+
+static Trait* traitsPlayerActorRow(int slot)
+{
+    if (slot == 0) {
+        return gSelectedTraits;
+    }
+
+    if (slot < 1 || slot >= kMaxPlayerActors) {
+        return nullptr;
+    }
+
+    return gPlayerActorTraits[slot - 1];
+}
+
+int traitsPlayerActorRowWrite(File* stream, int slot)
+{
+    Trait* row = traitsPlayerActorRow(slot);
+    if (row == nullptr) {
+        return -1;
+    }
+
+    return fileWriteInt32EnumList<Trait>(stream, row, TRAITS_MAX_SELECTED_COUNT);
+}
+
+int traitsPlayerActorRowRead(File* stream, int slot)
+{
+    Trait* row = traitsPlayerActorRow(slot);
+    if (row == nullptr) {
+        return -1;
+    }
+
+    return fileReadInt32EnumList<Trait>(stream, row, TRAITS_MAX_SELECTED_COUNT);
+}
+
+void traitsMutateDrop(Trait* traits, int traitCount, int pickedLine, Trait firstListedTrait)
+{
+    if (pickedLine == 0) {
+        if (traitCount == 1) {
+            traits[0] = TRAIT_INVALID;
+            traits[1] = TRAIT_INVALID;
+        } else {
+            if (firstListedTrait == traits[0]) {
+                traits[0] = traits[1];
+                traits[1] = TRAIT_INVALID;
+            } else {
+                traits[1] = TRAIT_INVALID;
+            }
+        }
+    } else {
+        if (firstListedTrait == traits[0]) {
+            traits[1] = TRAIT_INVALID;
+        } else {
+            traits[0] = traits[1];
+            traits[1] = TRAIT_INVALID;
+        }
+    }
+}
+
+void traitsMutateGain(Trait* traits, int traitCount, Trait newTrait)
+{
+    if (traitCount != 0) {
+        traits[1] = newTrait;
+    } else {
+        traits[0] = newTrait;
+        traits[1] = TRAIT_INVALID;
+    }
+
+    traitsSetSelected(traits[0], traits[1]);
+}
+
+static bool traitHas(Object* subject, Trait trait)
+{
+    return traitIsSelected(trait, subject);
 }
 
 } // namespace fallout

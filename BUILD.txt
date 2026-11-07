@@ -13,5 +13,5 @@ $cmake = 'C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\Comm
 $game = 'C:\Users\Flyin\source\repos\Fo2Build'
 $build = 'C:\Users\Flyin\source\repos\First-Person-Fallout\out\build\windows-x64-vs18'
 
-Copy-Item "$build\Release\fallout2-ce.exe" "$game\fallout2-ce.exe" -Force
-Start-Process "$game\fallout2-ce.exe" -WorkingDirectory $game
+Copy-Item "$build\Release\Fallout2-FPS.exe" "$game\Fallout2-FPS.exe" -Force
+Start-Process "$game\Fallout2-FPS.exe" -WorkingDirectory $game

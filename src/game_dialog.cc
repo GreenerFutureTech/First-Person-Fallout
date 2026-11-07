@@ -1,3 +1,10 @@
+#include "client_net.h"
+#include "msg_channel.h"
+#include <functional>
+#include "dialog_intent.h"
+#include "presenter.h"
+#include "server_loop.h"
+#include "sfall_config.h"
 #include "game_dialog.h"
 
 #include <algorithm>
@@ -52,6 +59,59 @@
 
 namespace fallout {
 
+static std::function<bool()> gDialogServerPump;
+
+static int gDialogServerNodeDepth = 0;
+
+int gGameDialogFidget = static_cast<int>(HeadFidget::Neutral);
+
+char gDialogPendingAudio[16];
+
+static int gDialogOptionScroll = 0;
+
+static bool gDialogOptionsClipped = false;
+
+void gameDialogSetServerPump(std::function<bool()> pump);
+
+bool gameDialogServerNodeActive();
+
+static void dialogEmitNode();
+
+bool gameDialogGetOptionText(int index, char* out, size_t size);
+
+void gameDialogSetReplyText(const char* text);
+
+void gameDialogClearOptions();
+
+bool gameDialogOptionsScrolled();
+
+bool gameDialogOptionsClipped();
+
+bool gameDialogScrollOptions(int delta);
+
+void gameDialogRenderNode();
+
+int gameDialogInitNodeWindows();
+
+void gameDialogExitNodeWindows();
+
+void gameDialogSetOptionsWindowVisible(bool visible);
+
+int gameDialogInitBarterWindows();
+
+void gameDialogExitBarterWindows();
+
+int gameDialogInitControlWindow();
+
+void gameDialogExitControlWindow();
+
+bool gameDialogBackgroundActive();
+
+void gameDialogOptionHoverEnter(int index);
+
+void gameDialogOptionHoverExit(int index);
+
+
 #define DIALOG_REVIEW_ENTRIES_CAPACITY 80
 
 #define DIALOG_OPTION_ENTRIES_CAPACITY 30
@@ -91,11 +151,7 @@ typedef enum GameDialogReviewWindowButtonFrm {
 
 static void partyMemberCustomizationMessageListReset();
 
-typedef enum GameDialogReaction {
-    GAME_DIALOG_REACTION_GOOD = 49,
-    GAME_DIALOG_REACTION_NEUTRAL = 50,
-    GAME_DIALOG_REACTION_BAD = 51,
-} GameDialogReaction;
+
 
 // `dialogMode` tracks the active dialog screen, while
 // `dialogSwitchMode` carries pending and in-progress transitions between
@@ -857,7 +913,7 @@ void gameDialogEnter(Object* speaker, int mode)
         return;
     }
 
-    if (ProtoId(speaker).objectType() != OBJ_TYPE_ITEM && scriptTypeFromSid(speaker->sid) != SCRIPT_TYPE_SPATIAL) {
+    if (!serverLoopActive() && ProtoId(speaker).objectType() != OBJ_TYPE_ITEM && scriptTypeFromSid(speaker->sid) != SCRIPT_TYPE_SPATIAL) {
         MessageListItem messageListItem;
 
         int rc = _action_can_talk_to(gDude, speaker);
@@ -986,6 +1042,10 @@ void _gdialogSystemEnter()
 // 0x445050
 void gameDialogStartLips(const char* audioFileName)
 {
+    if (serverLoopActive()) {
+        return;
+    }
+
     if (audioFileName == nullptr) {
         debugPrint("\nGDialog: Bleep!");
         soundPlayFile("censor");
@@ -1041,11 +1101,28 @@ int gameDialogDisable()
 // 0x44510C
 int _gdialogInitFromScript(const HeadFrmId& headFrmId, HeadFidget reaction)
 {
+    gGameDialogFidget = static_cast<int>(reaction);
+
     if (dialogMode == GAME_DIALOG_MODE_TALK) {
         return -1;
     }
 
     if (_gdialog_state == GAME_DIALOG_ACTIVE) {
+        return 0;
+    }
+
+    // Headless server (A2): the dialog runs authoritatively but has NO window,
+    // head, tickers or fidget — the gameDialogProcessUI barrier drives node transitions off
+    // the intent queue, and the node's reply/option state is populated by the
+    // gsay_* opcodes, not by this window choreography. Skip the entire renderer
+    // setup (windows/highlights/red buttons/head/lips/mouse/music) and keep only
+    // the _gdialog_state latch the gsay_start/gsay_end state machine checks.
+    // Pairs with the matching guard in _gdialogExitFromScript. The window build
+    // still runs normally on the viewer (serverLoopActive() is false there — the
+    // A3 render path reuses this exact function).
+    if (serverLoopActive()) {
+        _gdialog_state = GAME_DIALOG_ACTIVE;
+        _gdDialogWentOff = true;
         return 0;
     }
 
@@ -1108,6 +1185,13 @@ int _gdialogExitFromScript()
     }
 
     if (_gdialog_state == GAME_DIALOG_INACTIVE) {
+        return 0;
+    }
+
+    // Headless server (A2): mirror the _gdialogInitFromScript guard — no window,
+    // head, tickers or lips were ever created, so tear down only the state latch.
+    if (serverLoopActive()) {
+        _gdialog_state = GAME_DIALOG_INACTIVE;
         return 0;
     }
 
@@ -1194,7 +1278,13 @@ void gameDialogSetBackground(const BackgroundFrmId& background)
 // 0x445448
 void gameDialogRenderSupplementaryMessage(const char* msg)
 {
-    if (_gd_replyWin == -1) {
+    // ►► GUARD THE HANDLE THIS FUNCTION ACTUALLY WRITES TO. `_gd_replyWin` is a
+    // CACHED COPY, refreshed by _demo_copy_title below; every blit here goes to
+    // gameDialogReplyWindow. In vanilla they are always in step, so the original
+    // guard was enough — but a cached handle outliving its window is precisely how
+    // this function faulted twice on a viewer whose reply window had been torn
+    // down under it. Test both; a stale cache is then a no-op, not a crash.
+    if (_gd_replyWin == -1 || gameDialogReplyWindow == -1) {
         debugPrint("\nError: Reply window doesn't exist!");
         return;
     }
@@ -1290,6 +1380,7 @@ int gameDialogAddTextOptionWithProc(int messageListId, const char* text, int pro
 // 0x445640
 int gameDialogSetMessageReply(Program* program, int messageListId, int messageId)
 {
+    gDialogPendingAudio[0] = '\0';
     gameDialogAddReviewMessage(messageListId, messageId);
 
     dialogReplyProgram = program;
@@ -1705,6 +1796,28 @@ int gameDialogShowReview()
 // NOTE: Uncollapsed 0x445CA0 with different signature.
 void gameDialogReviewButtonOnMouseUp(int btn, int keyCode)
 {
+    // ►► NOTHING RECORDED → PRESENT NOTHING. The review window is a history of this
+    // conversation, and on a co-op VIEWER that history is always empty: the entries are
+    // only ever appended by gameDialogSetMessageReply / gameDialogSetTextReply, i.e. by
+    // the SCRIPT executing the dialog — which happens on the server. The streamed node
+    // path seeds the reply through gameDialogSetReplyText (a pure text setter,
+    // client_dialog.cc), so no entry is ever recorded here and the button opened a blank
+    // box.
+    //
+    // Not merely cosmetic, which is why this is a hard NOOP rather than an empty list:
+    // gameDialogShowReview runs its OWN blocking while(true)/inputGetInput loop, so it
+    // becomes a fourth window owner that does not pump the wire — the exact shape
+    // [[viewer-modal-design]] identifies as the cause of the dialog whack-a-mole. Opening
+    // it stalls the decode and backpressures the server for as long as it is up.
+    //
+    // Gated on the ENTRY COUNT, not on clientViewerActive(): the rule "don't open an
+    // empty history" is true everywhere, single-player included, and if the dialog
+    // history is ever streamed to viewers the button starts working again with no change
+    // here. Vanilla is unaffected — a script-driven conversation has recorded its first
+    // reply before the player can click anything.
+    if (gameDialogReviewEntriesLength == 0) {
+        return;
+    }
     gameDialogShowReview();
 }
 
@@ -1919,6 +2032,13 @@ int gameDialogSetReviewOptionText(const char* string)
 // 0x446288
 int _gdProcessInit()
 {
+    // Headless: create no reply/options windows or scroll buttons. The server
+    // gameDialogProcessUI branch reads dialogOptionEntries directly and never renders,
+    // so the -1 windows are never touched.
+    if (serverLoopActive()) {
+        return 0;
+    }
+
     int upBtn;
     int downBtn;
     int optionsWindowX;
@@ -2005,6 +2125,13 @@ void _gdProcessCleanup()
 // 0x446498
 int _gdProcessExit()
 {
+    // Headless server (A2): mirror the serverLoopActive() guard in _gdProcessInit —
+    // no reply/options windows or option buttons were ever created, so there is
+    // nothing to clean up or destroy. Skipping avoids the windowDestroy abort.
+    if (serverLoopActive()) {
+        return 0;
+    }
+
     _gdProcessCleanup();
 
     // CE: Don't let a held-back reply speech leak into the next conversation if
@@ -2063,6 +2190,34 @@ int gameDialogProcessUI()
 
     _gdReenterLevel += 1;
 
+    // ►► THE dsay/dend GATE'S GROUND TRUTH. Raised for exactly as long as this
+    // conversation can consume a dialog intent.
+    //
+    // It exists because _gdialogActive() (i.e. _dialog_state_fix) is the WRONG
+    // question and answering it caused a hard deadlock. That flag is set only by
+    // gameDialogEnter — the engine's "player used TALK on an NPC" path. But a
+    // script can run a whole conversation through gsay_start/gsay_end, which
+    // reaches gameDialogProcessUI via _gdialogGo() with gameDialogEnter never involved and
+    // _dialog_state_fix still 0. denbus2/Sheila's paid path does exactly that for
+    // its SECOND conversation (the one after the teleport + game_time_advance).
+    //
+    // Vanilla never noticed: gameDialogProcessUI reads the keyboard directly. Our server
+    // gate did notice — it rejected every dsay/dend as "no active dialog" while
+    // this very function sat parked in the barrier waiting for one. The client
+    // showed a node whose buttons did nothing and the world stayed frozen.
+    //
+    // Depth-counted, not a bool: conversations nest (_gdReenterLevel).
+    gDialogServerNodeDepth++;
+
+    // Conversation lifecycle bracket. Pairs with the "[dialog] LEAVE" line at the
+    // teardown below, so a log shows exactly which conversation a stranded node
+    // belonged to and whether the server ever left it — the "server is parked in a
+    // dialog the client is not showing" limbo is invisible without this.
+    if (gDialogServerPump != nullptr) {
+        fprintf(stderr, "f2_server: [dialog] ENTER gameDialogProcessUI reenter=%d inCombat=%d\n",
+            _gdReenterLevel, isInCombat() ? 1 : 0);
+    }
+
     _gdProcessUpdate();
 
     bool autoAdvance = false;
@@ -2077,6 +2232,182 @@ int gameDialogProcessUI()
     int pageOffsets[10];
     pageOffsets[0] = 0;
     for (;;) {
+        if (serverLoopActive()) {
+            // Headless: no keyboard/render/fps loop. Drain the dialog intent
+            // queue, calling _gdProcessChoice directly — the same core path a
+            // numeric-key press drives at line ~1992 below. The initial node's
+            // options are already registered (dialogOptionEntries, populated by
+            // the gsay_option opcodes before gsay_end reached gameDialogProcessUI).
+            if (getenv("F2_DIALOG_TRACE") != nullptr) {
+                debugPrint("\n[dtrace] node: %d options; reply=\"%.80s\"\n",
+                    gameDialogOptionEntriesLength, dialogReplyText);
+                for (int oi = 0; oi < gameDialogOptionEntriesLength; oi++) {
+                    debugPrint("[dtrace]   opt %d: \"%.70s\"\n", oi, dialogOptionEntries[oi].text);
+                }
+            }
+            // LIVE (dedicated server, pump installed): ship the current node to the
+            // viewers so the OWNER renders it editable and spectators read-only.
+            // Inert on the golden/headless path (pump == nullptr).
+            if (gDialogServerPump != nullptr) {
+                dialogEmitNode();
+            }
+
+            DialogIntent intent;
+            bool haveIntent = dialogIntentPeek(&intent);
+            if (gDialogServerPump != nullptr) {
+                // Block-and-pump: park the server tick here for the whole node and
+                // service the control channel until the owner's dsay/dend lands, or
+                // the pump signals a bail (owner disconnect / combat start / quit).
+                // MP_PROTOCOL §1: a dialog choice is an accepted input barrier, and
+                // vanilla freezes the world during dialog anyway.
+                while (!haveIntent) {
+                    if (!gDialogServerPump()) {
+                        break;
+                    }
+                    haveIntent = dialogIntentPeek(&intent);
+                }
+            }
+            if (!haveIntent) {
+                // Empty queue with no live pump = the original headless behavior (a
+                // well-formed golden fixture pre-queues one intent per node plus a
+                // terminating choice); OR a live bail. Either way, end the
+                // conversation — dialogEnd is emitted in the reenter==0 teardown.
+                //
+                // ►► LIVE, this is the bug path: dialogEmitNode() above already
+                // shipped this node to the viewer, which is now rendering options
+                // the server will never read. The pump logs WHY it bailed.
+                if (gDialogServerPump != nullptr) {
+                    fprintf(stderr, "f2_server: [dialog] ABANDONED a node the client "
+                                    "is already showing (%d options, reenter=%d)\n",
+                        gameDialogOptionEntriesLength, _gdReenterLevel);
+                }
+                break;
+            }
+            dialogIntentPop();
+
+            if (intent.kind == DIALOG_INTENT_END) {
+                break;
+            }
+
+            int choiceResult = 0;
+            if (intent.kind == DIALOG_INTENT_BARTER) {
+                // The routed Barter button (server_control dbarter). WHETHER this
+                // speaker barters is ours to decide, exactly as the interactive
+                // button handler does it (gameDialogBarterButtonUpMouseUp): a
+                // CRITTER_BARTER critter opens the trade; anyone else gets the
+                // "will not barter" refusal and the conversation continues. We set
+                // mode 2 directly rather than calling the button handler, which
+                // also does gdHide()/lip teardown that has no headless meaning.
+                bool willBarter = false;
+                if (ProtoId(gGameDialogSpeaker).objectType() == OBJ_TYPE_CRITTER) {
+                    Proto* sproto = nullptr;
+                    if (protoGetProto(gGameDialogSpeaker, &sproto) != -1
+                        && (sproto->critter.data.flags & CRITTER_BARTER) != 0) {
+                        willBarter = true;
+                    }
+                }
+                if (willBarter) {
+                    dialogSwitchMode = static_cast<GameDialogMode>(2);
+                    dialogMode = static_cast<GameDialogMode>(4);
+                    // falls into the mode==2 barter block below
+                } else {
+                    // proto msg 903 "This person will not barter with you." Answer
+                    // the driver only — it is a refusal, nothing happened for anyone
+                    // else. gDude is the driver here (the pump's ServerActorScope).
+                    MessageListItem m;
+                    m.num = gGameDialogSpeakerIsPartyMember ? 913 : 903;
+                    if (messageListGetItem(&gProtoMessageList, &m)) {
+                        presenter()->consoleMessageStyled(
+                            gDude != nullptr ? gDude->netId : 0, kMsgChannelRefusal, m.text);
+                    }
+                    continue; // stay in the conversation
+                }
+            } else {
+                // DIALOG_INTENT_SELECT: bounds-check against the current node's
+                // option count (mirrors the `v11 < gameDialogOptionEntriesLength`
+                // guard on the keyboard path).
+                if (intent.arg < 0 || intent.arg >= gameDialogOptionEntriesLength) {
+                    debugPrint("\nserver dialog: option %d out of range [0,%d) - ending\n",
+                        intent.arg, gameDialogOptionEntriesLength);
+                    break;
+                }
+
+                choiceResult = _gdProcessChoice(intent.arg);
+            }
+
+            // A choice's proc can switch into a nested blocking mode: barter
+            // (2), party control (8/9), or party customization (11/12). Barter
+            // is driven headless; the party modes are UI-button-only and remain
+            // unsupported here. This MUST be tested before the choiceResult == -1
+            // end check below: the barter option's proc registers no new dialog
+            // options (barter replaces them), so _gdProcessChoice returns -1 even
+            // though barter must still run — breaking first would skip it.
+            if (dialogSwitchMode == 2) {
+                // Headless barter. The interactive path runs this across two
+                // steps: gameDialogTicker case 2 (mode 2->3: enterGameMode +
+                // gameDialogCreateBarterWindow) then the mode==3 branch below
+                // (exitGameMode + barterProcessUI + cleanup + destroy). We
+                // BYPASS the ticker (a client-tick callback that would build the
+                // SDL barter window) and drive create -> trade -> destroy inline.
+                // The create/destroy win fns are serverLoopActive-guarded to
+                // allocate/free ONLY the three hidden table objects (no SDL), so
+                // the enterGameMode/exitGameMode(kSpecial) pair — a no-op round
+                // trip here — is elided.
+                gameDialogCreateBarterWindow();
+                barterProcessUI(gameDialogWindow, gGameDialogSpeaker, gameDialogPlayerTableObj, gameDialogBartererTableObj, gameDialogBarterModifier);
+                gameDialogBarterCleanupTables();
+                gameDialogDestroyBarterWindow();
+
+                // barterProcessUI's DONE path already ran _barter_end_to_talk_to
+                // (which closed the dialog programs and set mode=1, state=1). A
+                // CANCEL/empty-queue path leaves mode==2 and state==4. Normalize
+                // BOTH — mirroring the interactive mode==3 branch, which always
+                // ends barter at state==1 (see the `if (v5 == 4)` block). mode=0
+                // so the subsequent _gdialogExitFromScript teardown does NOT
+                // short-circuit (it returns early for modes 2/8/11); state=1 so a
+                // leftover state==4 can't misroute _gdDestroyHeadWindow /
+                // gameDialogEnter teardown into the barter-recovery path.
+                dialogSwitchMode = static_cast<GameDialogMode>(0);
+                dialogMode = static_cast<GameDialogMode>(1);
+
+                // ►► CONTINUE, NOT BREAK. Leaving a trade RETURNS YOU TO THE
+                // CONVERSATION -- that is what the 'T' button means, and what
+                // _barter_end_to_talk_to is named after. The interactive path says
+                // so explicitly: its barter branch ends in `continue` (:2189), and
+                // this one used to end in `break`, hanging up on the merchant the
+                // moment a trade closed. Owner-reported: "trade -> back should pop
+                // the same dialog as the initial one".
+                //
+                // Looping also re-emits the node (dialogEmitNode runs at the top of
+                // each iteration), which is what repopulates every viewer's option
+                // list -- without it the viewer holds an empty dialog window that
+                // no node will ever fill.
+                continue;
+            }
+
+            if (dialogSwitchMode != 0) {
+                debugPrint("\nserver dialog: option requested nested mode %d (party) - aborting\n",
+                    dialogSwitchMode);
+                // Reset the pending switch mode BEFORE breaking: otherwise the
+                // subsequent end_dialogue -> _gdialogExitFromScript short-circuits
+                // (it returns early when mode is 2/8/11), leaving gameDialogTicker
+                // registered — which would then try to build a party SDL window
+                // on the next server tick. Clearing it lets the normal teardown
+                // (tickersRemove + GameMode pop) run.
+                dialogSwitchMode = static_cast<GameDialogMode>(0);
+                break;
+            }
+
+            if (choiceResult == -1) {
+                // The option's proc registered no new options and switched into
+                // no nested mode: conversation ended (same semantics as the
+                // keyboard path's break at ~1992).
+                break;
+            }
+
+            continue;
+        }
+
         sharedFpsLimiter.mark();
 
         int keyCode = inputGetInput();
@@ -2186,6 +2517,19 @@ int gameDialogProcessUI()
             }
         }
 
+        // OPTION SCROLLING. Page keys always; the arrows (and therefore the MOUSE WHEEL,
+        // which convertMouseWheelToArrowKey turns into them) only when the reply is not
+        // paging itself, so the reply keeps first claim on them exactly as before.
+        if (keyCode == KEY_PAGE_DOWN || (keyCode == KEY_ARROW_DOWN && !_gdReplyTooBig)) {
+            if (gameDialogScrollOptions(1)) {
+                keyCode = -1;
+            }
+        } else if (keyCode == KEY_PAGE_UP || (keyCode == KEY_ARROW_UP && !_gdReplyTooBig)) {
+            if (gameDialogScrollOptions(-1)) {
+                keyCode = -1;
+            }
+        }
+
         if (keyCode != -1) {
             if (keyCode >= 1200 && keyCode <= 1250) {
                 gameDialogOptionOnMouseEnter(keyCode - 1200);
@@ -2226,7 +2570,29 @@ int gameDialogProcessUI()
 
     _gdReenterLevel -= 1;
 
+    if (gDialogServerNodeDepth > 0) {
+        gDialogServerNodeDepth--;
+    }
+
+    if (gDialogServerPump != nullptr) {
+        fprintf(stderr, "f2_server: [dialog] LEAVE gameDialogProcessUI reenter=%d inCombat=%d\n",
+            _gdReenterLevel, isInCombat() ? 1 : 0);
+    }
+
     if (_gdReenterLevel == 0) {
+        // Headless: a conversation may end (natural -1, explicit END, or nested-
+        // mode abort) with unconsumed intents still queued. Drop them so they
+        // can't bleed into a later dialog in the same server run (the queue is
+        // otherwise cleared only once per serverRun).
+        if (serverLoopActive()) {
+            dialogIntentClear();
+            // Tell every viewer the conversation is over (tear the window down; a
+            // spectator can't dismiss early). Only when a live pump drove it — inert
+            // on the golden/headless path.
+            if (gDialogServerPump != nullptr) {
+                presenter()->dialogEnd(gDude);
+            }
+        }
         if (_gdProcessExit() == -1) {
             return -1;
         }
@@ -2281,12 +2647,14 @@ int _gdProcessChoice(int optionIndex)
         break;
     }
 
+    if (!serverLoopActive()) {
     _demo_copy_title(gameDialogReplyWindow);
     _demo_copy_options(gameDialogOptionsWindow);
     windowRefresh(gameDialogReplyWindow);
     windowRefresh(gameDialogOptionsWindow);
 
     gameDialogOptionOnMouseEnter(optionIndex);
+    }
     _talk_to_critter_reacts(reaction);
 
     gameDialogOptionEntriesLength = 0;
@@ -2447,8 +2815,11 @@ void _gdProcessUpdate()
     _optionRect.right = 388;
     _optionRect.bottom = 112;
 
+    if (!serverLoopActive()) {
     _demo_copy_title(gameDialogReplyWindow);
     _demo_copy_options(gameDialogOptionsWindow);
+
+    }
 
     if (dialogReplyMessageListId > 0) {
         // CE: Hold back the reply speech when this update runs while a switch to
@@ -2468,6 +2839,13 @@ void _gdProcessUpdate()
         *(dialogReplyText + sizeof(dialogReplyText) - 1) = '\0';
     }
 
+    // Headless: the reply text is now in dialogReplyText (available to a
+    // narrating presenter); skip all rendering, which would dereference the
+    // -1 reply/options window buffers.
+    if (serverLoopActive()) {
+        return;
+    }
+
     gameDialogRenderReply();
 
     ColorWithFlags color = COLOR_GREEN | DRAW_TEXT_FLAG_NO_BG;
@@ -2477,10 +2855,11 @@ void _gdProcessUpdate()
     int width = _optionRect.right - _optionRect.left - 4;
 
     MessageListItem messageListItem;
-
     bool skippedOnce = false;
 
-    for (int index = 0; index < gameDialogOptionEntriesLength; index++) {
+    if (gDialogOptionScroll >= gameDialogOptionEntriesLength) gDialogOptionScroll = 0;
+    gDialogOptionsClipped = false;
+    for (int index = gDialogOptionScroll; index < gameDialogOptionEntriesLength; index++) {
         GameDialogOptionEntry* dialogOptionEntry = &(dialogOptionEntries[index]);
 
         if (hasEmpathy) {
@@ -2500,59 +2879,8 @@ void _gdProcessUpdate()
             }
         }
 
-        if (dialogOptionEntry->messageListId >= 0) {
-            char* text = _scr_get_msg_str_speech(dialogOptionEntry->messageListId, dialogOptionEntry->messageId, 0);
-            if (text == nullptr) {
-                showMessageBox("\nGDialog::Error Grabbing text message!");
-                exit(1);
-            }
-
-            // SFALL
-            if (numberOptions) {
-                snprintf(dialogOptionEntry->text, sizeof(dialogOptionEntry->text), "%d. %s", index + 1, text);
-            } else {
-                snprintf(dialogOptionEntry->text, sizeof(dialogOptionEntry->text), "%c %s", '\x95', text);
-            }
-        } else if (dialogOptionEntry->messageListId == -1) {
-            if (index == 0) {
-                // Go on
-                messageListItem.num = 655;
-                if (critterGetStat(gDude, STAT_INTELLIGENCE) < 4) {
-                    if (messageListGetItem(&gProtoMessageList, &messageListItem)) {
-                        // SFALL
-                        if (numberOptions) {
-                            snprintf(dialogOptionEntry->text, sizeof(dialogOptionEntry->text), "%d. %s", index + 1, messageListItem.text);
-                        } else {
-                            snprintf(dialogOptionEntry->text, sizeof(dialogOptionEntry->text), "%s", messageListItem.text);
-                        }
-                    } else {
-                        debugPrint("\nError...can't find message!");
-                        return;
-                    }
-                }
-            } else {
-                // TODO: Why only space?
-                // SFALL
-                if (numberOptions) {
-                    snprintf(dialogOptionEntry->text, sizeof(dialogOptionEntry->text), "%d. %s", index + 1, " ");
-                } else {
-                    strcpy(dialogOptionEntry->text, " ");
-                }
-            }
-        } else if (dialogOptionEntry->messageListId == -2) {
-            // [Done]
-            messageListItem.num = 650;
-            if (messageListGetItem(&gProtoMessageList, &messageListItem)) {
-                // SFALL
-                if (numberOptions) {
-                    snprintf(dialogOptionEntry->text, sizeof(dialogOptionEntry->text), "%d. %s", index + 1, messageListItem.text);
-                } else {
-                    snprintf(dialogOptionEntry->text, sizeof(dialogOptionEntry->text), "%c %s", '\x95', messageListItem.text);
-                }
-            } else {
-                debugPrint("\nError...can't find message!");
-                return;
-            }
+        if (!gameDialogGetOptionText(index, dialogOptionEntry->text, sizeof(dialogOptionEntry->text))) {
+            return;
         }
 
         int estimate = _text_num_lines(dialogOptionEntry->text, _optionRect.right - _optionRect.left) * fontGetLineHeight() + _optionRect.top + 2;
@@ -2585,11 +2913,12 @@ void _gdProcessUpdate()
                 debugPrint("\nError: Can't create button!");
             }
         } else {
+            gDialogOptionsClipped = true;
             // TODO: seems odd that we would suppress the error the first time
             if (!skippedOnce) {
                 skippedOnce = true;
             } else {
-                debugPrint("Error: couldn't make button because it went below the window.\n");
+                debugPrint("dialog: option %d does not fit; scroll to reach it\n", index);
             }
         }
     }
@@ -2606,6 +2935,13 @@ void _gdProcessUpdate()
 int _gdCreateHeadWindow()
 {
     dialogMode = GAME_DIALOG_MODE_TALK;
+
+    // Headless: keep the dialog-active state but create no SDL window/buffers.
+    // Leaving gameDialogWindow == -1 turns the fidget/transition pumps and the
+    // ticker's render tail into free no-ops (all guarded on window/frm state).
+    if (serverLoopActive()) {
+        return 0;
+    }
 
     int windowWidth = GAME_DIALOG_WINDOW_WIDTH;
 
@@ -2681,7 +3017,7 @@ void _gdSetupFidget(const HeadFrmId& headFrmId, HeadFidget reaction)
 {
     gameDialogFidgetFrmCurrentFrame = 0;
 
-    if (!headFrmId.valid()) {
+    if (serverLoopActive() || !headFrmId.valid()) {
         gameDialogFidgetFrmId = HeadFrameId::Invalid;
         gameDialogFidgetFrm = nullptr;
         gameDialogFidgetFrmHandle = INVALID_CACHE_ENTRY;
@@ -3159,6 +3495,9 @@ void _gDialogRefreshOptionsRect(int win, Rect* drawRect)
 // 0x447A58
 void gameDialogTicker()
 {
+    if (clientViewerActive()) {
+        dialogSwitchMode = GAME_DIALOG_MODE_NONE;
+    } else
     switch (dialogSwitchMode) {
     case GAME_DIALOG_MODE_SWITCH_TO_BARTER:
         _loop_cnt = -1;
@@ -4724,6 +5063,11 @@ void _gdCustomUpdateSetting(int option, int value)
 // 0x44A52C
 void gameDialogBarterButtonUpMouseUp(int btn, int keyCode)
 {
+    if (clientViewerActive()) {
+        clientViewerBarterVerb("dbarter", -1, 0);
+        return;
+    }
+
     const ProtoId speakerProtoId = gGameDialogSpeaker;
     if (speakerProtoId.objectType() != OBJ_TYPE_CRITTER) {
         return;
@@ -5118,6 +5462,243 @@ static void gameDialogHighlightsExit()
 
     _upperHighlightFrmImage.unlock();
     _lowerHighlightFrmImage.unlock();
+}
+
+
+
+void gameDialogSetServerPump(std::function<bool()> pump)
+{
+    gDialogServerPump = std::move(pump);
+}
+
+bool gameDialogServerNodeActive()
+{
+    return gDialogServerNodeDepth > 0;
+}
+
+static void dialogEmitNode()
+{
+    static char optionText[DIALOG_OPTION_ENTRIES_CAPACITY][900];
+    const char* optionPtrs[DIALOG_OPTION_ENTRIES_CAPACITY];
+    int optionReactions[DIALOG_OPTION_ENTRIES_CAPACITY];
+
+    int count = gameDialogOptionEntriesLength;
+    if (count < 0) count = 0;
+    if (count > DIALOG_OPTION_ENTRIES_CAPACITY) count = DIALOG_OPTION_ENTRIES_CAPACITY;
+
+    for (int i = 0; i < count; i++) {
+        optionText[i][0] = '\0';
+        gameDialogGetOptionText(i, optionText[i], sizeof(optionText[i]));
+        optionPtrs[i] = optionText[i];
+        // The EMPATHY input. The script set this per option when it added the option
+        // (gameDialogAddTextOption/AddMessageOption's `reaction` argument); the viewer
+        // cannot derive it from the text, which is why Empathy showed nothing.
+        optionReactions[i] = dialogOptionEntries[i].reaction;
+    }
+
+    presenter()->dialogNode(gGameDialogSpeaker, gDude, gGameDialogFidget,
+        dialogReplyText, optionPtrs, count,
+        gDialogPendingAudio[0] != '\0' ? gDialogPendingAudio : nullptr,
+        gGameDialogHeadFrmId.fid(), optionReactions);
+}
+
+bool gameDialogGetOptionText(int index, char* out, size_t size)
+{
+    GameDialogOptionEntry* dialogOptionEntry = &(dialogOptionEntries[index]);
+
+    if (dialogOptionEntry->messageListId >= 0) {
+        char* text = _scr_get_msg_str_speech(dialogOptionEntry->messageListId, dialogOptionEntry->messageId, 0);
+        if (text == nullptr) {
+            showMessageBox("\nGDialog::Error Grabbing text message!");
+            exit(1);
+        }
+
+        // SFALL
+        if (numberOptions) {
+            snprintf(out, size, "%d. %s", index + 1, text);
+        } else {
+            snprintf(out, size, "%c %s", '\x95', text);
+        }
+    } else if (dialogOptionEntry->messageListId == -1) {
+        MessageListItem messageListItem;
+        if (index == 0) {
+            // Go on
+            messageListItem.num = 655;
+            if (critterGetStat(gDude, STAT_INTELLIGENCE) < 4) {
+                if (messageListGetItem(&gProtoMessageList, &messageListItem)) {
+                    // SFALL
+                    if (numberOptions) {
+                        snprintf(out, size, "%d. %s", index + 1, messageListItem.text);
+                    } else {
+                        snprintf(out, size, "%s", messageListItem.text);
+                    }
+                } else {
+                    debugPrint("\nError...can't find message!");
+                    return false;
+                }
+            }
+        } else {
+            // TODO: Why only space?
+            // SFALL
+            if (numberOptions) {
+                snprintf(out, size, "%d. %s", index + 1, " ");
+            } else {
+                strcpy(out, " ");
+            }
+        }
+    } else if (dialogOptionEntry->messageListId == -2) {
+        // [Done]
+        MessageListItem messageListItem;
+        messageListItem.num = 650;
+        if (messageListGetItem(&gProtoMessageList, &messageListItem)) {
+            // SFALL
+            if (numberOptions) {
+                snprintf(out, size, "%d. %s", index + 1, messageListItem.text);
+            } else {
+                snprintf(out, size, "%c %s", '\x95', messageListItem.text);
+            }
+        } else {
+            debugPrint("\nError...can't find message!");
+            return false;
+        }
+    } else if (out != dialogOptionEntry->text) {
+        // Script text option (messageListId == -4): already baked. Copy for a
+        // non-aliasing caller (the emitter); the render loop passes its own
+        // buffer and needs no copy.
+        snprintf(out, size, "%s", dialogOptionEntry->text);
+    }
+
+    return true;
+}
+
+void gameDialogSetReplyText(const char* text)
+{
+    snprintf(dialogReplyText, sizeof(dialogReplyText), "%s", text != nullptr ? text : "");
+}
+
+void gameDialogClearOptions()
+{
+    gameDialogOptionEntriesLength = 0;
+    // A new node starts at the top. Without this, picking an option while scrolled down
+    // would open the next node already scrolled, hiding its first replies.
+    gDialogOptionScroll = 0;
+    gDialogOptionsClipped = false;
+}
+
+bool gameDialogOptionsScrolled()
+{
+    return gDialogOptionScroll > 0;
+}
+
+bool gameDialogOptionsClipped()
+{
+    return gDialogOptionsClipped;
+}
+
+bool gameDialogScrollOptions(int delta)
+{
+    if (gameDialogOptionsWindow == -1 || _gdialog_state != 1 || delta == 0) {
+        return false;
+    }
+
+    // Down is refused unless the last render actually hid something — otherwise a held
+    // key would walk the list off its own end and blank the panel.
+    if (delta > 0 && !gDialogOptionsClipped) {
+        return false;
+    }
+
+    int want = gDialogOptionScroll + delta;
+    if (want < 0) {
+        want = 0;
+    }
+    if (want >= gameDialogOptionEntriesLength) {
+        return false;
+    }
+    if (want == gDialogOptionScroll) {
+        return false;
+    }
+
+    gDialogOptionScroll = want;
+
+    // The old buttons belong to the old positions. _gdProcessChoice tears them down the
+    // same way before it re-renders; skipping it stacks dead buttons over live text.
+    _gdProcessCleanup();
+    _gdProcessUpdate();
+    return true;
+}
+
+void gameDialogRenderNode()
+{
+    if (serverLoopActive() || gameDialogReplyWindow == -1 || _gdialog_state != 1) {
+        return;
+    }
+    _gdProcessUpdate();
+}
+
+int gameDialogInitNodeWindows()
+{
+    return _gdProcessInit();
+}
+
+void gameDialogExitNodeWindows()
+{
+    _gdProcessExit();
+}
+
+void gameDialogSetOptionsWindowVisible(bool visible)
+{
+    if (gameDialogOptionsWindow == -1) {
+        return;
+    }
+    if (visible) {
+        windowShow(gameDialogOptionsWindow);
+    } else {
+        windowHide(gameDialogOptionsWindow);
+    }
+}
+
+int gameDialogInitBarterWindows()
+{
+    return gameDialogCreateBarterWindow();
+}
+
+void gameDialogExitBarterWindows()
+{
+    gameDialogDestroyBarterWindow();
+}
+
+int gameDialogInitControlWindow()
+{
+    int rc = _gdialog_window_create();
+    // _gdialog_window_create (unlike _gdCreateHeadWindow) does not set the flavor
+    // latch. Restore it to NORMAL so _gdDestroyHeadWindow at conversation end frees
+    // this window via _gdialog_window_destroy, not gameDialogDestroyBarterWindow.
+    dialogMode = static_cast<GameDialogMode>(1);
+    return rc;
+}
+
+void gameDialogExitControlWindow()
+{
+    _gdialog_window_destroy();
+}
+
+bool gameDialogBackgroundActive()
+{
+    return gameDialogBackgroundWindow != -1;
+}
+
+void gameDialogOptionHoverEnter(int index)
+{
+    if (!serverLoopActive()) {
+        gameDialogOptionOnMouseEnter(index);
+    }
+}
+
+void gameDialogOptionHoverExit(int index)
+{
+    if (!serverLoopActive()) {
+        gameDialogOptionOnMouseExit(index);
+    }
 }
 
 } // namespace fallout

@@ -1,3 +1,6 @@
+#include "audio_engine.h" // audioEngineResume — a movie needs a running audio device even if unfocused
+#include "server_loop.h"
+#include "db.h"
 #include "game_movie.h"
 
 #include <array>
@@ -88,7 +91,7 @@ static bool gGameMovieIsPlaying = false;
 static bool gGameMovieFaded = false;
 
 // 0x596C78 gmovie_played_list
-static unsigned char gGameMoviesSeen[MOVIE_COUNT];
+
 
 // 0x596C89 full_path
 static char gGameMovieSubtitlesFilePath[COMPAT_MAX_PATH];
@@ -109,7 +112,7 @@ int gameMoviesInit()
     gameMovieInitFileNames();
     gameMovieLoadConfigFileNames();
 
-    memset(gGameMoviesSeen, 0, sizeof(gGameMoviesSeen));
+    gameMoviesResetSeen();
 
     gGameMovieIsPlaying = false;
     gGameMovieFaded = false;
@@ -120,31 +123,17 @@ int gameMoviesInit()
 // 0x44E60C gmovie_reset
 void gameMoviesReset()
 {
-    memset(gGameMoviesSeen, 0, sizeof(gGameMoviesSeen));
+    gameMoviesResetSeen();
 
     gGameMovieIsPlaying = false;
     gGameMovieFaded = false;
 }
 
 // 0x44E638 gmovie_load
-int gameMoviesLoad(File* stream)
-{
-    if (fileRead(gGameMoviesSeen, sizeof(*gGameMoviesSeen), MOVIE_COUNT, stream) != MOVIE_COUNT) {
-        return -1;
-    }
 
-    return 0;
-}
 
 // 0x44E664 gmovie_save
-int gameMoviesSave(File* stream)
-{
-    if (fileWrite(gGameMoviesSeen, sizeof(*gGameMoviesSeen), MOVIE_COUNT, stream) != MOVIE_COUNT) {
-        return -1;
-    }
 
-    return 0;
-}
 
 // gmovie_play
 // 0x44E690 gmovie_play
@@ -155,7 +144,12 @@ int gameMoviePlay(GameMovie movie, GameMovieFlags flags)
         return -1;
     }
 
+    if (serverLoopActive()) {
+        gameMovieMarkSeen(movie);
+        return 0;
+    }
     gGameMovieIsPlaying = true;
+    audioEngineResume();
 
     const char* movieFileName = movieFileNames[movie].c_str();
     debugPrint("\nPlaying movie: %s\n", movieFileName);
@@ -176,6 +170,7 @@ int gameMoviePlay(GameMovie movie, GameMovieFlags flags)
         gGameMovieFaded = true;
     }
 
+    int movieBackdropWin = windowCreate(0, 0, screenGetWidth(), screenGetHeight(), COLOR_BLACK, 0);
     int win = windowCreate(0,
         0,
         screenGetWidth(),
@@ -183,6 +178,9 @@ int gameMoviePlay(GameMovie movie, GameMovieFlags flags)
         COLOR_FIRST,
         WINDOW_MODAL | WINDOW_MOVE_ON_TOP);
     if (win == -1) {
+        if (movieBackdropWin != -1) {
+            windowDestroy(movieBackdropWin);
+        }
         gGameMovieIsPlaying = false;
         return -1;
     }
@@ -295,6 +293,9 @@ int gameMoviePlay(GameMovie movie, GameMovieFlags flags)
     }
 
     windowDestroy(win);
+    if (movieBackdropWin != -1) {
+        windowDestroy(movieBackdropWin);
+    }
 
     // CE: Destroying a window redraws only content it was covering (centered
     // 640x480). This leads to everything outside this rect to remain black.
@@ -336,12 +337,7 @@ bool gameMovieSetPath(GameMovie movie, const char* fileName)
     return true;
 }
 
-void gameMovieMarkSeen(GameMovie movie)
-{
-    if (gameMovieIsValid(movie)) {
-        gGameMoviesSeen[movie] = 1;
-    }
-}
+
 
 // 0x44EAE4 gmPaletteFinish
 void gameMovieFadeOut()
@@ -353,14 +349,7 @@ void gameMovieFadeOut()
 }
 
 // 0x44EB04 gmovie_has_been_played
-bool gameMovieIsSeen(GameMovie movie)
-{
-    if (!gameMovieIsValid(movie)) {
-        return false;
-    }
 
-    return gGameMoviesSeen[movie] == 1;
-}
 
 // 0x44EB14 gmovieIsPlaying
 bool gameMovieIsPlaying()

@@ -1,3 +1,5 @@
+#include <cstdlib>
+#include "sfall_config.h"
 #include "random.h"
 
 #include <limits.h>
@@ -11,6 +13,13 @@
 #include "scripts.h"
 
 namespace fallout {
+
+unsigned int randomStateFingerprint();
+
+void randomSnapshot(RandomState* out);
+
+void randomRestore(const RandomState* in);
+
 
 static int _roll_reset_();
 static int randomTranslateRoll(int delta, int criticalSuccessModifier);
@@ -248,6 +257,35 @@ static void randomValidatePrerandom()
         debugPrint("Sequence is random, 95%% confidence.\n");
     } else {
         debugPrint("Warning! Sequence is not random, 95%% confidence.\n");
+    }
+}
+
+
+
+unsigned int randomStateFingerprint()
+{
+    unsigned int hash = (unsigned int)_idum * 31u + (unsigned int)_iy;
+    for (int index = 0; index < 32; index++) {
+        hash = hash * 31u + (unsigned int)_iv[index];
+    }
+    return hash;
+}
+
+void randomSnapshot(RandomState* out)
+{
+    out->idum = _idum;
+    out->iy = _iy;
+    for (int index = 0; index < 32; index++) {
+        out->iv[index] = _iv[index];
+    }
+}
+
+void randomRestore(const RandomState* in)
+{
+    _idum = in->idum;
+    _iy = in->iy;
+    for (int index = 0; index < 32; index++) {
+        _iv[index] = in->iv[index];
     }
 }
 

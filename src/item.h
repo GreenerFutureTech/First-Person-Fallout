@@ -1,6 +1,8 @@
 #ifndef ITEM_H
 #define ITEM_H
 
+#include <utility>
+
 #include "animation_defs.h"
 #include "art.h"
 #include "art_defs.h"
@@ -101,6 +103,17 @@ int weaponGetBurstRounds(Object* weapon);
 WeaponAnimation weaponGetAnimationCode(Object* weapon);
 ProtoId weaponGetProjectileProtoId(Object* weapon);
 ProtoId weaponGetAmmoTypeProtoId(Object* weapon);
+
+// ►► DOES THIS CRITTER'S ART HAVE FRAMES FOR WIELDING THIS WEAPON? Asks the SAME question
+// inventoryEquipFunc asks before equipping (inventory.cc: buildFid + artExists), but from a
+// weapon PID, so a caller can pick a weapon a critter can actually hold WITHOUT creating a
+// candidate object per guess.
+//
+// Worth a named function because the failure it prevents is nasty and silent: a critter
+// handed a weapon its frame set has no animation for does not equip it and FIGHTS UNARMED —
+// looking armed to the operator while punching. A tribal body with a rifle, or the dude with
+// a throwing knife (both observed in this codebase).
+bool weaponArtSupportedForCritter(Object* critter, int weaponPid);
 char weaponGetSoundId(Object* weapon);
 bool critterCanAim(Object* critter, HitMode hitMode);
 void aimedShotOverridesReset();
@@ -154,6 +167,47 @@ int withdrawalClear(Object* obj, void* data);
 int withdrawalEventProcess(Object* obj, void* data);
 int withdrawalEventRead(File* stream, void** dataPtr);
 int withdrawalEventWrite(File* stream, void* data);
+typedef enum LootTransferResult {
+    LOOT_TRANSFER_OK,
+    LOOT_TRANSFER_CAUGHT_STEALING,
+    LOOT_TRANSFER_NO_ROOM,
+} LootTransferResult;
+
+LootTransferResult lootTransferItem(Object* dude, Object* target, Object* item, int quantity, bool isPlanting, bool isSteal);
+void equipmentDetach(Object* critter, Object** leftHandPtr, Object** rightHandPtr, Object** armorPtr);
+void equipmentApply(Object* critter, Object* leftHand, Object* rightHand, Object* armor);
+bool inventoryApCostApply(Object* critter);
+bool itemDropStack(Object* owner, Object* item, int quantity);
+bool itemUseDrug(Object* user, Object* owner, Object* item, bool inventoryResident);
+int itemUseFromInventory(Object* user, Object* owner, Object* item, bool inventoryResident);
+void weaponUnloadIntoInventory(Object* owner, Object* item, bool inventoryResident);
+int containerStoreItem(Object* critter, Object* container, Object* item, int quantityToMove, bool inventoryResident);
+int weaponLoadAmmo(Object* critter, Object* weapon, Object* ammo, int quantityToMove, bool ammoInventoryResident, bool* firstPackConsumedPtr);
+typedef enum LootOpenResult {
+    LOOT_OPEN_OK,
+    LOOT_OPEN_NO_STEAL, // "can't find anything to take" feedback
+    LOOT_OPEN_BLOCKED, // silent refusal (closed container, script override)
+} LootOpenResult;
+
+LootOpenResult lootOpenCheck(Object* looter, Object* target, bool isSteal);
+Object* lootTargetDetach(Object* target, bool isSteal, Object** item1Ptr, Object** item2Ptr, Object** armorPtr);
+void lootTargetReattach(Object* target, Object* hiddenBox, Object* item1, Object* item2, Object* armor);
+void lootCaughtStealingReact(Object* looter, Object* target);
+bool lootTakeAll(Object* looter, Object* target);
+bool lootStealExperience(Object* looter, Object* target, int stealingXp, int* xpGainedPtr);
+
+typedef enum BarterResult {
+    BARTER_RESULT_OK,
+    BARTER_RESULT_TOO_HEAVY, // dude can't carry the goods
+    BARTER_RESULT_NPC_TOO_HEAVY, // party member can't carry the offer
+    BARTER_RESULT_BAD_OFFER, // offer not good enough
+} BarterResult;
+
+int barterReactionModifier(Object* critter);
+std::pair<int, int> barterComputeValues(Object* dude, Object* npc, Object* barterTable,
+    Object* offerTable, int barterMod, bool speakerIsPartyMember, bool offerButton = false);
+int barterComputeValue(Object* dude, Object* npc, Object* barterTable, int barterMod, bool speakerIsPartyMember);
+BarterResult barterAttemptTransaction(Object* dude, Object* offerTable, Object* npc, Object* barterTable, int barterMod, bool speakerIsPartyMember);
 int itemGetTotalCaps(Object* obj);
 int itemCapsAdjust(Object* obj, int amount);
 int itemGetMoney(Object* obj);
@@ -180,6 +234,14 @@ void explosionSetDamageType(DamageType damageType);
 int explosionGetMaxTargets();
 void explosionSetMaxTargets(int maxTargets);
 bool itemIsHealing(const ProtoId& protoId);
+
+// Loot transfer source pick (issue #9): first top-level stack of `pid` that is
+// NOT equipped. nullptr when only an equipped copy (or nothing) matches.
+Object* serverLootFindStack(Object* from, int pid, int* quantityOut);
+
+// Loot open (issue #8): USE the target + vanilla's lootOpenCheck gate (runs
+// pickup_p_proc). False = refused, do not grant the loot screen.
+bool serverLootOpen(Object* actor, Object* target);
 
 } // namespace fallout
 

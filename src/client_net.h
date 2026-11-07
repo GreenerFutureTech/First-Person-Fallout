@@ -1,0 +1,284 @@
+#ifndef CLIENT_NET_H
+#define CLIENT_NET_H
+
+#include <string> // takeEncounterPrompt hands back the latched title/body
+
+namespace fallout {
+
+struct Object;
+
+// STEP-4 joining client (CLIENT_JOIN_DESIGN.md §D — the inverse of the
+// NetworkPresenter encoder). The decoder loads the join snapshot BLOB, then
+// applies the live F2NS event stream, mutating the local sim into the server's
+// reconstructed state. It runs INSIDE the client binary (headless probe or the
+// real SDL viewer), so it has the full sim to mutate. The frame/event walker is
+// source-agnostic: it consumes bytes from a file (S2) or a socket (S3) through
+// the same IncrementalStream.
+
+// S2 file-sourced consumer: reads a captured F2NS wire stream from `path`, loads
+// the join snapshot, applies the live stream, and leaves the sim in the
+// reconstructed state (ready for a state_dump). The blob is reassembled in RAM —
+// there is no scratch file. Returns false on a framing error, a blob-guard
+// mismatch, or a load failure.
+bool clientApplyStreamFile(const char* path);
+
+// S3 live viewer connection (CLIENT_JOIN_DESIGN.md §A). A TCP ByteSource that
+// connects to a running f2_server, receives the join snapshot + live wire, and
+// feeds the SAME decoder incrementally. The SDL viewer loop (main.cc) holds one
+// of these: it pump()s each frame and render()s. Socket transport is POSIX-only
+// (mirrors server_net.cc); on Windows connect() fails and the viewer is
+// unsupported (the game itself is unaffected).
+// Set by mainClientViewer for the process lifetime. The §E design doc reserves
+// this as the viewer's backstop flag; today it gates focus behavior — a viewer
+// must keep pumping and rendering while UNFOCUSED (inputGetInput's
+// _GNW95_lost_focus block would freeze the render AND stop consuming the
+// socket, backpressuring the server; N windowed viewers side-by-side need all
+// of them live at once).
+void clientViewerSetActive(bool active);
+bool clientViewerActive();
+
+class ClientConnection {
+public:
+    ClientConnection();
+    ~ClientConnection();
+
+    ClientConnection(const ClientConnection&) = delete;
+    ClientConnection& operator=(const ClientConnection&) = delete;
+
+    // Open a blocking TCP connection to host:port (TCP_NODELAY, SIGPIPE ignored).
+    // The join blob is reassembled in RAM (no scratch file). Returns false on any
+    // resolve/socket/connect error, leaving the connection closed.
+    bool connect(const char* host, int port);
+
+    // Non-blocking: recv whatever has arrived and apply every now-complete frame.
+    // Returns false on a fatal framing error or a server disconnect (the caller
+    // should tear down the viewer); true otherwise, including "no data yet".
+    bool pump();
+
+    // Send one upstream control line (STEP 6). A trailing '\n' is appended (the
+    // server's v1 framing is newline-delimited text). Returns false if the write
+    // failed — the connection is marked dead like pump() does, so the caller's
+    // next pump() tears the viewer down. No-op-false when not connected.
+    bool sendLine(const char* line);
+
+    // True once the join snapshot blob has been fully received and loaded (the
+    // world is present). The viewer blocks on this before entering its render loop.
+    bool blobLoaded() const;
+
+    // How many times a join blob has been applied (world loads). Increments on
+    // every rebaseline broadcast (another viewer joined / map transition), not
+    // just the first — the viewer re-applies its puppet levers when it changes,
+    // because mapLoad re-registers the animation tickers each time.
+    int loadCount() const;
+
+    // Combat framing decoded from the wire (P3, presentation-only). The viewer
+    // reads these to route a click (out-of-combat mv vs in-combat cmove) and to
+    // cue the player on their turn. False until the first combatEnter; reset on
+    // combatExit and map transitions.
+    bool inCombat() const;
+    bool myTurn() const;
+
+    // False = the server never bound this client to a player slot (we never appeared in a
+    // roster under our own session). That is what a REFUSED LOGIN looks like from the
+    // client: the wire has no per-session channel, so the server kicks the socket instead
+    // of explaining, and this is how we report the likely reason.
+    bool everBoundToSlot() const;
+
+    // Drive combat presentation once per render frame (viewer only): start the next
+    // queued attack replay when the previous one is idle, and apply the deferred
+    // end-of-combat chrome once the queue drains. No-op headless / when disconnected.
+    void presentationTick();
+
+    // Recompute vanilla combat outlines from the current turn + mouse mode (viewer
+    // only, #8). Idempotent; the render loop calls it after a combat mouse-mode switch
+    // (crosshair ⇄ move/view toggles the target highlight). Combat/turn/move-driven
+    // recomputes happen internally on decode. No-op headless / when disconnected.
+    void recomputeCombatOutlines();
+
+    // True while the viewer still owes combat animation — a replay in flight, more
+    // attacks queued, or the end-of-combat chrome deferred behind them. The render
+    // loop shows the wait cursor and locks combat input while this holds.
+    bool combatPresentationBusy() const;
+
+    // A rebaseline arrived while a viewer modal screen was open and is buffered (onBlobEnd
+    // deferred it so mapLoad can't free gDude under the modal's pointers). The main loop
+    // applies it via applyDeferredBlob() once no modal is up. See clientViewerInstallServiceTicker.
+    bool blobDeferred() const;
+    void applyDeferredBlob();
+
+    // In-combat inventory grant (Stage 4). In combat the inventory OPEN is the
+    // priced act (4 AP, 2 with Quick Pockets), so the viewer asks with `invopen`
+    // and the server answers with EVENT_INVENTORY_GRANT once it has checked the
+    // turn and taken the AP. takeInventoryGrant() consumes that one-shot answer;
+    // the main loop opens the screen at its no-modal-open point, because the
+    // screen runs a blocking loop and must not be entered from inside pump().
+    // setCombatModalOpen() brackets it so the service ticker's combat
+    // force-ESC skips the one screen the server just charged us for.
+    bool takeInventoryGrant();
+
+    // The container the server just opened for this actor (0 = none). One-shot, same
+    // shape as the inventory grant and for the same reason: the loot screen is a
+    // blocking modal, so the decoder only latches and the main loop opens it.
+    // ►► THE SERVER DECIDES, NOT US. The viewer used to re-judge adjacency itself and
+    // open the screen when it thought the dude had arrived; see Presenter::lootGrant.
+    int takeLootGrant();
+
+    // One-shot: the server offered this actor an elevator panel (EVENT_ELEVATOR_PROMPT).
+    // Consumed by the main loop, NOT by the decoder — the panel blocks, and a blocking
+    // loop must never be entered from inside pump() (same rule as the grant above).
+    // One-shot: the streamed random-encounter prompt, latched out of the decoder
+    // (see onEncounterPrompt — opening it inside pump() re-enters drain()).
+    bool takeEncounterPrompt(std::string* title, std::string* body);
+    bool takeElevatorPrompt(int* elevator, int* startLevel);
+    // One-shot: the server says WE used a Motion Sensor, so open our own automap.
+    bool takeAutomapOpen(bool* usingScanner);
+    // One-shot: a fade addressed to us (or to everyone). true = to black.
+    // The fade itself is applied at DECODE, in wire order — see the decoder's
+    // applyFade for why that placement is the whole point. All the main loop owns is
+    // the watchdog: a fade-out whose matching fade-in never arrives must not leave the
+    // player looking at a black screen forever.
+    bool fadeWatchdogExpired(unsigned int nowMs, unsigned int maxBlackMs) const;
+    void clearFadeBlack();
+    void setCombatModalOpen(bool open);
+    bool combatModalOpen() const;
+
+    bool connected() const;
+    void close();
+
+private:
+    struct Impl;
+    Impl* _impl;
+};
+
+// Register the viewer's live upstream connection so shared combat code can forward
+// verbs through it. Set once by mainClientViewer after connect; passing nullptr is
+// safe (a subsequent commit becomes a no-op).
+void clientViewerSetConnection(ClientConnection* conn);
+
+// Register the per-iteration service ticker that keeps the wire pumping inside viewer modal
+// loops (inventory/skilldex/char/pipboy) and force-closes them on combat entry / rebaseline.
+// Call once after clientViewerSetConnection. See viewerServiceTicker in client_net.cc.
+void clientViewerInstallServiceTicker();
+
+// Tear down the service ticker at viewer shutdown (unregister + drop the captured conn),
+// so it can't fire against a destroyed connection. Pair with clientViewerInstallServiceTicker.
+void clientViewerRemoveServiceTicker();
+
+// Forward a fully-selected attack upstream as `cattack <netId> <hitMode> <hitLoc>`
+// (COMBAT_CLIENT_DESIGN.md §3.b). Installed as combatSetViewerAttackHook's target by
+// mainClientViewer; a no-op if no connection is registered or target is null. The
+// server re-validates the mode/location, so this is a request, not a trusted action.
+void clientViewerCommitAttack(Object* target, int hitMode, int hitLocation);
+
+// Return (and clear) whether the last clientViewerCommitAttack actually sent a verb.
+// The viewer arms its input-lock only when true, so a crosshair click that resolved
+// to a bad-shot message / range failure / picker-cancel (no verb sent) does not
+// freeze combat input for the round-trip timeout.
+bool clientViewerTakeAttackCommitted();
+
+// Return (and clear) whether the server streamed a REFUSAL addressed to this actor
+// since the last poll (feature A). The out-of-combat input block uses it to revert an
+// optimistic local hand flip the server rejected as busy (main.cc).
+bool clientViewerTakeRefusal();
+
+// Dude inventory verbs (player-UI Slice 3b). The inventory screen reroutes its
+// drag-drop / ctx-menu DROP resolution through these instead of mutating the local
+// mirror — the server runs the authoritative _inven_wield/_inven_unwield/
+// itemDropStack and streams the result back. hand: 0 = left, 1 = right, 2 = armor
+// (invunwield only; invwield auto-detects armor and ignores the hand). No-ops when
+// no connection is registered.
+// Send a chat line ("SAY"). No-op without a connection or on empty text; strips
+// newlines so a chat line can never forge a second control verb.
+void clientViewerSay(const char* text);
+
+// Ask the server to rest: `option` is a pipboy rest-menu index
+// (PIPBOY_REST_DURATION_*), so the until-healed kinds travel too. The server owns the
+// clock and everyone's hit points — the new time and HP come back on the ordinary
+// delta channels, and nothing is applied locally.
+void clientViewerRest(int option);
+
+// Answer to EVENT_ELEVATOR_PROMPT: which BUTTON the player pressed. The server
+// resolves what that button means from its own table and performs the ride — the
+// level index is the only thing a client is trusted to say (elevator.h).
+void clientViewerElevatorRide(int level);
+
+// ── Character-sheet edit intents (PLAYER_SHEET_DESIGN.md §9.5) ────────────────
+// The character screen's spends. It sends these INSTEAD of mutating the local sheet:
+// the server owns every character, checks the entitlement (unspent points, an owed
+// perk pick, prerequisites) and streams the authoritative row back, so a refusal is
+// simply a row that did not change plus a line on the refusal channel.
+//
+// Open/close bracket the server's edit session, whose one job is to hold the undo
+// baseline "-" may walk back to. skillup/skilldown/perkpick are GRANULAR — one point,
+// one perk, one intent. tagpick/mutpick answer the follow-up Tag!/Mutate! demand;
+// -1 (both -1 for mutpick) means the player cancelled, which takes the perk back off.
+// Sheet state changed by anything else (a drug, a level-up) arrives on the same
+// channel, so clientViewerConsumeSheetDirty tells an open screen to repaint.
+void clientViewerSheetOpen();
+void clientViewerSheetClose();
+void clientViewerSkillUp(int skill);
+void clientViewerSkillDown(int skill);
+void clientViewerPerkPick(int perk);
+void clientViewerTagPick(int skill);
+void clientViewerMutatePick(int dropTrait, int gainTrait);
+bool clientViewerConsumeSheetDirty();
+
+void clientViewerWield(Object* item, int hand);
+void clientViewerUnwield(int hand);
+void clientViewerDrop(Object* item, int quantity);
+void clientViewerUnload(Object* item);
+
+// Tell the server this viewer is done with the movie it was shown (finished or
+// skipped). The server's movie barrier releases on the FIRST ack it gets, so this
+// ends the cutscene for the whole room by design (game_movie.h).
+void clientViewerMovieAck();
+void clientViewerEncounterAnswer(bool accept);
+void clientViewerUseItem(int pid);
+void clientViewerUseItemOn(int targetNetId, int pid);
+void clientViewerArmExplosive(int pid, int seconds);
+void clientViewerLootTake(int containerNetId, int pid, int quantity);
+void clientViewerLootPut(int containerNetId, int pid, int quantity);
+void clientViewerLootTakeAll(int containerNetId);
+void clientViewerSetLootTarget(int netId);
+bool clientViewerConsumeLootTargetInvDirty();
+
+// Dialog viewer verbs (A3, DIALOG_STREAMING_PLAN Stage 3). Send the option
+// selection or dialog-end command upstream over the viewer's control connection.
+// The server routes these through serverControlLine into the dialog intent queue,
+// which the block-and-pump barrier drains. No-op when no connection is registered.
+// spectatorGuard: if true (the default), only sends when the viewer owns the dialog
+// (gDude->netId == driverNetId); false to bypass (ESC/dend always allowed).
+void clientViewerDialogSay(int index);
+void clientViewerDialogEnd();
+
+// Worldmap viewer verbs: send the travel-direction intent upstream. The server
+// routes these through serverControlLine into the worldmap intent queue, which the
+// block-and-pump barrier drains. No-op when no connection is registered.
+void clientViewerWmMove(int x, int y);
+void clientViewerWmEnter();
+void clientViewerWmEnterEntrance(int entranceIndex);
+void clientViewerWmEscape();
+
+// True (once) if a live dude-inventory reconcile mutated the mirror while a screen was
+// open; the open inventory loop polls this to repaint its list (it otherwise repaints
+// only on user events, so an async drop/consume would linger visibly). Self-clearing.
+bool clientViewerConsumeDudeInvDirty();
+
+// Free the item Objects the reconcile UNLINKED while a modal was open but deferred
+// destroying (an open inventory handler may hold a raw Object* across its inner pump).
+// Call after the inventory screen has closed, and at ticker teardown.
+void clientViewerFlushDeferredItemFrees();
+
+// Send one barter verb upstream (boffer/btake/bunoffer/bcommit/bdone/bcancel).
+// pid < 0 omits the arguments, for the arg-less verbs. Only the driver should
+// call this -- the server refuses everyone else, so sending anyway would just
+// earn a refusal message.
+void clientViewerBarterVerb(const char* verb, int pid, int quantity);
+
+// Steal-screen verbs (stake/splant/sdone). pid < 0 sends the bare verb. No netId:
+// the server's session owns the victim, so a steal verb cannot be aimed.
+void clientViewerStealVerb(const char* verb, int pid, int quantity);
+
+} // namespace fallout
+
+#endif /* CLIENT_NET_H */

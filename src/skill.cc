@@ -1,3 +1,8 @@
+#include "msg_channel.h" // kMsgChannelReward — skill-use XP is addressed to its earner
+#include "presenter.h"
+#include "player_sheet.h" // playerSheetMarkDirty — stream book/quest skill bumps
+#include "server_loop.h" // serverDedicatedActive — co-op player revival policy
+#include "server_players.h" // playerActorIs — the N-actor "is this the PC" predicate
 #include "skill.h"
 
 #include <stdio.h>
@@ -36,6 +41,25 @@
 #include "trait.h"
 
 namespace fallout {
+
+static Skill gPlayerActorTaggedSkills[kMaxPlayerActors - 1][NUM_TAGGED_SKILLS];
+
+static Skill* skillsTaggedRow(Object* subject);
+
+void skillsPlayerActorSeed();
+
+void skillsPlayerActorSeedSlot(int slot);
+
+static Skill* skillsTaggedRowForSlot(int slot);
+
+int skillsPlayerActorTaggedRowWrite(File* stream, int slot);
+
+int skillsPlayerActorTaggedRowRead(File* stream, int slot);
+
+void skillsTagPerkApply(Skill* taggedSkills, Skill skill);
+
+int skillGetUsesToday(Skill skill);
+
 
 #define SKILLS_MAX_USES_PER_DAY (3)
 #define SKILLS_MAX_COST_LEVEL (512)
@@ -444,28 +468,31 @@ void protoCritterDataResetSkills(CritterProtoData* data)
 }
 
 // 0x4AA4E4
-void skillsSetTagged(Skill* skills, int count)
+void skillsSetTagged(Skill* skills, int count, Object* subject)
 {
+    Skill* row = skillsTaggedRow(subject);
     for (int index = 0; index < count; index++) {
-        gTaggedSkills[index] = skills[index];
+        row[index] = skills[index];
     }
 }
 
 // 0x4AA508
-void skillsGetTagged(Skill* skills, int count)
+void skillsGetTagged(Skill* skills, int count, Object* subject)
 {
+    Skill* row = skillsTaggedRow(subject);
     for (int index = 0; index < count; index++) {
-        skills[index] = gTaggedSkills[index];
+        skills[index] = row[index];
     }
 }
 
 // 0x4AA52C
-bool skillIsTagged(Skill skill)
+bool skillIsTagged(Skill skill, Object* subject)
 {
-    return skill == gTaggedSkills[0]
-        || skill == gTaggedSkills[1]
-        || skill == gTaggedSkills[2]
-        || skill == gTaggedSkills[3];
+    Skill* row = skillsTaggedRow(subject);
+    return skill == row[0]
+        || skill == row[1]
+        || skill == row[2]
+        || skill == row[3];
 }
 
 // 0x4AA558
@@ -499,18 +526,18 @@ int skillGetValue(Object* critter, Skill skill)
         value += critterGetStat(critter, stat) * skillStatMultipliers[skill][stat];
     }
 
-    if (critter == gDude) {
-        if (skillIsTagged(skill)) {
+    if (playerActorIs(critter)) {
+        if (skillIsTagged(skill, critter)) {
             if (!tagSkillsDoublePointBonusDisabled) {
                 value += baseValue * skillDescription->baseValueMult;
             }
 
-            if (tagPerkAppliesInitialBonus || !perkGetRank(critter, PERK_TAG) || skill != gTaggedSkills[3]) {
+            if (tagPerkAppliesInitialBonus || !perkGetRank(critter, PERK_TAG) || skill != skillsTaggedRow(critter)[3]) {
                 value += tagSkillBonus;
             }
         }
 
-        value += traitGetSkillModifier(skill);
+        value += traitGetSkillModifier(skill, critter);
         value += perkGetSkillModifier(critter, skill);
         value += skillGetGameDifficultyModifier(skill);
     }
@@ -621,6 +648,10 @@ int skillAddForce(Object* obj, Skill skill)
     }
 
     proto->critter.data.skills[skill] += 1;
+
+    // Skill row is per-actor sheet state written directly here (not via a hooked
+    // stat setter) — stream it so a book/quest bump shows on the actor's client.
+    playerSheetMarkDirty(obj);
 
     return 0;
 }
@@ -748,8 +779,11 @@ int skillRoll(Object* critter, Skill skill, int modifier, int* howMuch)
         return ROLL_FAILURE;
     }
 
-    if (critter == gDude && skill != SKILL_STEAL) {
-        Object* partyMember = partyMemberGetBestInSkill(skill);
+    if (playerActorIs(critter) && skill != SKILL_STEAL) {
+        // The acting player is a candidate for their own roll (see party_member.h): an
+        // extra used to be replaced by whichever companion was best, even when the extra
+        // was the best in the group.
+        Object* partyMember = partyMemberGetBestInSkill(skill, critter);
         if (partyMember != nullptr) {
             if (partyMemberGetBestSkill(partyMember) == skill) {
                 critter = partyMember;
@@ -759,9 +793,12 @@ int skillRoll(Object* critter, Skill skill, int modifier, int* howMuch)
 
     int skillValue = skillGetValue(critter, skill);
 
-    if (critter == gDude && skill == SKILL_STEAL) {
-        if (dudeHasState(DUDE_STATE_SNEAKING)) {
-            if (dudeIsSneaking()) {
+    // The sneaking-thief bonus belongs to the thief — and now that stealing is a
+    // real server-side session (inventory_ui.cc stealSessionRun), an EXTRA sneaking
+    // up on a mark actually collects it.
+    if (playerActorIs(critter) && skill == SKILL_STEAL) {
+        if (dudeHasState(DUDE_STATE_SNEAKING, critter)) {
+            if (dudeIsSneaking(critter)) {
                 skillValue += 30;
             }
         }
@@ -798,7 +835,10 @@ SkillDexFrmId skillGetFrmId(Skill skill)
 // 0x4AAC2C
 static void _show_skill_use_messages(Object* obj, Skill skill, Object* target, int successCount, int skillBonus)
 {
-    if (obj != gDude) {
+    // Any player actor earns skill-use XP; `obj` was already the subject, the
+    // function just threw it away and asked gDude. playerActorIs IS
+    // `obj == gDude` with an empty registry.
+    if (!playerActorIs(obj)) {
         return;
     }
 
@@ -819,17 +859,19 @@ static void _show_skill_use_messages(Object* obj, Skill skill, Object* target, i
 
     int xpToAdd = successCount * baseExperience;
 
-    int before = pcGetStat(PC_STAT_EXPERIENCE);
+    int before = pcGetStat(PC_STAT_EXPERIENCE, obj);
 
-    if (pcAddExperience(xpToAdd) == 0 && successCount > 0) {
+    // The award is the actor's and so is the line — addressed, so an extra player
+    // honing a skill hears about it on their own screen instead of paying the host's.
+    if (pcAddExperience(xpToAdd, nullptr, obj) == 0 && successCount > 0 && playerActorIs(obj)) {
         MessageListItem messageListItem;
         messageListItem.num = 505; // You earn %d XP for honing your skills
         if (messageListGetItem(&gSkillsMessageList, &messageListItem)) {
-            int after = pcGetStat(PC_STAT_EXPERIENCE);
+            int after = pcGetStat(PC_STAT_EXPERIENCE, obj);
 
             char text[60];
             snprintf(text, sizeof(text), messageListItem.text, after - before);
-            displayMonitorAddMessage(text);
+            presenter()->consoleMessageStyled(obj->netId, kMsgChannelReward, text);
         }
     }
 }
@@ -854,7 +896,7 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
     int maximumHpToHeal = 0;
     int minimumHpToHeal = 0;
 
-    if (obj == gDude) {
+    if (playerActorIs(obj)) {
         if (skill == SKILL_FIRST_AID || skill == SKILL_DOCTOR) {
             int healerRank = perkGetRank(obj, PERK_HEALER);
             minimumHpToHeal = perkGetHealerMinBonus() * healerRank;
@@ -876,13 +918,41 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
             // 592: The strain might kill you.
             messageListItem.num = 590 + randomBetween(0, 2);
             if (messageListGetItem(&gSkillsMessageList, &messageListItem)) {
-                displayMonitorAddMessage(messageListItem.text);
+                presenter()->consoleMessage(messageListItem.text);
             }
 
             return -1;
         }
 
         if (critterIsDead(target)) {
+            // Dedicated co-op: a passed medical skill check can revive a dead PLAYER,
+            // matching the healing-item revive seam. This belongs here rather than in
+            // the wire handler: skillUse is the authoritative roll and therefore keeps
+            // the ordinary skill value, critical chance, daily-use slot, XP and time
+            // rules. NPC corpses and single-player retain vanilla's refusal below.
+            if (serverDedicatedActive() && playerActorIs(target)) {
+                int roll = critterGetBodyType(target) == BODY_TYPE_ROBOTIC
+                    ? ROLL_FAILURE
+                    : skillRoll(obj, skill, skillBonus, &hpToHeal);
+                if ((roll == ROLL_SUCCESS || roll == ROLL_CRITICAL_SUCCESS)
+                    && critterRevive(target)) {
+                    skillUpdateLastUse(SKILL_FIRST_AID);
+                    successCount = 1;
+                    char line[128];
+                    snprintf(line, sizeof(line), "%s revived %s with First Aid.",
+                        critterGetName(obj), critterGetName(target));
+                    presenter()->consoleMessageStyled(target->netId, kMsgChannelSystem, line);
+                } else {
+                    messageListItem.num = 503; // You fail to do any healing.
+                    if (messageListGetItem(&gSkillsMessageList, &messageListItem)) {
+                        presenter()->consoleMessage(messageListItem.text);
+                    }
+                }
+                if (playerActorIs(obj)) {
+                    gameTimeAddSeconds(1800);
+                }
+                break;
+            }
             // 512: You can't heal the dead.
             // 513: Let the dead rest in peace.
             // 514: It's dead, get over it.
@@ -895,7 +965,7 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
         }
 
         if (currentHp < maximumHp) {
-            paletteFadeTo(gPaletteBlack);
+            presenter()->screenFadeOut(obj->netId);
 
             int roll;
             if (critterGetBodyType(target) == BODY_TYPE_ROBOTIC) {
@@ -920,7 +990,7 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
                     }
 
                     snprintf(text, sizeof(text), messageListItem.text, hpToHeal);
-                    displayMonitorAddMessage(text);
+                    presenter()->consoleMessage(text);
                 }
 
                 target->data.critter.combat.maneuver &= ~CRITTER_MANUEVER_FLEEING;
@@ -930,7 +1000,7 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
                 successCount = 1;
 
                 if (target == gDude) {
-                    interfaceRenderHitPoints(true);
+                    presenter()->hudHitPoints(true);
                 }
             } else {
                 // You fail to do any healing.
@@ -940,11 +1010,11 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
                 }
 
                 snprintf(text, sizeof(text), messageListItem.text, hpToHeal);
-                displayMonitorAddMessage(text);
+                presenter()->consoleMessage(text);
             }
 
             scriptsExecMapUpdateProc();
-            paletteFadeTo(_cmap);
+            presenter()->screenFadeIn(obj->netId);
         } else {
             if (obj == gDude) {
                 // 501: You look healty already
@@ -960,12 +1030,12 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
                     snprintf(text, sizeof(text), messageListItem.text, objectGetName(target));
                 }
 
-                displayMonitorAddMessage(text);
+                presenter()->consoleMessage(text);
                 giveExp = false;
             }
         }
 
-        if (obj == gDude) {
+        if (playerActorIs(obj)) {
             gameTimeAddSeconds(1800);
         }
 
@@ -977,25 +1047,53 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
             // 592: The strain might kill you.
             messageListItem.num = 590 + randomBetween(0, 2);
             if (messageListGetItem(&gSkillsMessageList, &messageListItem)) {
-                displayMonitorAddMessage(messageListItem.text);
+                presenter()->consoleMessage(messageListItem.text);
             }
 
             return -1;
         }
 
         if (critterIsDead(target)) {
+            // Same co-op policy as First Aid, but use Doctor's own vanilla roll shape
+            // and one-hour time cost. A successful check revives at exactly 1 HP; it
+            // does not also perform the normal Doctor heal/limb-repair pass.
+            if (serverDedicatedActive() && playerActorIs(target)) {
+                int roll = ROLL_FAILURE;
+                if (critterGetBodyType(target) != BODY_TYPE_ROBOTIC) {
+                    int skillValue = skillGetValue(obj, skill);
+                    roll = randomRoll(skillValue, skillBonus, &hpToHeal);
+                }
+                if ((roll == ROLL_SUCCESS || roll == ROLL_CRITICAL_SUCCESS)
+                    && critterRevive(target)) {
+                    skillUpdateLastUse(SKILL_DOCTOR);
+                    successCount = 1;
+                    char line[128];
+                    snprintf(line, sizeof(line), "%s revived %s with Doctor.",
+                        critterGetName(obj), critterGetName(target));
+                    presenter()->consoleMessageStyled(target->netId, kMsgChannelSystem, line);
+                } else {
+                    messageListItem.num = 503; // You fail to do any healing.
+                    if (messageListGetItem(&gSkillsMessageList, &messageListItem)) {
+                        presenter()->consoleMessage(messageListItem.text);
+                    }
+                }
+                if (playerActorIs(obj)) {
+                    gameTimeAddSeconds(3600);
+                }
+                break;
+            }
             // 512: You can't heal the dead.
             // 513: Let the dead rest in peace.
             // 514: It's dead, get over it.
             messageListItem.num = 512 + randomBetween(0, 2);
             if (messageListGetItem(&gSkillsMessageList, &messageListItem)) {
-                displayMonitorAddMessage(messageListItem.text);
+                presenter()->consoleMessage(messageListItem.text);
             }
             break;
         }
 
         if (currentHp < maximumHp || critterIsCrippled(target)) {
-            paletteFadeTo(gPaletteBlack);
+            presenter()->screenFadeOut(obj->netId);
 
             if (critterGetBodyType(target) != BODY_TYPE_ROBOTIC && critterIsCrippled(target)) {
                 Dam flags[HEALABLE_DAMAGE_FLAGS_LENGTH];
@@ -1042,7 +1140,7 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
                         }
 
                         snprintf(text, sizeof(text), prefix.text, messageListItem.text);
-                        displayMonitorAddMessage(text);
+                        presenter()->consoleMessage(text);
                         _show_skill_use_messages(obj, skill, target, successCount, skillBonus);
 
                         giveExp = false;
@@ -1073,7 +1171,7 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
                         hpToHeal = maximumHp - currentHp;
                     }
                     snprintf(text, sizeof(text), messageListItem.text, hpToHeal);
-                    displayMonitorAddMessage(text);
+                    presenter()->consoleMessage(text);
                 }
 
                 if (!skillUseSlotAdded) {
@@ -1083,13 +1181,13 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
                 target->data.critter.combat.maneuver &= ~CRITTER_MANUEVER_FLEEING;
 
                 if (target == gDude) {
-                    interfaceRenderHitPoints(true);
+                    presenter()->hudHitPoints(true);
                 }
 
                 successCount = 1;
                 _show_skill_use_messages(obj, skill, target, successCount, skillBonus);
                 scriptsExecMapUpdateProc();
-                paletteFadeTo(_cmap);
+                presenter()->screenFadeIn(obj->netId);
 
                 giveExp = false;
             } else {
@@ -1100,10 +1198,10 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
                 }
 
                 snprintf(text, sizeof(text), messageListItem.text, hpToHeal);
-                displayMonitorAddMessage(text);
+                presenter()->consoleMessage(text);
 
                 scriptsExecMapUpdateProc();
-                paletteFadeTo(_cmap);
+                presenter()->screenFadeIn(obj->netId);
             }
         } else {
             if (obj == gDude) {
@@ -1120,13 +1218,13 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
                     snprintf(text, sizeof(text), messageListItem.text, objectGetName(target));
                 }
 
-                displayMonitorAddMessage(text);
+                presenter()->consoleMessage(text);
 
                 giveExp = false;
             }
         }
 
-        if (obj == gDude) {
+        if (playerActorIs(obj)) {
             gameTimeAddSeconds(3600 * damageHealingAttempts);
         }
 
@@ -1140,14 +1238,14 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
     case SKILL_TRAPS:
         messageListItem.num = 551; // You fail to find any traps.
         if (messageListGetItem(&gSkillsMessageList, &messageListItem)) {
-            displayMonitorAddMessage(messageListItem.text);
+            presenter()->consoleMessage(messageListItem.text);
         }
 
         return -1;
     case SKILL_SCIENCE:
         messageListItem.num = 552; // You fail to learn anything.
         if (messageListGetItem(&gSkillsMessageList, &messageListItem)) {
-            displayMonitorAddMessage(messageListItem.text);
+            presenter()->consoleMessage(messageListItem.text);
         }
 
         return -1;
@@ -1156,7 +1254,7 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
             // You cannot repair that.
             messageListItem.num = 553;
             if (messageListGetItem(&gSkillsMessageList, &messageListItem)) {
-                displayMonitorAddMessage(messageListItem.text);
+                presenter()->consoleMessage(messageListItem.text);
             }
             return -1;
         }
@@ -1167,7 +1265,7 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
             // 592: The strain might kill you.
             messageListItem.num = 590 + randomBetween(0, 2);
             if (messageListGetItem(&gSkillsMessageList, &messageListItem)) {
-                displayMonitorAddMessage(messageListItem.text);
+                presenter()->consoleMessage(messageListItem.text);
             }
             return -1;
         }
@@ -1176,7 +1274,7 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
             // The robotic unit is beyond repair.
             messageListItem.num = 601;
             if (messageListGetItem(&gSkillsMessageList, &messageListItem)) {
-                displayMonitorAddMessage(messageListItem.text);
+                presenter()->consoleMessage(messageListItem.text);
             }
             break;
         }
@@ -1185,7 +1283,7 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
             Dam flags[REPAIRABLE_DAMAGE_FLAGS_LENGTH];
             memcpy(flags, gRepairableDamageFlags, sizeof(gRepairableDamageFlags));
 
-            paletteFadeTo(gPaletteBlack);
+            presenter()->screenFadeOut(obj->netId);
 
             for (int index = 0; index < REPAIRABLE_DAMAGE_FLAGS_LENGTH; index++) {
                 if ((target->data.critter.combat.results & flags[index]) != 0) {
@@ -1227,7 +1325,7 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
                     }
 
                     snprintf(text, sizeof(text), prefix.text, messageListItem.text);
-                    displayMonitorAddMessage(text);
+                    presenter()->consoleMessage(text);
 
                     _show_skill_use_messages(obj, skill, target, successCount, skillBonus);
                     giveExp = false;
@@ -1252,7 +1350,7 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
                         hpToHeal = maximumHp - currentHp;
                     }
                     snprintf(text, sizeof(text), messageListItem.text, hpToHeal);
-                    displayMonitorAddMessage(text);
+                    presenter()->consoleMessage(text);
                 }
 
                 if (!skillUseSlotAdded) {
@@ -1262,13 +1360,13 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
                 target->data.critter.combat.maneuver &= ~CRITTER_MANUEVER_FLEEING;
 
                 if (target == gDude) {
-                    interfaceRenderHitPoints(true);
+                    presenter()->hudHitPoints(true);
                 }
 
                 successCount = 1;
                 _show_skill_use_messages(obj, skill, target, successCount, skillBonus);
                 scriptsExecMapUpdateProc();
-                paletteFadeTo(_cmap);
+                presenter()->screenFadeIn(obj->netId);
 
                 giveExp = false;
             } else {
@@ -1279,10 +1377,10 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
                 }
 
                 snprintf(text, sizeof(text), messageListItem.text, hpToHeal);
-                displayMonitorAddMessage(text);
+                presenter()->consoleMessage(text);
 
                 scriptsExecMapUpdateProc();
-                paletteFadeTo(_cmap);
+                presenter()->screenFadeIn(obj->netId);
             }
         } else {
             if (obj == gDude) {
@@ -1294,13 +1392,13 @@ int skillUse(Object* obj, Object* target, Skill skill, int skillBonus)
                 }
 
                 snprintf(text, sizeof(text), messageListItem.text, objectGetName(target));
-                displayMonitorAddMessage(text);
+                presenter()->consoleMessage(text);
 
                 giveExp = false;
             }
         }
 
-        if (obj == gDude) {
+        if (playerActorIs(obj)) {
             gameTimeAddSeconds(1800 * damageHealingAttempts);
         }
 
@@ -1354,7 +1452,7 @@ SkillStealResult skillsPerformStealing(Object* thief, Object* target, Object* it
 
     int stealModifier = -_gStealCount + 1;
 
-    if (thief != gDude || !perkHasRank(thief, PERK_PICKPOCKET)) {
+    if (!playerActorIs(thief) || !perkHasRank(thief, PERK_PICKPOCKET)) {
         // -4% per item size
         stealModifier -= 4 * itemGetSize(item);
 
@@ -1376,7 +1474,7 @@ SkillStealResult skillsPerformStealing(Object* thief, Object* target, Object* it
     }
 
     int stealRoll;
-    if (thief == gDude && objectIsPartyMember(target)) {
+    if (playerActorIs(thief) && objectIsPartyMember(target)) {
         stealRoll = ROLL_CRITICAL_SUCCESS;
     } else {
         int criticalChance = critterGetStat(thief, STAT_CRITICAL_CHANCE);
@@ -1410,7 +1508,7 @@ SkillStealResult skillsPerformStealing(Object* thief, Object* target, Object* it
         messageListItem.num = isPlanting ? 573 : 571;
         if (!skipMessages && messageListGetItem(&gSkillsMessageList, &messageListItem)) {
             snprintf(text, sizeof(text), messageListItem.text, objectGetName(item));
-            displayMonitorAddMessage(text);
+            presenter()->consoleMessageFor(playerActorIs(thief) ? thief->netId : 0, text);
         }
 
         return SkillStealResult::Success;
@@ -1420,7 +1518,7 @@ SkillStealResult skillsPerformStealing(Object* thief, Object* target, Object* it
         messageListItem.num = isPlanting ? 572 : 570;
         if (!skipMessages && messageListGetItem(&gSkillsMessageList, &messageListItem)) {
             snprintf(text, sizeof(text), messageListItem.text, objectGetName(item));
-            displayMonitorAddMessage(text);
+            presenter()->consoleMessageFor(playerActorIs(thief) ? thief->netId : 0, text);
         }
 
         return SkillStealResult::Caught;
@@ -1533,6 +1631,90 @@ char* skillsGetGenericResponse(Object* critter, bool isDude)
     MessageListItem messageListItem;
     char* msg = getmsg(&gSkillsMessageList, &messageListItem, baseMessageId + messageId);
     return msg;
+}
+
+
+
+static Skill* skillsTaggedRow(Object* subject)
+{
+    int slot = playerActorSlotOf(subject != nullptr ? subject : gDude);
+    if (slot > 0) {
+        return gPlayerActorTaggedSkills[slot - 1];
+    }
+
+    return gTaggedSkills;
+}
+
+void skillsPlayerActorSeed()
+{
+    for (int slot = 1; slot < kMaxPlayerActors; slot++) {
+        skillsPlayerActorSeedSlot(slot);
+    }
+}
+
+void skillsPlayerActorSeedSlot(int slot)
+{
+    if (slot < 1 || slot >= kMaxPlayerActors) {
+        return;
+    }
+
+    for (int index = 0; index < NUM_TAGGED_SKILLS; index++) {
+        gPlayerActorTaggedSkills[slot - 1][index] = gTaggedSkills[index];
+    }
+}
+
+static Skill* skillsTaggedRowForSlot(int slot)
+{
+    if (slot == 0) {
+        return gTaggedSkills;
+    }
+
+    if (slot < 1 || slot >= kMaxPlayerActors) {
+        return nullptr;
+    }
+
+    return gPlayerActorTaggedSkills[slot - 1];
+}
+
+int skillsPlayerActorTaggedRowWrite(File* stream, int slot)
+{
+    Skill* row = skillsTaggedRowForSlot(slot);
+    if (row == nullptr) {
+        return -1;
+    }
+
+    return fileWriteInt32EnumList<Skill>(stream, row, NUM_TAGGED_SKILLS);
+}
+
+int skillsPlayerActorTaggedRowRead(File* stream, int slot)
+{
+    Skill* row = skillsTaggedRowForSlot(slot);
+    if (row == nullptr) {
+        return -1;
+    }
+
+    return fileReadInt32EnumList<Skill>(stream, row, NUM_TAGGED_SKILLS);
+}
+
+void skillsTagPerkApply(Skill* taggedSkills, Skill skill)
+{
+    taggedSkills[3] = skill;
+    skillsSetTagged(taggedSkills, NUM_TAGGED_SKILLS);
+}
+
+int skillGetUsesToday(Skill skill)
+{
+    if (!skillIsValid(skill)) {
+        return 0;
+    }
+
+    int uses = 0;
+    for (int slot = 0; slot < SKILLS_MAX_USES_PER_DAY; slot++) {
+        if (_timesSkillUsed[skill][slot] != 0) {
+            uses++;
+        }
+    }
+    return uses;
 }
 
 } // namespace fallout

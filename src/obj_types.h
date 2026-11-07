@@ -91,8 +91,14 @@ enum OutlineType : int {
     OUTLINE_TYPE_FRIENDLY = 0x08,
     OUTLINE_TYPE_ITEM = 0x10,
     OUTLINE_TYPE_BLOCKED = 0x20,
+    OUTLINE_TYPE_LOOT_ITEM = 64,
+    OUTLINE_TYPE_LOOT_CORPSE = 128,
+    OUTLINE_TYPE_LOOT_CONTAINER = 256,
+    OUTLINE_TYPE_LOOT_DOOR = 512,
     OUTLINE_TYPE_MAX = 0xFFFFFF
 };
+
+#define OUTLINE_LOOT_MASK (OUTLINE_TYPE_LOOT_ITEM | OUTLINE_TYPE_LOOT_CORPSE | OUTLINE_TYPE_LOOT_CONTAINER | OUTLINE_TYPE_LOOT_DOOR)
 
 #define OUTLINE_PALETTED 0x40000000
 #define OUTLINE_DISABLED 0x80000000
@@ -516,7 +522,8 @@ typedef struct Object {
     OutlineType outline; // obj_outline
     int sid; // obj_sid
     Object* owner;
-    int scriptIndex; // TODO: remove
+    int scriptIndex;
+    int netId;
 } Object;
 
 typedef struct ObjectListNode {

@@ -3,6 +3,8 @@
 
 #include "animation_defs.h"
 #include "art.h"
+#include <functional>
+
 #include "obj_types.h"
 #include "proto_types.h"
 
@@ -71,6 +73,55 @@ void inventoryDisplayStats();
 void inventoryRedraw(int redrawSide);
 Object* inventoryGetTargetObject();
 int inventoryUnwieldSlot(Object* critter, InvenSlot slot);
+// Recompute the fid's weapon nibble (0xF000) from the critter's CURRENT hand contents. Call
+// after any path that removes a wielded weapon without going through wield/unwield, or the
+// sprite keeps holding something that no longer exists. No-op when both hands are armed.
+void invenRederiveWeaponFid(Object* critter);
+
+// Park the server tick inside an OPEN trade and service the control channel
+// until the driver's next barter intent lands (the barter twin of
+// gameDialogSetServerPump). Returning false bails the trade.
+//
+// Without this the headless drain is FIXTURE-shaped, not interactive: it breaks
+// the instant the intent queue runs dry, which is right for a golden that
+// pre-queues every move but means a live trade closes before the player has
+// touched anything. Installed by f2_server only; nullptr everywhere else, which
+// is what keeps the goldens on their original break-on-empty behavior.
+void barterSetServerPump(std::function<bool()> pump);
+
+// VIEWER-side trade window: render the mirrored tables the barter stream built,
+// and hold the screen until the server ends the trade. Not a trade -- the trade
+// is the server's; this is what it looks like. See the note at the definition.
+void inventoryOpenTradeViewer(Object* merchant, Object* playerTable, Object* merchantTable);
+
+// -- STEAL / PICKPOCKET / PLANT, server-authoritative (co-op) ---------------
+// The dedicated server owns the steal screen the way it owns a trade: it runs
+// the session, rolls the Steal skill for every transfer, and parks the tick
+// while the thief works. See stealSessionRun's definition for the whole shape.
+
+// Run a steal session on the server. Called from the dedicated server's
+// SCRIPT_REQUEST_STEALING handler; blocks (pumping the control channel) until
+// the thief closes the screen, is caught, or the pump bails.
+void stealSessionRun(Object* thief, Object* target);
+
+// Park the server tick inside an OPEN steal screen and service the control
+// channel until the thief's next intent lands (the steal twin of
+// barterSetServerPump). Returning false bails the session. Installed by
+// f2_server only; nullptr everywhere else.
+void stealSetServerPump(std::function<bool()> pump);
+
+// Is a steal session live right now, and who is in it? The trust boundary for
+// the stake/splant/sdone verbs: a steal verb is meaningless (and must be
+// refused) outside a session the sender's own actor is driving.
+bool stealSessionActive();
+Object* stealSessionThief();
+Object* stealSessionTarget();
+
+// VIEWER-side steal screen: render the vanilla loot/steal window anchored on
+// the THIEF (so every player watches the same pockets being emptied, which is
+// the point), with transfers rerouted to the steal verbs for the thief and
+// refused for everyone else.
+void inventoryOpenStealingViewer(Object* thief, Object* target);
 
 } // namespace fallout
 

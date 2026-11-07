@@ -1,3 +1,6 @@
+#include "character_transaction.h"
+#include "client_net.h" // clientViewerActive + the sheet edit intents (co-op)
+#include "sfall_config.h"
 #include "character_editor.h"
 
 #include <assert.h>
@@ -52,6 +55,23 @@
 #include "worldmap.h"
 
 namespace fallout {
+
+static bool characterEditorSheetIsServerOwned();
+
+static void characterEditorAdjustSkillIntent(int keyCode);
+
+static void characterEditorRedrawSheet();
+
+static CharacterSnapshot gCharacterEditorSnapshot;
+
+int characterEditorShowViewOnly();
+
+static bool characterEditorSheetIsServerOwned();
+
+static void characterEditorRedrawSheet();
+
+static void characterEditorAdjustSkillIntent(int keyCode);
+
 
 #define EDITOR_WINDOW_WIDTH 640
 #define EDITOR_WINDOW_HEIGHT 480
@@ -316,10 +336,6 @@ static int perkDialogDrawTraits(int a1);
 static int perkDialogOptionCompare(const void* a1, const void* a2);
 static int perkDialogDrawCard(const SkillDexFrmId& frmId, const char* name, const char* rank, char* description);
 static void _pop_perks();
-static int characterEditorGetLevelsPerPerk();
-static int characterEditorGetLegacyPerkSelectionLevel();
-static void characterEditorConsumeOwedPerk();
-static void characterEditorGrantPerkAtLevel(int level);
 static int _is_supper_bonus();
 static int characterEditorFolderViewInit();
 static void characterEditorFolderViewScroll(int direction);
@@ -648,7 +664,7 @@ static int gCharacterEditorTagSkillBtns[SKILL_COUNT];
 // pc name
 //
 // 0x5701A0 name_save
-static char gCharacterEditorNameBackup[32];
+
 
 // 0x570418 grphcpy
 static unsigned char* gCharacterEditorFrmCopy[EDITOR_GRAPHIC_COUNT];
@@ -721,7 +737,7 @@ static int gCharacterEditorWindow = -1;
 static unsigned char* gPerkDialogWindowBuffer;
 
 // 0x570630 dude_data
-static CritterProtoData gCharacterEditorDudeDataBackup;
+
 
 // 0x5707A8 cline
 static int gPerkDialogCurrentLine;
@@ -732,10 +748,10 @@ static int gPerkDialogPreviousCurrentLine;
 // unspent skill points
 //
 // 0x5707B0 upsent_points_back
-static int gCharacterEditorUnspentSkillPointsBackup;
+
 
 // 0x5707B4 last_level
-static int gCharacterEditorLastLevel;
+
 
 // 0x5707B8 fontsave_1
 static int gCharacterEditorOldFont;
@@ -757,7 +773,7 @@ static int gCharacterEditorKillsCount;
 // current hit points
 //
 // 0x5707C4 hp_back
-static int gCharacterEditorHitPointsBackup;
+
 
 // 0x5707C8 mouse_ypos
 static int gCharacterEditorMouseY; // mouse y
@@ -828,18 +844,18 @@ static int gCharacterEditorTaggedSkillCount;
 static Skill gCharacterEditorTempTaggedSkills[NUM_TAGGED_SKILLS];
 
 // 0x570A28 free_perk_back
-static unsigned char gCharacterEditorHasFreePerkBackup;
+static int gCharacterEditorHasFreePerkBackup;
 static std::vector<int> characterEditorOwedPerkLevelsBackup;
 static bool characterEditorOwedPerkLevelsInitializedBackup;
 
 // 0x570A29 free_perk
-static unsigned char gCharacterEditorHasFreePerk; // count of owed perks
-static int perkFrequencyOverride;
-static int skillPointsPerLevelModifier;
+ // count of owed perks
+
+
 
 // Character levels at which the currently owed perks were earned.
-static std::vector<int> characterEditorOwedPerkLevels;
-static bool characterEditorOwedPerkLevelsInitialized;
+
+
 
 // 0x570A2A first_skill_list
 static unsigned char gCharacterEditorIsSkillsFirstDraw;
@@ -897,6 +913,14 @@ int characterEditorShow(bool isCreationMode)
         int keyCode = inputGetInput();
 
         convertMouseWheelToArrowKey(&keyCode);
+
+        // A sheet row arrived off the wire while the screen is open — the server's
+        // answer to a spend, or someone else's effect on this actor (a drug, a
+        // level-up, a revive). Repaint from the new values; this is the whole return
+        // path for a co-op edit, and the reason the editor needs no optimistic state.
+        if (characterEditorSheetIsServerOwned() && clientViewerConsumeSheetDirty()) {
+            characterEditorRedrawSheet();
+        }
 
         bool done = false;
         if (keyCode == 500) {
@@ -1258,7 +1282,29 @@ int characterEditorShow(bool isCreationMode)
 
     characterEditorWindowFree();
 
-    if (rc == 1) {
+    // ►►►► THE ROLLBACK THAT ATE EVERY LEVEL-UP: "the perk and the skill points only
+    // show up if I relog, or switch map." rc == 1 is not an error path — it is
+    // CANCEL / ESCAPE / pressing C again (see the keyCode branch that sets it), i.e.
+    // every way a player closes this screen except clicking Done. On a server-owned
+    // sheet that rollback is actively wrong, and the wrapper's own comment already
+    // says so — but the wrapper (characterEditorShowViewOnly) is the only place the
+    // unconditional restore was removed from, and this one, three lines inside the
+    // function it calls, was missed. So the whole round trip worked and was then
+    // thrown away locally:
+    //   server:  perkpick rc=0, skillup ... value=60 sp=0    (applied, authoritative)
+    //   wire:    [psht] emit slot=0 len=937                  (row streamed)
+    //   viewer:  [psht] apply slot=0 len=937 rc=0             (row IN gDudeProto)
+    //   ESC   :  characterEditorRestorePlayer()               (reverted to the OPEN snapshot)
+    // characterSnapshotRestore rewrites the dude's whole CritterProtoData, plus skill
+    // points, perk ranks, owed pick, tagged skills and traits — so it cannot lose a
+    // *little* of the level-up, it loses all of it. Relogging or changing map re-seeds
+    // the row from the server, which is why those looked like the fix.
+    //
+    // CREATION MODE KEEPS IT. There the character is not on the server yet (main.cc
+    // runs characterEditorShow(1) before the join), the snapshot is the only truth
+    // there is, and cancelling out of creation must really discard.
+    bool serverOwnsSheet = characterEditorSheetIsServerOwned() && !gCharacterEditorIsCreationMode;
+    if (rc == 1 && !serverOwnsSheet) {
         characterEditorRestorePlayer();
     }
 
@@ -1981,9 +2027,8 @@ void characterEditorInit()
     characterEditorSelectedItem = EDITOR_FIRST_PRIMARY_STAT;
     gCharacterEditorCurrentSkill = SKILL_SMALL_GUNS;
     gCharacterEditorSkillValueAdjustmentSliderY = 27;
-    gCharacterEditorHasFreePerk = 0;
-    characterEditorOwedPerkLevels.clear();
-    characterEditorOwedPerkLevelsInitialized = false;
+    characterEditorSetPerkOwed(0);
+    characterEditorSetOwedPerkLevels({});
     characterEditorWindowSelectedFolder = EDITOR_FOLDER_PERKS;
 
     for (i = 0; i < TRAITS_MAX_SELECTED_COUNT; i++) {
@@ -2017,20 +2062,7 @@ bool _isdoschar(int ch)
 // copy filename replacing extension
 //
 // 0x4340D0 strmfe
-char* _strmfe(char* dest, const char* name, const char* ext)
-{
-    char* save = dest;
 
-    while (*name != '\0' && *name != '.') {
-        *dest++ = *name++;
-    }
-
-    *dest++ = '.';
-
-    strcpy(dest, ext);
-
-    return save;
-}
 
 // 0x43410C DrawFolder
 static void characterEditorDrawFolders()
@@ -4690,24 +4722,20 @@ static void characterEditorRegisterInfoAreas()
 // 0x43A7DC SavePlayer
 static void characterEditorSavePlayer()
 {
-    Proto* proto;
-    protoGetProto(gDude, &proto);
-    critterProtoDataCopy(&gCharacterEditorDudeDataBackup, &(proto->critter.data));
-
-    gCharacterEditorHitPointsBackup = critterGetHitPoints(gDude);
-
-    strncpy(gCharacterEditorNameBackup, critterGetName(gDude), 32);
+    // Ledger H-49: the dude proto-data/hit-points/name capture moved to
+    // character_transaction.cc; the editor-only backups below keep their
+    // exact original positions.
+    characterSnapshotTake(&gCharacterEditorSnapshot);
 
     gCharacterEditorLastLevelBackup = gCharacterEditorLastLevel;
     for (Perk perk = PERK_FIRST; perk < PERK_COUNT; perk++) {
         gCharacterEditorPerksBackup[perk] = perkGetRank(gDude, perk);
     }
 
-    gCharacterEditorHasFreePerkBackup = gCharacterEditorHasFreePerk;
-    characterEditorOwedPerkLevelsBackup = characterEditorOwedPerkLevels;
-    characterEditorOwedPerkLevelsInitializedBackup = characterEditorOwedPerkLevelsInitialized;
+    gCharacterEditorHasFreePerkBackup = characterEditorGetPerkOwed();
+    characterEditorOwedPerkLevelsBackup = characterEditorGetOwedPerkLevels();
 
-    gCharacterEditorUnspentSkillPointsBackup = pcGetStat(PC_STAT_UNSPENT_SKILL_POINTS);
+    characterSnapshotTakeSkillPoints(&gCharacterEditorSnapshot);
 
     skillsGetTagged(gCharacterEditorTaggedSkillsBackup, NUM_TAGGED_SKILLS);
 
@@ -4723,24 +4751,17 @@ static void characterEditorSavePlayer()
 // 0x43A8BC RestorePlayer
 static void characterEditorRestorePlayer()
 {
-    Proto* proto;
     int i;
     int v3;
-    int cur_hp;
 
     _pop_perks();
 
-    protoGetProto(gDude, &proto);
-    critterProtoDataCopy(&(proto->critter.data), &gCharacterEditorDudeDataBackup);
-
-    dudeSetName(gCharacterEditorNameBackup);
-
+    characterSnapshotRestore(&gCharacterEditorSnapshot);
     gCharacterEditorLastLevel = gCharacterEditorLastLevelBackup;
-    gCharacterEditorHasFreePerk = gCharacterEditorHasFreePerkBackup;
-    characterEditorOwedPerkLevels = characterEditorOwedPerkLevelsBackup;
-    characterEditorOwedPerkLevelsInitialized = characterEditorOwedPerkLevelsInitializedBackup;
+    characterEditorSetPerkOwed(gCharacterEditorHasFreePerkBackup);
+    characterEditorSetOwedPerkLevels(characterEditorOwedPerkLevelsBackup);
 
-    pcSetStat(PC_STAT_UNSPENT_SKILL_POINTS, gCharacterEditorUnspentSkillPointsBackup);
+    characterSnapshotRestoreSkillPoints(&gCharacterEditorSnapshot);
 
     skillsSetTagged(gCharacterEditorTaggedSkillsBackup, NUM_TAGGED_SKILLS);
 
@@ -4774,11 +4795,9 @@ static void characterEditorRestorePlayer()
 
     gCharacterEditorTempTraitCount = v3;
 
-    critterUpdateDerivedStats(gDude);
-
-    cur_hp = critterGetHitPoints(gDude);
-    critterAdjustHitPoints(gDude, gCharacterEditorHitPointsBackup - cur_hp);
-
+    // Ledger H-49: the derived-stat recompute + hit-points restore moved to
+    // character_transaction.cc.
+    characterSnapshotRestoreHitPoints(&gCharacterEditorSnapshot);
     tagSkill4LevelBase = -1;
 }
 
@@ -5047,6 +5066,11 @@ static void characterEditorHandleInfoButtonPressed(int eventCode)
 static void characterEditorHandleAdjustSkillButtonPressed(int keyCode)
 {
     if (gCharacterEditorIsCreationMode) {
+        return;
+    }
+
+    if (characterEditorSheetIsServerOwned()) {
+        characterEditorAdjustSkillIntent(keyCode);
         return;
     }
 
@@ -5540,256 +5564,15 @@ static void characterEditorDrawKarmaFolder()
 }
 
 // 0x43C1B0 editor_save
-int characterEditorSave(File* stream)
-{
-    if (fileWriteInt32(stream, gCharacterEditorLastLevel) == -1)
-        return -1;
-    if (fileWriteUInt8(stream, gCharacterEditorHasFreePerk) == -1)
-        return -1;
 
-    return 0;
-}
 
 // 0x43C1E0 editor_load
-int characterEditorLoad(File* stream)
-{
-    if (fileReadInt32(stream, &gCharacterEditorLastLevel) == -1)
-        return -1;
-    if (fileReadUInt8(stream, &gCharacterEditorHasFreePerk) == -1)
-        return -1;
 
-    return 0;
-}
 
-int characterEditorGetPerkOwed()
-{
-    return gCharacterEditorHasFreePerk;
-}
-
-void characterEditorSetPerkOwed(int value)
-{
-    unsigned int maskedValue = static_cast<unsigned int>(value) & 0xFF;
-    if (maskedValue > kMaxPerkOwed) {
-        return;
-    }
-
-    if (characterEditorOwedPerkLevelsInitialized) {
-        characterEditorOwedPerkLevels.resize(maskedValue, pcGetStat(PC_STAT_LEVEL));
-    }
-
-    gCharacterEditorHasFreePerk = maskedValue;
-}
-
-void characterEditorSetPerkFrequency(int value)
-{
-    perkFrequencyOverride = value;
-}
-
-void characterEditorSetSkillPointsPerLevelModifier(int value)
-{
-    skillPointsPerLevelModifier = std::clamp(value, -100, 100);
-}
-
-// External interface: called when level up occurs
-void characterEditorHandleLevelUp(int level)
-{
-    characterEditorGrantPerkAtLevel(level);
-}
-
-// Compute the character level that the next perk selection should use.
-int characterEditorGetPerkSelectionLevel()
-{
-    int currentLevel = pcGetStat(PC_STAT_LEVEL);
-    if (settings.gameplay.perk_carryover != PERK_CARRY_OVER_MODE_ON) {
-        return currentLevel;
-    }
-
-    if (!characterEditorOwedPerkLevelsInitialized) {
-        characterEditorMigrateLegacyPerkSelectionState();
-    }
-
-    if (characterEditorOwedPerkLevels.empty()) {
-        return currentLevel;
-    }
-
-    return std::min(characterEditorOwedPerkLevels.front(), currentLevel);
-}
-
-const std::vector<int>& characterEditorGetOwedPerkLevels()
-{
-    if (!characterEditorOwedPerkLevelsInitialized) {
-        characterEditorMigrateLegacyPerkSelectionState();
-    }
-
-    return characterEditorOwedPerkLevels;
-}
-
-bool characterEditorSetOwedPerkLevels(const std::vector<int>& levels)
-{
-    if (levels.size() > kMaxPerkOwed
-        || levels.size() != static_cast<size_t>(characterEditorGetPerkOwed())) {
-        return false;
-    }
-
-    int previousLevel = 0;
-    for (int level : levels) {
-        if (level <= 0 || level > PC_LEVEL_MAX || level < previousLevel) {
-            return false;
-        }
-
-        previousLevel = level;
-    }
-
-    characterEditorOwedPerkLevels = levels;
-    characterEditorOwedPerkLevelsInitialized = true;
-    return true;
-}
-
-void characterEditorMigrateLegacyPerkSelectionState()
-{
-    if (characterEditorOwedPerkLevelsInitialized) {
-        return;
-    }
-
-    characterEditorOwedPerkLevels.clear();
-    characterEditorOwedPerkLevelsInitialized = true;
-
-    int owed = characterEditorGetPerkOwed();
-    if (owed == 0) {
-        return;
-    }
-
-    int currentLevel = pcGetStat(PC_STAT_LEVEL);
-    int levelsPerPerk = characterEditorGetLevelsPerPerk();
-    int selectionLevel = characterEditorGetLegacyPerkSelectionLevel();
-
-    for (int index = 0; index < owed; index++) {
-        characterEditorOwedPerkLevels.push_back(selectionLevel);
-        int nextLevel = (selectionLevel / levelsPerPerk + 1) * levelsPerPerk;
-        selectionLevel = std::min(nextLevel, currentLevel);
-    }
-}
-
-static int characterEditorGetLegacyPerkSelectionLevel()
-{
-    int currentLevel = pcGetStat(PC_STAT_LEVEL);
-    int owed = characterEditorGetPerkOwed();
-    if (owed <= 1) {
-        // If a single perk is owed, use the current level. This prevents odd effects in
-        // saves where perks have been skipped and is a general safe fallback.
-        return currentLevel;
-    }
-
-    int levelsPerPerk = characterEditorGetLevelsPerPerk();
-
-    // This therefore uses the number of perk thresholds strictly before the
-    // current level, then compares that against the total perk ranks already
-    // spent. In the common non-scripted case:
-    // - level 6 with 0 spent perks yields one deferred threshold (level 3)
-    // - after spending one perk, there is no older backlog left, so the next
-    //   owed perk uses level 6 requirements
-    // - level 9 with 2 spent perks has no older backlog, so owed perks are
-    //   immediately spendable at level 9
-    int previousThresholdsReached = (currentLevel - 1) / levelsPerPerk;
-    int spentPerks = 0;
-    for (Perk perk = PERK_FIRST; perk < PERK_COUNT; perk++) {
-        spentPerks += perkGetRank(gDude, perk);
-    }
-
-    // This is a heuristic for the 99.9% case where perk ranks come from normal
-    // perk picks. If enough perk ranks have already been spent to cover all
-    // earlier thresholds, there is no deferred backlog to force in order.
-    if (spentPerks >= previousThresholdsReached) {
-        return currentLevel;
-    }
-
-    // The next deferred pick corresponds to the earliest previously missed
-    // threshold after the already-spent perk ranks.
-    int thresholdIndex = spentPerks + 1;
-    int selectionLevel = std::max(3, thresholdIndex * levelsPerPerk);
-    if (selectionLevel <= 0 || selectionLevel > currentLevel) {
-        return currentLevel;
-    }
-
-    return selectionLevel;
-}
-
-static void characterEditorConsumeOwedPerk()
-{
-    if (!characterEditorOwedPerkLevelsInitialized) {
-        characterEditorMigrateLegacyPerkSelectionState();
-    }
-
-    assert(characterEditorGetPerkOwed() > 0);
-    assert(!characterEditorOwedPerkLevels.empty());
-
-    characterEditorOwedPerkLevels.erase(characterEditorOwedPerkLevels.begin());
-    characterEditorSetPerkOwed(characterEditorGetPerkOwed() - 1);
-}
-
-// 0x43C20C editor_reset
 void characterEditorReset()
 {
     gCharacterEditorRemainingCharacterPoints = 5;
-    gCharacterEditorLastLevel = 1;
-    gCharacterEditorHasFreePerk = 0;
-    perkFrequencyOverride = 0;
-    skillPointsPerLevelModifier = 0;
-    characterEditorOwedPerkLevels.clear();
-    characterEditorOwedPerkLevelsInitialized = true;
-}
-
-static int characterEditorGetLevelsPerPerk()
-{
-    if (perkFrequencyOverride > 0) {
-        return perkFrequencyOverride;
-    }
-
-    if (perkFrequencyOverride < 0) {
-        return PC_LEVEL_MAX + 1;
-    }
-
-    int progression = 3;
-    if (traitIsSelectedAndActive(TRAIT_SKILLED)) {
-        progression += 1;
-    }
-
-    return progression;
-}
-
-static void characterEditorGrantPerkAtLevel(int level)
-{
-    if (level <= 0 || level % characterEditorGetLevelsPerPerk() != 0) {
-        return;
-    }
-
-    int selectedPerksCount = 0;
-    for (Perk perk = PERK_FIRST; perk < PERK_COUNT; perk++) {
-        if (perkGetRank(gDude, perk) != 0) {
-            selectedPerksCount += 1;
-            if (selectedPerksCount >= kMaxSelectablePerks) {
-                return;
-            }
-        }
-    }
-
-    if (!characterEditorOwedPerkLevelsInitialized) {
-        characterEditorMigrateLegacyPerkSelectionState();
-    }
-
-    switch (settings.gameplay.perk_carryover) {
-    case PERK_CARRY_OVER_MODE_OFF:
-        gCharacterEditorHasFreePerk = 1;
-        characterEditorOwedPerkLevels.assign(1, level);
-        break;
-    case PERK_CARRY_OVER_MODE_ON:
-    case PERK_CARRY_OVER_MODE_SFALL:
-        if (characterEditorGetPerkOwed() < kMaxPerkOwed) {
-            gCharacterEditorHasFreePerk += 1;
-            characterEditorOwedPerkLevels.push_back(level);
-        }
-        break;
-    }
+    characterEditorResetProgression();
 }
 
 int characterEditorGetWindow()
@@ -5821,56 +5604,23 @@ void characterEditorDisplayStats()
 static int characterEditorUpdateLevel()
 {
     int level = pcGetStat(PC_STAT_LEVEL);
-    if (level != gCharacterEditorLastLevel && level <= PC_LEVEL_MAX) {
-        // Runtime level-up now grants perks immediately. However, older saves
-        // may still have last_level behind the real level with no owed perks
-        // recorded, because perk grants used to be deferred until the next
-        // character screen visit. Replay perk grants only for that legacy
-        // catch-up case.
-        bool shouldReplayPerkGrants = characterEditorGetPerkOwed() == 0;
-
-        for (int nextLevel = gCharacterEditorLastLevel + 1; nextLevel <= level; nextLevel++) {
-            int sp = pcGetStat(PC_STAT_UNSPENT_SKILL_POINTS);
-            sp += 5 + skillPointsPerLevelModifier;
-            sp += critterGetBaseStatWithTraitModifier(gDude, STAT_INTELLIGENCE) * 2;
-            sp += perkGetRank(gDude, PERK_EDUCATED) * perkGetEducatedBonus();
-            sp += traitIsSelectedAndActive(TRAIT_SKILLED) * 5;
-            if (traitIsSelectedAndActive(TRAIT_GIFTED)) {
-                sp -= 5;
-            }
-            sp = std::clamp(sp, 0, 99);
-
-            pcSetStat(PC_STAT_UNSPENT_SKILL_POINTS, sp);
-
-            if (shouldReplayPerkGrants) {
-                characterEditorGrantPerkAtLevel(nextLevel);
-            }
+    if (gCharacterEditorLastLevel < level && !characterEditorSheetIsServerOwned()) {
+        pcLevelUpApply(gCharacterEditorLastLevel, level, gDude);
+        if (characterEditorGetPerkOwed() == 0) {
+            for (int next = gCharacterEditorLastLevel + 1; next <= level; ++next)
+                characterEditorHandleLevelUp(next);
         }
     }
-
+    gCharacterEditorLastLevel = level;
     while (characterEditorGetPerkOwed() != 0) {
         characterEditorWindowSelectedFolder = EDITOR_FOLDER_PERKS;
-        characterEditorDrawFolders();
-        windowRefresh(gCharacterEditorWindow);
-
         int rc = perkDialogShow();
-        if (rc == -1) {
-            debugPrint("\n *** Error running perks dialog! ***\n");
-            return -1;
-        }
-
         characterEditorDrawFolders();
-        if (rc == 0) { // skipped perk selection
-            break;
-        }
+        if (rc <= 0 || characterEditorSheetIsServerOwned()) break;
     }
-
-    gCharacterEditorLastLevel = level;
-
-    return 1;
+    return 0;
 }
 
-// 0x43C398 RedrwDPrks
 static void perkDialogRefreshPerks()
 {
     blitBufferToBuffer(
@@ -6063,45 +5813,28 @@ static int perkDialogShow()
     windowRefresh(gPerkDialogWindow);
 
     int rc = perkDialogHandleInput(count, perkDialogRefreshPerks);
-    int selectionLevel = characterEditorGetPerkSelectionLevel();
-
     if (rc == 1) {
-        if (perkAddAtLevel(gDude, static_cast<Perk>(gPerkDialogOptionList[gPerkDialogTopLine + gPerkDialogCurrentLine].value), selectionLevel) == -1) {
-            debugPrint("\n*** Unable to add perk! ***\n");
-            rc = 2;
-        }
-    }
-
-    rc &= 1;
-
-    if (rc != 0) {
-        bool perkAccepted = true;
-        if (perkGetRank(gDude, PERK_TAG) != 0 && previousPerkRanks[PERK_TAG] == 0) {
-            if (!perkDialogHandleTagPerk()) {
-                perkRemove(gDude, PERK_TAG);
-                perkAccepted = false;
-            }
-        } else if (perkGetRank(gDude, PERK_MUTATE) != 0 && previousPerkRanks[PERK_MUTATE] == 0) {
-            if (!perkDialogHandleMutatePerk()) {
-                perkRemove(gDude, PERK_MUTATE);
-                perkAccepted = false;
-            }
-        }
-
-        if (perkAccepted) {
-            characterEditorConsumeOwedPerk();
-            if (perkGetRank(gDude, PERK_LIFEGIVER) != previousPerkRanks[PERK_LIFEGIVER]) {
-                int maxHp = critterGetBonusStat(gDude, STAT_MAXIMUM_HIT_POINTS);
-                int bonus = perkGetLifegiverBonus();
-                critterSetBonusStat(gDude, STAT_MAXIMUM_HIT_POINTS, maxHp + bonus);
-                critterAdjustHitPoints(gDude, bonus);
-            } else if (perkGetRank(gDude, PERK_EDUCATED) != previousPerkRanks[PERK_EDUCATED]) {
-                int sp = pcGetStat(PC_STAT_UNSPENT_SKILL_POINTS);
-                pcSetStat(PC_STAT_UNSPENT_SKILL_POINTS, sp + perkGetEducatedBonus());
-            }
-        } else {
+        Perk picked = static_cast<Perk>(gPerkDialogOptionList[gPerkDialogTopLine + gPerkDialogCurrentLine].value);
+        bool serverOwned = characterEditorSheetIsServerOwned();
+        int pendingChoice = PERK_CHOICE_PENDING_NONE;
+        if (serverOwned) {
+            clientViewerPerkPick(picked);
+            if (picked == PERK_TAG) pendingChoice = PERK_CHOICE_PENDING_TAG;
+            if (picked == PERK_MUTATE) pendingChoice = PERK_CHOICE_PENDING_MUTATE;
+        } else if (perkChoiceApply(gDude, picked, gCharacterEditorPerksBackup, &pendingChoice) == -1) {
             rc = 0;
         }
+        if (rc == 1) {
+            bool accepted = true;
+            if (pendingChoice == PERK_CHOICE_PENDING_TAG) accepted = perkDialogHandleTagPerk();
+            if (pendingChoice == PERK_CHOICE_PENDING_MUTATE) accepted = perkDialogHandleMutatePerk();
+            if (!serverOwned) {
+                if (accepted) characterEditorConsumeOwedPerk();
+                else { perkRemove(gDude, picked); rc = 0; }
+            }
+        }
+    } else {
+        rc = 0;
     }
 
     characterEditorDrawSkills(0);
@@ -6515,6 +6248,11 @@ static bool perkDialogHandleMutatePerk()
     gCharacterEditorTempTraitCount = TRAITS_MAX_SELECTED_COUNT - traitIndex;
 
     bool result = true;
+    // Co-op: the two picks are collected as TRAIT IDS and committed as one intent at
+    // the tail instead of being applied to the local trait pair stage by stage.
+    bool serverOwned = characterEditorSheetIsServerOwned();
+    int dropTrait = -1;
+    int gainTrait = -1;
     if (gCharacterEditorTempTraitCount >= 1) {
         fontSetCurrent(103);
 
@@ -6536,25 +6274,17 @@ static bool perkDialogHandleMutatePerk()
 
         int rc = perkDialogHandleInput(gCharacterEditorTempTraitCount, perkDialogRefreshTraits);
         if (rc == 1) {
-            if (gPerkDialogCurrentLine == 0) {
-                if (gCharacterEditorTempTraitCount == 1) {
-                    gCharacterEditorTempTraits[0] = TRAIT_INVALID;
-                    gCharacterEditorTempTraits[1] = TRAIT_INVALID;
-                } else {
-                    if (gPerkDialogOptionList[0].value == gCharacterEditorTempTraits[0]) {
-                        gCharacterEditorTempTraits[0] = gCharacterEditorTempTraits[1];
-                        gCharacterEditorTempTraits[1] = TRAIT_INVALID;
-                    } else {
-                        gCharacterEditorTempTraits[1] = TRAIT_INVALID;
-                    }
-                }
+            if (serverOwned) {
+                // CO-OP: remember WHICH TRAIT, do not drop it locally. The list here is
+                // the actor's current traits sorted by name (perkDialogDrawTraits with
+                // a1 == 0), so the picked line names the trait — and a trait id is what
+                // the intent carries, precisely so the protocol does not depend on this
+                // sort order or on the language of the message file.
+                dropTrait = gPerkDialogOptionList[gPerkDialogTopLine + gPerkDialogCurrentLine].value;
             } else {
-                if (gPerkDialogOptionList[0].value == gCharacterEditorTempTraits[0]) {
-                    gCharacterEditorTempTraits[1] = TRAIT_INVALID;
-                } else {
-                    gCharacterEditorTempTraits[0] = gCharacterEditorTempTraits[1];
-                    gCharacterEditorTempTraits[1] = TRAIT_INVALID;
-                }
+                // Ledger H-47: the lose-a-trait rule lives in traitsMutateDrop
+                // (trait.cc); the dialog passes its selection state as arguments.
+                traitsMutateDrop(gCharacterEditorTempTraits, gCharacterEditorTempTraitCount, gPerkDialogCurrentLine, static_cast<Trait>(gPerkDialogOptionList[0].value));
             }
         } else {
             result = false;
@@ -6588,19 +6318,25 @@ static bool perkDialogHandleMutatePerk()
 
         int rc = perkDialogHandleInput(count, perkDialogRefreshTraits);
         if (rc == 1) {
-            PerkDialogOption option = gPerkDialogOptionList[gPerkDialogCurrentLine + gPerkDialogTopLine];
-            Trait trait = static_cast<Trait>(option.value);
-            if (gCharacterEditorTempTraitCount != 0) {
-                gCharacterEditorTempTraits[1] = trait;
+            if (serverOwned) {
+                gainTrait = gPerkDialogOptionList[gPerkDialogCurrentLine + gPerkDialogTopLine].value;
             } else {
-                gCharacterEditorTempTraits[0] = trait;
-                gCharacterEditorTempTraits[1] = TRAIT_INVALID;
+                // Ledger H-47: the gain-a-trait commit lives in traitsMutateGain
+                // (trait.cc), which also commits via traitsSetSelected.
+                traitsMutateGain(gCharacterEditorTempTraits, gCharacterEditorTempTraitCount, static_cast<Trait>(gPerkDialogOptionList[gPerkDialogCurrentLine + gPerkDialogTopLine].value));
             }
-
-            traitsSetSelected(gCharacterEditorTempTraits[0], gCharacterEditorTempTraits[1]);
         } else {
             result = false;
         }
+    }
+
+    if (serverOwned) {
+        // ONE intent for the whole swap — the server applies the drop and the gain
+        // together, so a trait pair can never be observed half-changed. Cancelling at
+        // either stage sends (-1, -1), which takes Mutate! back off and returns the
+        // pick; nothing was changed locally to undo.
+        clientViewerMutatePick(result ? dropTrait : -1, result ? gainTrait : -1);
+        return result;
     }
 
     if (!result) {
@@ -6656,16 +6392,29 @@ static bool perkDialogHandleTagPerk()
 
     int rc = perkDialogHandleInput(gPerkDialogOptionCount, perkDialogRefreshSkills);
     if (rc != 1) {
+        if (characterEditorSheetIsServerOwned()) {
+            // Escaped: tell the server, which drops Tag! again and hands the pick
+            // back. Nothing is restored locally — the row that comes back is the
+            // restore.
+            clientViewerTagPick(-1);
+            return false;
+        }
         memcpy(gCharacterEditorTempTaggedSkills, gCharacterEditorTaggedSkillsBackup, sizeof(gCharacterEditorTempTaggedSkills));
         skillsSetTagged(gCharacterEditorTaggedSkillsBackup, NUM_TAGGED_SKILLS);
         tagSkill4LevelBase = -1;
         return false;
     }
 
-    Skill tagSkill = static_cast<Skill>(gPerkDialogOptionList[gPerkDialogTopLine + gPerkDialogCurrentLine].value);
-    gCharacterEditorTempTaggedSkills[NUM_TAGGED_SKILLS - 1] = tagSkill;
-    skillsSetTagged(gCharacterEditorTempTaggedSkills, NUM_TAGGED_SKILLS);
-    tagSkill4LevelBase = skillGetValue(gDude, tagSkill);
+    Skill taggedSkill = static_cast<Skill>( gPerkDialogOptionList[gPerkDialogTopLine + gPerkDialogCurrentLine].value);
+    if (characterEditorSheetIsServerOwned()) {
+        clientViewerTagPick(taggedSkill);
+        return true;
+    }
+
+    // Ledger H-48: the 4th-tag commit lives in skillsTagPerkApply (skill.cc);
+    // the dialog passes its session copy and the picked skill as arguments.
+    skillsTagPerkApply(gCharacterEditorTempTaggedSkills, taggedSkill);
+    tagSkill4LevelBase = skillGetValue(gDude, taggedSkill);
 
     return true;
 }
@@ -7546,6 +7295,81 @@ static void customTownReputationInit()
 static void customTownReputationFree()
 {
     gCustomTownReputationEntries.clear();
+}
+
+
+
+int characterEditorShowViewOnly()
+{
+    clientViewerSheetOpen();
+    int rc = characterEditorShow(0);
+    clientViewerSheetClose();
+    return rc;
+}
+
+static bool characterEditorSheetIsServerOwned()
+{
+    return clientViewerActive();
+}
+
+static void characterEditorRedrawSheet()
+{
+    critterUpdateDerivedStats(gDude);
+    characterEditorDrawPrimaryStat(PRIMARY_STAT_COUNT, 0, 0);
+    characterEditorDrawOptionalTraits();
+    characterEditorDrawSkills(0);
+    characterEditorDrawPcStats();
+    characterEditorDrawDerivedStats();
+    characterEditorDrawFolders();
+    characterEditorDrawCard();
+    windowRefresh(gCharacterEditorWindow);
+}
+
+static void characterEditorAdjustSkillIntent(int keyCode)
+{
+    bool up;
+    switch (keyCode) {
+    case KEY_PLUS:
+    case KEY_UPPERCASE_N:
+    case KEY_ARROW_RIGHT:
+    case 521:
+        up = true;
+        break;
+    case KEY_MINUS:
+    case KEY_UPPERCASE_J:
+    case KEY_ARROW_LEFT:
+    case 523:
+        up = false;
+        break;
+    default:
+        return;
+    }
+
+    // Cheap local pre-checks for the two refusals the row already answers, so an
+    // obvious no-op shows vanilla's own dialog box instead of a wire round trip.
+    // Everything else — the cost of the next point, the 300%% ceiling, whether this
+    // actor is allowed at all — is the server's ruling, arriving on the refusal
+    // channel.
+    if (up && pcGetStat(PC_STAT_UNSPENT_SKILL_POINTS) <= 0) {
+        soundPlayFile("iisxxxx1");
+        char title[64];
+        // Not enough skill points available.
+        strcpy(title, getmsg(&gCharacterEditorMessageList, &gCharacterEditorMessageListItem, 136));
+        showDialogBox(title, nullptr, 0, 192, 126, _colorTable[32328], nullptr, _colorTable[32328], DIALOG_BOX_LARGE);
+        return;
+    }
+
+    if (up) {
+        clientViewerSkillUp(gCharacterEditorCurrentSkill);
+    } else {
+        clientViewerSkillDown(gCharacterEditorCurrentSkill);
+    }
+
+    // Follow the click with the selection/card even before the row answers.
+    characterEditorSelectedItem = static_cast<Editor>(gCharacterEditorCurrentSkill + 61);
+    characterEditorDrawCard();
+    characterEditorDrawSkills(1);
+    windowRefresh(gCharacterEditorWindow);
 }
 
 } // namespace fallout

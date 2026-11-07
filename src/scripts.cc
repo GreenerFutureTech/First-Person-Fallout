@@ -1,3 +1,10 @@
+#include "map.h" // mapSetTransitionSuppressed — transit-authority choke (Ch 14.2; open to all as of 2026-07-23, plumbing kept for future multi-map policy)
+#include "opcode_trace.h"
+#include "presenter.h"
+#include "server_players.h" // playerActorIs / playerActorMayTransit
+#include "script_request_handler.h"
+#include "server_loop.h"
+#include "sfall_config.h"
 #include "scripts.h"
 
 #include <assert.h>
@@ -51,6 +58,13 @@
 #include "worldmap.h"
 
 namespace fallout {
+
+static Object* gScriptsRequestedElevatorRider;
+
+Object* scriptsRequestedElevatorRider();
+
+void scriptTraceLvarAlloc(const char* how, Script* script);
+
 
 #define SCRIPT_LIST_EXTENT_SIZE 16
 
@@ -406,8 +420,24 @@ void gameTimeAddTicks(int ticks)
 
     unsigned int year = gGameTime / GAME_TIME_TICKS_PER_YEAR;
     if (year >= 13) {
-        endgameSetupDeathEnding(ENDGAME_DEATH_ENDING_REASON_TIMEOUT);
-        _game_user_wants_to_quit = GAME_QUIT_REQUEST_MAIN_MENU;
+        if (serverDedicatedActive()) {
+            // Server survival (MP_PROPOSAL.md Ch 9.2-S2): the sim clock advances
+            // every beat, so vanilla's 13-year timeout is reachable on a
+            // long-lived dedicated server — and quit=2 would take the whole
+            // server down under every connected player. Suppress + log; a
+            // freeplay policy hook is banked (OPEN-Q #10).
+            //
+            // Latched: this branch is re-entered on EVERY tick once the clock
+            // passes 13 years (vanilla never had to care — it quit).
+            static bool loggedYearLimit = false;
+            if (!loggedYearLimit) {
+                loggedYearLimit = true;
+                debugPrint("server: 13-year game-clock limit reached — vanilla endgame suppressed\n");
+            }
+        } else {
+            endgameSetupDeathEnding(ENDGAME_DEATH_ENDING_REASON_TIMEOUT);
+            _game_user_wants_to_quit = GAME_QUIT_REQUEST_MAIN_MENU;
+        }
     }
 
     // FIXME: This condition will never be true.
@@ -458,7 +488,17 @@ int gameTimeEventProcess(Object* obj, void* data)
         _scriptsCheckGameEvents(&movie_index, -1);
     }
 
-    int stopProcess = critterCheckRadiationEvent(gDude);
+    int stopProcess = 0;
+    // Co-op: radiation is per-actor, so drive the rad check for every player, not
+    // just the host. SP (playerActorCount()==1, slot 0 == gDude) runs exactly the
+    // one original call, byte-identical. critterCheckRadiationEvent returns 0 on every
+    // path, so stopProcess is unaffected either way.
+    for (int slot = 0; slot < playerActorCount(); slot++) {
+        Object* actor = playerActorAt(slot);
+        if (actor != nullptr) {
+            stopProcess = critterCheckRadiationEvent(actor);
+        }
+    }
 
     queueClearByEventType(EVENT_TYPE_GAME_TIME, nullptr);
 
@@ -530,7 +570,7 @@ int _scriptsCheckGameEvents(GameMovie* moviePtr, int window)
     if (endgame) {
         _game_user_wants_to_quit = GAME_QUIT_REQUEST_MAIN_MENU;
     } else {
-        tileWindowRefresh();
+        presenter()->worldInvalidate();
     }
 
     if (moviePtr != nullptr) {
@@ -1008,6 +1048,17 @@ static void _doBkProcesses()
 // 0x4A3CA0
 static void _script_chk_critters()
 {
+    // F2_TRACE_AGGRO: out-of-combat aggro cadence. This is a ROUND-ROBIN — one
+    // critter's critter_p_proc per background tick — and it is skipped wholesale
+    // while any player is in dialog or in combat. In co-op both are global, so a
+    // suppressed tick means NO wild critter perceives ANY player this beat. The
+    // fire line reports the cycle length (scriptsCount) = the dilution factor
+    // that decides how often a given ant gets to poll perception at all.
+    if (getenv("F2_TRACE_AGGRO") != nullptr && (_gdialogActive() || isInCombat())) {
+        fprintf(stderr, "[aggro] heartbeat SUPPRESSED: gdialog=%d inCombat=%d (no critter perceives players this tick)\n",
+            _gdialogActive() ? 1 : 0, isInCombat() ? 1 : 0);
+    }
+
     if (!_gdialogActive() && !isInCombat()) {
         ScriptList* scriptList;
         ScriptListExtent* scriptListExtent;
@@ -1040,6 +1091,10 @@ static void _script_chk_critters()
 
             if (scriptListExtent != nullptr) {
                 Script* script = &(scriptListExtent->scripts[scriptIndex]);
+                if (getenv("F2_TRACE_AGGRO") != nullptr) {
+                    fprintf(stderr, "[aggro] heartbeat tick: firing sid=%d (%d/%d critters this cycle)\n",
+                        script->sid, gCritterProcessingIndex + 1, scriptsCount);
+                }
                 scriptExecProc(script->sid, proc);
             }
         }
@@ -1272,43 +1327,9 @@ static int scriptsHandleElevatorRequest(bool closeDoorsBeforeMapTransition)
     Map map = gMapHeader.index;
     int elevation = gScriptsRequestedElevatorLevel;
     int tile = -1;
-
-    if (elevatorSelectLevel(gScriptsRequestedElevatorType, &map, &elevation, &tile) == -1) {
-        return -1;
-    }
-
-    if (tile == -1) {
-        return -1;
-    }
-
-    automapSaveCurrent();
-
-    if (map == gMapHeader.index) {
-        if (elevation != gElevation) {
-            scriptsCloseNearbyElevatorDoors();
-        }
-
-        reg_anim_clear(gDude);
-        objectSetRotation(gDude, ROTATION_SE, nullptr);
-        objectAttemptPlacement(gDude, tile, static_cast<MapElevation>(elevation), 0);
-
-        return 0;
-    }
-
-    if (closeDoorsBeforeMapTransition) {
-        scriptsCloseNearbyElevatorDoors();
-    }
-
-    MapTransition transition;
-    memset(&transition, 0, sizeof(transition));
-
-    transition.map = map;
-    transition.elevation = static_cast<MapElevation>(elevation);
-    transition.tile = tile;
-    transition.rotation = ROTATION_SE;
-
-    mapSetTransition(&transition);
-
+    if (scriptRequestHandler()->elevatorSelect(gScriptsRequestedElevatorType, &map, &elevation, &tile) == -1 || tile == -1) return -1;
+    scriptRequestHandler()->automapSave();
+    elevatorRideApply(scriptsRequestedElevatorRider(), map, elevation, tile, closeDoorsBeforeMapTransition);
     return 0;
 }
 
@@ -1337,12 +1358,12 @@ int scriptsHandleRequests()
 
     if ((gScriptsRequests & SCRIPT_REQUEST_TOWN_MAP) != SCRIPT_REQUEST_NONE) {
         gScriptsRequests &= ~SCRIPT_REQUEST_TOWN_MAP;
-        wmTownMap();
+        scriptRequestHandler()->townMap();
     }
 
     if ((gScriptsRequests & SCRIPT_REQUEST_WORLD_MAP) != SCRIPT_REQUEST_NONE) {
         gScriptsRequests &= ~SCRIPT_REQUEST_WORLD_MAP;
-        wmWorldMap();
+        scriptRequestHandler()->worldMap();
     }
 
     if ((gScriptsRequests & SCRIPT_REQUEST_ELEVATOR) != SCRIPT_REQUEST_NONE) {
@@ -1357,23 +1378,22 @@ int scriptsHandleRequests()
 
     if ((gScriptsRequests & SCRIPT_REQUEST_DIALOG) != SCRIPT_REQUEST_NONE) {
         gScriptsRequests &= ~SCRIPT_REQUEST_DIALOG;
-        gameDialogEnter(gScriptsRequestedDialogWith, 0);
+        scriptRequestHandler()->dialogEnter(gScriptsRequestedDialogWith);
     }
 
-    if (scriptsHandlePendingEndgameSlideshow()) {
-        if (endgameShouldPlayMovieAfterSlideshow()) {
-            endgamePlayMovie();
-        }
+    if ((gScriptsRequests & SCRIPT_REQUEST_ENDGAME) != SCRIPT_REQUEST_NONE) {
+        gScriptsRequests &= ~SCRIPT_REQUEST_ENDGAME;
+        scriptRequestHandler()->endgame();
     }
 
     if ((gScriptsRequests & SCRIPT_REQUEST_LOOTING) != SCRIPT_REQUEST_NONE) {
         gScriptsRequests &= ~SCRIPT_REQUEST_LOOTING;
-        inventoryOpenLooting(gScriptsRequestedLootingBy, gScriptsRequestedLootingFrom);
+        scriptRequestHandler()->looting(gScriptsRequestedLootingBy, gScriptsRequestedLootingFrom);
     }
 
     if ((gScriptsRequests & SCRIPT_REQUEST_STEALING) != SCRIPT_REQUEST_NONE) {
         gScriptsRequests &= ~SCRIPT_REQUEST_STEALING;
-        inventoryOpenStealing(gScriptsRequestedStealingBy, gScriptsRequestedStealingFrom);
+        scriptRequestHandler()->stealing(gScriptsRequestedStealingBy, gScriptsRequestedStealingFrom);
     }
 
     DeleteAllTempArrays();
@@ -1388,7 +1408,7 @@ bool scriptsHandlePendingEndgameSlideshow()
     }
 
     gScriptsRequests &= ~SCRIPT_REQUEST_ENDGAME;
-    endgamePlaySlideshow();
+    scriptRequestHandler()->endgameSlideshow();
     return true;
 }
 
@@ -1401,7 +1421,7 @@ int _scripts_check_state_in_combat()
     }
 
     if ((gScriptsRequests & SCRIPT_REQUEST_LOOTING) != SCRIPT_REQUEST_NONE) {
-        inventoryOpenLooting(gScriptsRequestedLootingBy, gScriptsRequestedLootingFrom);
+        scriptRequestHandler()->looting(gScriptsRequestedLootingBy, gScriptsRequestedLootingFrom);
     }
 
     // NOTE: Uninline.
@@ -1516,6 +1536,7 @@ int scriptsRequestElevator(Object* obj, int elevatorType)
     gScriptsRequests |= SCRIPT_REQUEST_ELEVATOR;
     gScriptsRequestedElevatorType = elevatorType;
     gScriptsRequestedElevatorLevel = elevatorLevel;
+    gScriptsRequestedElevatorRider = gDude;
 
     return 0;
 }
@@ -1899,6 +1920,11 @@ int scriptsInit()
     _scr_remove_all();
     _interpretOutputFunc(_win_debug);
     interpreterRegisterOpcodeHandlers();
+
+    // Tap the interpreter's hook seam (opcode_trace.h) once the handler table is
+    // built. A pure consumer of the public API — no tracing logic lives in the
+    // interpreter — and it installs nothing unless F2_TRACE_OPCODE is set.
+    opcodeTraceInstall();
     _scr_header_load();
 
     // NOTE: Uninline.
@@ -2536,7 +2562,19 @@ int scriptGetScript(int sid, Script** scriptPtr)
         return -1;
     }
 
-    ScriptList* scriptList = &(gScriptLists[scriptTypeFromSid(sid)]);
+    // Bounds-check the script type BEFORE indexing the fixed gScriptLists array.
+    // SID_TYPE is the top byte of a sid, and a sid reaches here from wire/blob-loaded
+    // objects (objectLoadAll during a rebaseline) — a trust boundary. A corrupt or
+    // out-of-range type byte would otherwise read gScriptLists out of bounds (ASAN:
+    // global-buffer-overflow). Fail the lookup instead; the caller drops the object's
+    // sid and logs "Error connecting object to script", which is the existing graceful
+    // path. Valid sids always have an in-range type, so this never fires in SP/golden.
+    ScriptType scriptType = scriptTypeFromSid(sid);
+    if (scriptType < 0 || scriptType >= SCRIPT_TYPE_COUNT) {
+        return -1;
+    }
+
+    ScriptList* scriptList = &(gScriptLists[scriptType]);
     ScriptListExtent* scriptListExtent = scriptList->head;
 
     while (scriptListExtent != nullptr) {
@@ -2703,6 +2741,12 @@ static int scriptsRemoveLocalVars(Script* script)
 {
     if (script == nullptr) {
         return -1;
+    }
+
+    if (getenv("F2_TRACE_LVAR") != nullptr) {
+        fprintf(stderr, "f2-trace: lvar FREE     sid=0x%08X count=%d offset=%d total=%d%s\n",
+            script->sid, script->localVarsCount, script->localVarsOffset, gMapLocalVarsLength,
+            (script->localVarsCount == 0 || script->localVarsOffset < 0) ? "   <-- FREES NOTHING" : "");
     }
 
     if (script->localVarsCount != 0) {
@@ -2878,6 +2922,43 @@ int _scr_remove_all()
     gMapSid = -1;
 
     programListFree();
+
+    // ►► THE SURVIVORS' PROGRAMS ARE GONE TOO, AND VANILLA NEVER SAYS SO. The loop
+    // above deliberately keeps every SCRIPT_FLAG_0x10 script (the dude script and each
+    // party member) — but programListFree() just freed EVERY Program, theirs included.
+    // Each survivor is left holding a dangling `program` plus SCRIPT_FLAG_0x01, which
+    // means "already loaded", so scriptExecProc skips the reload and dereferences freed
+    // memory. Vanilla gets away with it because a mapLoad always follows and clears
+    // both fields on the way back in (scriptLoadAll for map scripts,
+    // _partyMemberRecoverLoad / scriptsSetDudeScript for the survivors) — so in the
+    // vanilla ordering these two lines are a no-op.
+    //
+    // We have callers that can exit with no load behind them (a cancelled worldmap
+    // trip), where the same state is a use-after-free that presents as a SIGSEGV inside
+    // siglongjmp — see the note at wmTransitionSuspendScripts for the full chain. Say
+    // it here as well as avoiding it there: after this function no Program exists, so
+    // no Script may go on pointing at one.
+    //
+    // ►► NULL THE POINTER, LEAVE SCRIPT_FLAG_0x01 ALONE — deliberately, and it is the
+    // whole difference between a safety net and a behaviour change. scriptExecProc
+    // reloads a script whose 0x01 is clear and runs its start proc; clearing it here
+    // would make every orphaned survivor re-enter the interpreter at a moment vanilla
+    // never did, which is new script execution (and new RNG / gvar traffic) on the
+    // single-player path too. With the flag left set, the very next line of
+    // scriptExecProc — `if (program == nullptr) return -1;` — turns the survivor into
+    // a no-op until something legitimately re-initialises it, and every real re-init
+    // path (scriptLoadAll, _partyMemberRecoverLoad, a fresh scriptAdd) already clears
+    // pointer and flag together. Nothing that worked stops working; what stops is
+    // reading freed memory.
+    for (int scriptType = 0; scriptType < SCRIPT_TYPE_COUNT; scriptType++) {
+        ScriptList* scriptList = &(gScriptLists[scriptType]);
+        for (ScriptListExtent* extent = scriptList->head; extent != nullptr; extent = extent->next) {
+            for (int index = 0; index < extent->length; index++) {
+                extent->scripts[index].program = nullptr;
+            }
+        }
+    }
+
     _exportClearAllVariables();
 
     return 0;
@@ -3014,6 +3095,28 @@ bool scriptsExecSpatialProc(Object* object, int tile, MapElevation elevation)
 
     gSpatialsEnabled = false;
 
+    // Exit grids are spatial scripts, so this is where "who stepped on it" is
+    // known — the only place it is. An extra player still RUNS the procs (traps
+    // must hurt everyone); only the travel is denied (MP_PROPOSAL Ch 14.2). Asked
+    // as a policy question, never as a slot test.
+    bool suppressTransition = playerActorIs(object) && !playerActorMayTransit(object);
+    if (suppressTransition) {
+        mapSetTransitionSuppressed(true);
+    }
+
+    // ...and it is also the one passive dispatch point where the acting player
+    // IS known, so the procs run scoped to whoever stepped: a trap damages the
+    // player who tripped it, not the host (MP_PROPOSAL Ch 10.4 O2). A non-player
+    // stepper passes nullptr, which makes the scope a no-op and leaves the
+    // enclosing context alone.
+    //
+    // ⚠ SERVER ONLY, and not merely for tidiness: the scope's destructor restores
+    // gDude to slot 0, and on an EXTRA's viewer slot 0 is the HOST's actor while
+    // gDude is that client's own role (rebindLocalActor) — engaging there would
+    // hand the viewer the host's body. Nothing is lost off-server: at one actor
+    // the scope is the identity.
+    ServerActorScope spatialScope(serverDedicatedActive() && playerActorIs(object) ? object : nullptr);
+
     int builtTile = builtTileCreate(tile, elevation);
 
     std::vector<int> spatialScriptIds;
@@ -3037,9 +3140,13 @@ bool scriptsExecSpatialProc(Object* object, int tile, MapElevation elevation)
         if (scriptSetObjects(sid, object, nullptr) == -1) {
             continue;
         }
+        if (getenv("F2_TRACE_SPATIAL") != nullptr) {
+            fprintf(stderr, "[spatial] FIRE sid=%d obj=%p tile=%d elev=%d\n", sid, (void*)object, tile, elevation);
+        }
         scriptExecProc(sid, SCRIPT_PROC_SPATIAL);
     }
 
+    if (suppressTransition) mapSetTransitionSuppressed(false);
     gSpatialsEnabled = true;
 
     return true;
@@ -3246,7 +3353,14 @@ char* _scr_get_msg_str_speech(int messageListId, int messageId, int shouldStartS
     // floats back to back. Show the text, but don't voice or bleep them.
     if (shouldStartSpeech && !pipboyIsResting()) {
         if (messageListItem.audio != nullptr && messageListItem.audio[0] != '\0') {
-            if (messageListItem.flags & 0x01) {
+            if (!(messageListItem.flags & 0x01) && gameDialogWindowActive()) {
+                strncpy(gDialogPendingAudio, messageListItem.audio, 15);
+                gDialogPendingAudio[15] = '\0';
+            }
+            if (serverDedicatedActive()) {
+                // The server records dialogue audio for the viewer; it has no audio device.
+                if (gameDialogWindowActive()) gameDialogStartLips((messageListItem.flags & 0x01) ? nullptr : messageListItem.audio);
+            } else if (messageListItem.flags & 0x01) {
                 soundPlayFile("censor");
             } else if (gameDialogWindowActive() && gGameDialogHeadFrmId.valid()) {
                 gameDialogStartLips(messageListItem.audio);
@@ -3297,6 +3411,7 @@ int scriptGetLocalVar(int sid, int variable, ProgramValue& value)
     if (script->localVarsCount > 0) {
         if (script->localVarsOffset == -1) {
             script->localVarsOffset = mapAllocLocalVars(script->localVarsCount);
+            scriptTraceLvarAlloc("get", script);
         }
 
         if (mapGetLocalVar(script->localVarsOffset + variable, value) == -1) {
@@ -3328,6 +3443,7 @@ int scriptSetLocalVar(int sid, int variable, ProgramValue& value)
 
     if (script->localVarsOffset == -1) {
         script->localVarsOffset = mapAllocLocalVars(script->localVarsCount);
+        scriptTraceLvarAlloc("set", script);
     }
 
     mapSetLocalVar(script->localVarsOffset + variable, value);
@@ -3439,6 +3555,29 @@ int _scr_explode_scenery(Object* explosionSource, int tile, int radius, MapEleva
     gSpatialsEnabled = true;
 
     return 0;
+}
+
+
+
+Object* scriptsRequestedElevatorRider()
+{
+    return gScriptsRequestedElevatorRider != nullptr ? gScriptsRequestedElevatorRider : gDude;
+}
+
+void scriptTraceLvarAlloc(const char* how, Script* script)
+{
+    if (getenv("F2_TRACE_LVAR") == nullptr) {
+        return;
+    }
+
+    char name[64] = "(unknown)";
+    if (script->index != -1) {
+        scriptsGetFileName(script->index & 0xFFFFFF, name, sizeof(name));
+    }
+
+    fprintf(stderr, "f2-trace: lvar alloc %-4s sid=0x%08X script=%-16s count=%d offset=%d total=%d\n",
+        how, script->sid, name, script->localVarsCount,
+        script->localVarsOffset, gMapLocalVarsLength);
 }
 
 } // namespace fallout

@@ -7,6 +7,8 @@
 
 namespace fallout {
 
+struct Object;
+
 extern int gCharacterEditorRemainingCharacterPoints;
 
 enum PerkCarryOverMode {
@@ -20,23 +22,36 @@ enum PerkCarryOverMode {
 };
 
 int characterEditorShow(bool isCreationMode);
+// The co-op player's character sheet: characterEditorShow(0) whose spends EMIT
+// WIRE INTENTS instead of mutating locally. See the definition.
+int characterEditorShowViewOnly();
 void characterEditorInit();
 bool _isdoschar(int ch);
-char* _strmfe(char* dest, const char* name, const char* ext);
+// Lives in character_editor_state.cc so the savegame driver in f2_core can reach
+// it; the editor screen owns only the undo copy. The owed PERK moved to
+// perkOwedPickGet/Set (per player — this one is per process).
+extern int gCharacterEditorLastLevel;
+
 int characterEditorSave(File* stream);
 int characterEditorLoad(File* stream);
 void characterEditorReset();
 int characterEditorGetWindow();
 void characterEditorDisplayStats();
-int characterEditorGetPerkOwed();
-void characterEditorSetPerkOwed(int value);
+int characterEditorGetPerkOwed(Object* subject = nullptr);
+void characterEditorSetPerkOwed(int value, Object* subject = nullptr);
 void characterEditorSetPerkFrequency(int value);
 void characterEditorSetSkillPointsPerLevelModifier(int value);
-void characterEditorHandleLevelUp(int level);
-int characterEditorGetPerkSelectionLevel();
-const std::vector<int>& characterEditorGetOwedPerkLevels();
-bool characterEditorSetOwedPerkLevels(const std::vector<int>& levels);
-void characterEditorMigrateLegacyPerkSelectionState();
+void characterEditorHandleLevelUp(int level, Object* subject = nullptr);
+int characterEditorGetSkillPointsPerLevelModifier();
+void characterEditorResetProgression();
+void characterEditorConsumeOwedPerk(Object* subject = nullptr);
+void characterEditorResetPerkStateSlot(int slot);
+int characterEditorPerkLevelsRowWrite(File* stream, int slot);
+int characterEditorPerkLevelsRowRead(File* stream, int slot);
+int characterEditorGetPerkSelectionLevel(Object* subject = nullptr);
+const std::vector<int>& characterEditorGetOwedPerkLevels(Object* subject = nullptr);
+bool characterEditorSetOwedPerkLevels(const std::vector<int>& levels, Object* subject = nullptr);
+void characterEditorMigrateLegacyPerkSelectionState(Object* subject = nullptr);
 
 } // namespace fallout
 
