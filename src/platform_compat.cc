@@ -52,7 +52,9 @@ static std::unordered_map<std::string, CompatDirectoryCacheEntry> compatDirector
 static std::string compatLowercase(std::string value)
 {
     for (char& ch : value) {
-        ch = static_cast<char>(SDL_tolower(static_cast<unsigned char>(ch)));
+        if (ch >= 'A' && ch <= 'Z') {
+            ch += 'a' - 'A';
+        }
     }
     return value;
 }
