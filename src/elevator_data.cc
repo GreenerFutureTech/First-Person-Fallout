@@ -456,10 +456,10 @@ void elevatorRideApply(Object* rider, int map, int elevation, int tile, bool clo
             continue;
         }
 
-        int near = playerActorFindFreeTileNear(tile, elevation);
+        int nearbyTile = playerActorFindFreeTileNear(tile, elevation);
         reg_anim_clear(actor);
         objectSetRotation(actor, ROTATION_SE, nullptr);
-        objectAttemptPlacement(actor, near != -1 ? near : tile, static_cast<MapElevation>(elevation), 1);
+        objectAttemptPlacement(actor, nearbyTile != -1 ? nearbyTile : tile, static_cast<MapElevation>(elevation), 1);
     }
 
     if (doors != nullptr) {

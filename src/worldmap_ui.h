@@ -1,6 +1,9 @@
 #ifndef FALLOUT_WORLDMAP_UI_H_
 #define FALLOUT_WORLDMAP_UI_H_
 
+#include <string>
+#include <unordered_map>
+
 // Seam between the worldmap core simulation (worldmap.cc) and its interface /
 // HUD presentation (worldmap_ui.cc).
 //
@@ -23,10 +26,29 @@
 
 namespace fallout {
 
+#define MAX_TRAIL_LENGTH (1000)
+
+typedef struct TrailDot {
+    int x;
+    int y;
+} TrailDot;
+
+typedef struct TrailMarkerState {
+    bool hasPattern;
+    int dotCount;
+    TrailDot dots[MAX_TRAIL_LENGTH];
+    int remainingDots;
+    int remainingSpacing;
+} TrailMarkerState;
+
 // ---------------------------------------------------------------------------
 // SHARED mutable state (defined in worldmap.cc, read/written by both TUs).
 // ---------------------------------------------------------------------------
 extern WmGenData wmGenData;
+extern int wmBkWin;
+extern unsigned char* wmBkWinBuf;
+extern std::unordered_map<int, std::string> wmTownTitleOverrides;
+extern bool wmTownNamesHidden;
 extern CityInfo* wmAreaInfoList;
 extern int wmMaxAreaNum;
 extern CitySizeDescription wmSphereData[CITY_SIZE_COUNT];
@@ -38,6 +60,16 @@ extern int wmWorldOffsetX;
 extern int wmWorldOffsetY;
 extern unsigned int wmLastRndTime;
 extern bool gTownMapHotkeysFix;
+extern unsigned char* wmOverlayOffscreenBuf;
+extern const InterfaceFrameId kDefaultCarInterfaceArtFrmId;
+extern InterfaceFrameId carInterfaceArtFrmId;
+extern const InterfaceFrmId wmRndCursorFrmIds[WORLD_MAP_ENCOUNTER_FRM_COUNT];
+extern unsigned int wmLastTravelTick;
+extern int worldmapTrailMarkers;
+extern bool worldmapTerrainInfo;
+extern bool wmTerrainInfoIsVisible;
+extern TrailMarkerState trailMarkerState;
+extern const Color worldmapTrailMarkerColor;
 
 // Worldmap streaming flags (viewer-side). Set by wire decoder, read by wmWorldMapFunc
 // and the main loop.
@@ -52,12 +84,25 @@ extern bool gWorldmapStateDirty;
 bool wmCursorIsVisible();
 int wmInterfaceCenterOnParty();
 int wmInterfaceScrollPixel(int stepX, int stepY, int dx, int dy, bool* success, bool shouldRefresh);
+int wmInterfaceRefresh();
+int wmRefreshInterfaceOverlay(bool shouldRefreshWindow);
 void wmInterfaceDialSyncTime(bool shouldRefreshWindow);
 void wmInterfaceRefreshDate(bool shouldRefreshWindow);
 void wmBlinkRndEncounterIcon(bool special);
 void wmFadeOut();
 void wmFadeIn();
 void wmFadeReset();
+bool wmHasTownTitleOverrides();
+bool wmTryMatchAreaContainingMapIdx(Map mapIdx, City* areaIdxPtr);
+bool wmTravelTickDue(unsigned int now);
+void wmAreaGetMarkWorldPos(CityInfo* city, int* xPtr, int* yPtr);
+bool wmLockCarInterfaceArt(InterfaceFrameId artIndex, Art** artPtr, CacheEntry** handlePtr);
+int wmInterfaceDrawCircleOverlaySafe(CityInfo* city, CitySizeDescription* citySizeDescription, unsigned char* dest, int x, int y);
+void wmInterfaceDrawTerrainInfo();
+const char* wmGetHotspotText();
+void wmResetTerrainInfo();
+void wmResetTrailMarkers();
+void wmRunLocalMapEnterHook(Map* mapIdxPtr);
 
 // ---------------------------------------------------------------------------
 // OUTWARD (UI -> core): core functions the UI calls by name.

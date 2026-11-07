@@ -30,20 +30,6 @@ inline EncounterEntryFlag& operator|=(EncounterEntryFlag& lhs, EncounterEntryFla
     return lhs;
 }
 
-inline EncounterConditionalOperator operator++(EncounterConditionalOperator& e, int)
-{
-    EncounterConditionalOperator result = e;
-    e = static_cast<EncounterConditionalOperator>(static_cast<int>(e) + 1);
-    return result;
-}
-
-inline CitySize operator++(CitySize& e, int)
-{
-    CitySize result = e;
-    e = static_cast<CitySize>(static_cast<int>(e) + 1);
-    return result;
-}
-
 #define CITY_NAME_SIZE (40)
 #define TILE_WALK_MASK_NAME_SIZE (40)
 #define ENTRANCE_LIST_CAPACITY (10)
@@ -160,6 +146,13 @@ enum EncounterConditionalOperator : int {
     ENCOUNTER_CONDITIONAL_OPERATOR_FIRST = ENCOUNTER_CONDITIONAL_OPERATOR_NONE
 };
 
+inline EncounterConditionalOperator operator++(EncounterConditionalOperator& e, int)
+{
+    EncounterConditionalOperator result = e;
+    e = static_cast<EncounterConditionalOperator>(static_cast<int>(e) + 1);
+    return result;
+}
+
 enum EncounterRatioMode : int {
     ENCOUNTER_RATIO_MODE_USE_RATIO,
     ENCOUNTER_RATIO_MODE_SINGLE,
@@ -219,6 +212,13 @@ enum CitySize : int {
     CITY_SIZE_COUNT,
     CITY_SIZE_FIRST = CITY_SIZE_SMALL
 };
+
+inline CitySize operator++(CitySize& e, int)
+{
+    CitySize result = e;
+    e = static_cast<CitySize>(static_cast<int>(e) + 1);
+    return result;
+}
 
 typedef struct EntranceInfo {
     int state;

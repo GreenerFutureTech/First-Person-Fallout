@@ -305,12 +305,12 @@ int playerActorFindFreeTileNear(int center, int elevation)
     // which is worse than co-locating two bodies on one tile.
     for (int dist = 1; dist <= 6; dist++) {
         for (int rot = 0; rot < ROTATION_COUNT; rot++) {
-            int tile = tileGetTileInDirection(center, rot, dist);
+            int tile = tileGetTileInDirection(center, static_cast<Rotation>(rot), dist);
             if (tile == -1 || tile == center) {
                 continue;
             }
 
-            if (_obj_blocking_at(nullptr, tile, elevation) == nullptr) {
+            if (_obj_blocking_at(nullptr, tile, static_cast<MapElevation>(elevation)) == nullptr) {
                 return tile;
             }
         }

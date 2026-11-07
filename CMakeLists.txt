@@ -164,6 +164,8 @@ set(FALLOUT_CORE_SOURCES
     "src/pointer_registry.h"
     "src/animation_scheduler.cc"
     "src/animation_scheduler.h"
+    "src/animation.h"
+    "src/sfall_animation.h"
     "src/presenter.cc"
     "src/presenter.h"
     "src/pres_record.cc"
@@ -253,13 +255,31 @@ set(FALLOUT_CORE_SOURCES
     "src/xfile.h"
     "src/ce_save_game.cc"
     "src/ce_save_game.h"
+    "src/color.cc"
+    "src/color.h"
+    "src/draw.cc"
+    "src/draw.h"
+    "src/game_config_migration.cc"
+    "src/game_config_migration.h"
+    "src/map_edge.cc"
+    "src/map_edge.h"
+    "src/opcode_context.cc"
+    "src/opcode_context.h"
+    "src/sfall_callbacks.cc"
+    "src/sfall_callbacks.h"
+    "src/sfall_ext.cc"
+    "src/sfall_ext.h"
+    "src/sfall_filesystem.cc"
+    "src/sfall_filesystem.h"
+    "src/sfall_object_name.cc"
+    "src/sfall_object_name.h"
+    "src/sfall_script_hooks.cc"
     "src/content_config.cc"
     "src/content_config.h"
 )
 
 set(FALLOUT_CLIENT_SOURCES
     "src/animation.cc"
-    "src/animation.h"
     "src/art_render.cc"
     "src/audio.cc"
     "src/audio.h"
@@ -283,8 +303,6 @@ set(FALLOUT_CLIENT_SOURCES
     "src/client_net.h"
     "src/client_say.cc"
     "src/client_say.h"
-    "src/color.cc"
-    "src/color.h"
     "src/combat_ui.cc"
     "src/combat_ui.h"
     "src/credits.cc"
@@ -301,8 +319,6 @@ set(FALLOUT_CLIENT_SOURCES
     "src/dinput.h"
     "src/display_monitor.cc"
     "src/display_monitor.h"
-    "src/draw.cc"
-    "src/draw.h"
     "src/elevator.cc"
     "src/endgame.cc"
     "src/endgame.h"
@@ -411,15 +427,9 @@ set(FALLOUT_CLIENT_SOURCES
     "src/audio_channels.h"
     "src/first_person_sky.cc"
     "src/first_person_sky.h"
-    "src/game_config_migration.cc"
-    "src/game_config_migration.h"
     "src/indexed_texture_palette.h"
-    "src/map_edge.cc"
-    "src/map_edge.h"
     "src/ogg_decoder.cc"
     "src/ogg_decoder.h"
-    "src/opcode_context.cc"
-    "src/opcode_context.h"
     "src/options_schema.cc"
     "src/options_schema.h"
     "src/options_settings_model.cc"
@@ -435,53 +445,9 @@ add_library(f2_core OBJECT ${FALLOUT_CORE_SOURCES})
 add_library(f2_client OBJECT ${FALLOUT_CLIENT_SOURCES})
 
 set(FALLOUT_PLATFORM_SOURCES
-    "src/audio_engine.cc"
-    "src/audio_engine.h"
-    "src/delay.cc"
-    "src/delay.h"
-    "src/fps_limiter.cc"
-    "src/fps_limiter.h"
-    "src/platform_compat.cc"
-    "src/platform_compat.h"
-    "src/pointer_registry.cc"
-    "src/pointer_registry.h"
-    "src/preferences.cc"
-    "src/preferences.h"
-    "src/settings.cc"
-    "src/settings.h"
-    "src/sfall_config.cc"
-    "src/sfall_config.h"
-    "src/sfall_ext.cc"
-    "src/sfall_ext.h"
-    "src/sfall_filesystem.cc"
-    "src/sfall_filesystem.h"
-    "src/sfall_global_vars.cc"
-    "src/sfall_global_vars.h"
-    "src/sfall_global_scripts.cc"
-    "src/sfall_global_scripts.h"
-    "src/sfall_ini.cc"
-    "src/sfall_ini.h"
-    "src/sfall_kb_helpers.cc"
-    "src/sfall_kb_helpers.h"
-    "src/sfall_lists.cc"
-    "src/sfall_lists.h"
-    "src/sfall_metarules.cc"
-    "src/sfall_metarules.h"
-    "src/sfall_object_name.cc"
-    "src/sfall_object_name.h"
-    "src/sfall_opcodes.cc"
-    "src/sfall_opcodes.h"
-    "src/sfall_script_hooks.cc"
     "src/script_sound.cc"
     "src/script_sound.h"
-    "src/sfall_arrays.cc"
-    "src/sfall_arrays.h"
     "src/sfall_animation.cc"
-    "src/sfall_animation.h"
-    "src/sfall_callbacks.cc"
-    "src/sfall_callbacks.h"
-    "src/touch.cc"
-    "src/touch.h"
     "src/scan_unimplemented.cc"
 	"third_party/lodepng/lodepng.cpp"
 )
@@ -537,7 +503,6 @@ if(WIN32)
         _CRT_NONSTDC_NO_WARNINGS
         NOMINMAX
         WIN32_LEAN_AND_MEAN
-        _STATIC_CPPLIB
     )
 endif()
 
@@ -550,13 +515,6 @@ endif()
 if(WIN32)
     target_link_libraries(${EXECUTABLE_NAME}
         winmm
-    )
-endif()
-
-if(MSVC)
-    target_link_libraries(${EXECUTABLE_NAME} 
-        debug libcpmtd
-        optimized libcpmt
     )
 endif()
 
@@ -721,8 +679,9 @@ endif()
 # f2_core objects — no recompile) rather than the OBJECT library, so the linker
 # pulls in only the object files actually reachable from the server entry points.
 # The resulting undefined-symbol set is then the TRUE client-severance surface,
-# satisfied for now by abort/no-op stubs in src/server_stubs.cc. No SDL is linked:
-# every SDL reference lives in f2_client .cc files, which the stubs replace.
+# satisfied for now by headless implementations in src/server_stubs.cc and the
+# dedicated server sources. No SDL is linked: SDL headers are compile-time only,
+# and interactive input/presentation paths are guarded or replaced headlessly.
 # Desktop only (Android/iOS build a client app bundle, not a server). Windows
 # included: server_net.cc goes through src/platform_net.h, the same shim the
 # client's transport crosses on, so the dedicated server builds there too
@@ -763,9 +722,12 @@ if(NOT ANDROID AND NOT IOS)
         # (itemMoveForce / barterAttemptTransaction), so it belongs on the server;
         # its renderer deps land on the labeled "inventory-UI" stub block.
         "src/inventory_ui.cc"
+        "src/sfall_animation.cc"
+        "src/scan_unimplemented.cc"
+        "third_party/lodepng/lodepng.cpp"
     )
     target_include_directories(f2_server PRIVATE "src" "third_party/lodepng" ${ZLIB_INCLUDE_DIRS} ${SDL2_INCLUDE_DIRS})
-    target_compile_definitions(f2_server PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_definitions(f2_server PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN F2_SERVER=1 SDL_MAIN_HANDLED=1)
     # server_stubs.cc includes the f2_client headers it stubs (for signature
     # validation); some of those pull <SDL.h>. Add SDL's include dirs at COMPILE
     # time only — SDL is NOT linked, so no SDL code enters the server binary.

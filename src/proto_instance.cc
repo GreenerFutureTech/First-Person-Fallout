@@ -48,7 +48,7 @@
 
 namespace fallout {
 
-static void presenterConsoleMessageBridge(char* string);
+static void presenterConsoleMessageBridge(const char* string);
 
 void _obj_arm_explosive(Object* explosive, int seconds);
 
@@ -1984,7 +1984,7 @@ int objectUseContainer(Object* critter, Object* item)
         // art. Same class as [[frame-index-render-gotcha]] (the S5 corpse bug).
         int frameCount = 1;
         CacheEntry* frameArtHandle;
-        Art* frameArt = artLock(item->fid, &frameArtHandle);
+        Art* frameArt = artLock(FrmId(item), &frameArtHandle);
         if (frameArt != nullptr) {
             frameCount = artGetFrameCount(frameArt);
             artUnlock(frameArtHandle);
@@ -2493,7 +2493,7 @@ int objectAttemptPlacementPartyMember(Object* obj, int tile, MapElevation elevat
 
 
 
-static void presenterConsoleMessageBridge(char* string)
+static void presenterConsoleMessageBridge(const char* string)
 {
     presenter()->consoleMessageFor(presenterNarrationAddress(), string);
 }
@@ -2509,7 +2509,9 @@ void _obj_arm_explosive(Object* explosive, int seconds)
     }
 
     // SFALL
-    explosiveActivate(&(explosive->pid));
+    ProtoId explosiveProtoId(explosive);
+    explosiveActivate(explosiveProtoId);
+    explosive->pid = explosiveProtoId.pid();
 
     int delay = 10 * seconds;
 
@@ -2535,7 +2537,7 @@ void _obj_arm_explosive(Object* explosive, int seconds)
         break;
     }
 
-    queueAddEvent(delay, explosive, nullptr, eventType);
+    queueAddEvent(delay, explosive, nullptr, static_cast<EventType>(eventType));
 }
 
 static void doorPresentSlide(Object* door, bool opening, int actorNetId)

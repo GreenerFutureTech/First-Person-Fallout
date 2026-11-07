@@ -1,5 +1,6 @@
 #include "game_movie.h" // gameMovieIsPlaying — keep the movie audio-clock alive when unfocused
 #include "audio_engine.h"
+#include "win32.h"
 
 #include <string.h>
 

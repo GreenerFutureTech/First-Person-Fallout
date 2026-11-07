@@ -22,7 +22,6 @@
 #include "worldmap.h"
 #include "xfile.h"
 #include <stdlib.h> // getenv — F2_NO_MUSIC
-#include "audio_file.h"
 #include <stdio.h>
 #include <string.h>
 

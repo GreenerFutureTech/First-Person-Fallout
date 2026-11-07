@@ -261,7 +261,7 @@ void endgamePlayMovie()
     // headless server has no player to answer, so replicate the "No" (quit)
     // branch -- the endgame is terminal -- and skip the playback.
     if (serverLoopActive()) {
-        _game_user_wants_to_quit = 2;
+        _game_user_wants_to_quit = GAME_QUIT_REQUEST_MAIN_MENU;
         return;
     }
 

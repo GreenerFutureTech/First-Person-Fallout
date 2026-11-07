@@ -41,7 +41,7 @@ static int lootHighlightType(Object* obj)
         return 0;
     }
 
-    switch (FID_TYPE(obj->fid)) {
+    switch (FrmId(obj).objectType()) {
     case OBJ_TYPE_ITEM:
         return itemGetType(obj) == ITEM_TYPE_CONTAINER
             ? OUTLINE_TYPE_LOOT_CONTAINER
@@ -50,7 +50,7 @@ static int lootHighlightType(Object* obj)
         return critterIsDead(obj) ? OUTLINE_TYPE_LOOT_CORPSE : 0;
     case OBJ_TYPE_SCENERY: {
         Proto* proto = nullptr;
-        if (protoGetProto(obj->pid, &proto) == -1) {
+        if (protoGetProto(ProtoId(obj), &proto) == -1) {
             return 0;
         }
         switch (proto->scenery.type) {
@@ -84,7 +84,7 @@ static bool lootHighlightSync(bool wantOn)
 
     Object* obj = objectFindFirstAtElevation(gElevation);
     while (obj != nullptr) {
-        int cur = obj->outline & OUTLINE_TYPE_MASK;
+        int cur = obj->outline & OUTLINE_TYPE_MAX;
         bool mine = (cur & OUTLINE_LOOT_MASK) != 0;
         int want = wantOn ? lootHighlightType(obj) : 0;
 
@@ -93,14 +93,14 @@ static bool lootHighlightSync(bool wantOn)
                 // Fresh object: claim it. objectSetOutline refuses if any outline
                 // is already present (e.g. a hover/combat outline) — leave those
                 // to their owners.
-                if (objectSetOutline(obj, want, nullptr) == 0) {
+                if (objectSetOutline(obj, static_cast<OutlineType>(want), nullptr) == 0) {
                     objectEnableOutline(obj, nullptr);
                     changed = true;
                 }
             } else if (mine && cur != want) {
                 // Ours, but its category changed — recolor it.
                 objectClearOutline(obj, nullptr);
-                if (objectSetOutline(obj, want, nullptr) == 0) {
+                if (objectSetOutline(obj, static_cast<OutlineType>(want), nullptr) == 0) {
                     objectEnableOutline(obj, nullptr);
                 }
                 changed = true;

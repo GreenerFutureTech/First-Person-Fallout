@@ -58,7 +58,7 @@ namespace fallout {
 struct ServerHolodisk {
     std::string name;
     std::vector<std::string> lines;
-}
+};
 
 static std::vector<ServerHolodisk> gServerHolodisks;
 

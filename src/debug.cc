@@ -1,7 +1,6 @@
 
 #include "debug.h"
 
-#include <SDL.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -189,7 +188,7 @@ int debugPrint(const char* format, ...)
     }
 
 #ifndef NDEBUG
-    SDL_Log("%s", string);
+    fprintf(stderr, "%s\n", string);
 #endif
 
     FILE* file = fopen("debug.log", "a");

@@ -532,10 +532,7 @@ void gameHandleSkilldexResult(SkilldexRC rc)
 #define SPLASH_HEIGHT (480)
 #define SPLASH_COUNT (10)
 
-static void showHelp();
-
-// 0x5020B8
-static char _aDec11199816543[] = VERSION_BUILD_TIME;
+void showHelp();
 
 // 0x5186B4
 static bool gGameUiDisabled = false;

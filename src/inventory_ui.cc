@@ -3453,39 +3453,13 @@ int inventoryOpenLooting(Object* looter, Object* target)
         return 0;
     }
 
-    const FrmId targetFrmId = target;
-    if (targetFrmId.objectType() == OBJ_TYPE_CRITTER && critterFlagCheck(target, CRITTER_NO_STEAL)) {
+    switch (lootOpenCheck(looter, target, _gIsSteal)) {
+    case LOOT_OPEN_NO_STEAL:
         inventoryDisplayMessage(50); // You can't find anything to take from that.
-        return 0;
-    }
-
-    if (targetFrmId.objectType() == OBJ_TYPE_ITEM && itemGetType(target) == ITEM_TYPE_CONTAINER) {
-        if (target->frame == 0) {
-            CacheEntry* handle;
-            Art* frm = artLock(targetFrmId, &handle);
-            if (frm != nullptr) {
-                int frameCount = artGetFrameCount(frm);
-                artUnlock(handle);
-                if (frameCount > 1) {
-                    return 0;
-                }
-            }
-        }
-    }
-
-    int sid = -1;
-    if (!_gIsSteal && objectGetSid(target, &sid) != -1) {
-        scriptSetObjects(sid, looter, nullptr);
-        scriptExecProc(sid, SCRIPT_PROC_PICKUP);
-
-        Script* script;
-        if (scriptGetScript(sid, &script) != -1) {
-            if (script->scriptOverrides) {
-                return 0;
-            }
-        }
+        _gIsSteal = 0;
         return 0;
     case LOOT_OPEN_BLOCKED:
+        _gIsSteal = 0;
         return 0;
     default:
         break;
@@ -3903,6 +3877,7 @@ int inventoryOpenLooting(Object* looter, Object* target)
     if (_gIsSteal && !isCaughtStealing && stealingXp > 0 && !objectIsPartyMember(target)) {
         stealingXp = std::min(300 - skillGetValue(looter, SKILL_STEAL), stealingXp);
         debugPrint("\n[[[%d]]]", 300 - skillGetValue(looter, SKILL_STEAL));
+    }
 
     // A VIEWER AWARDS NOTHING. Its stealingXp counter tracked local clicks, but
     // the rolls happened on the server and so did the XP (and the caught check) —
@@ -4084,7 +4059,7 @@ void stealSessionRun(Object* thief, Object* target)
     // refused session opened and shut with no word at all.
     inventoryMessageListInit();
 
-    _gIsSteal = PID_TYPE(thief->pid) == OBJ_TYPE_CRITTER && critterIsActive(target);
+    _gIsSteal = ProtoId(thief).objectType() == OBJ_TYPE_CRITTER && critterIsActive(target);
     _gStealCount = 0;
     _gStealSize = 0;
 
@@ -4293,7 +4268,7 @@ void inventoryOpenStealingViewer(Object* thief, Object* target)
     // object this viewer has not been told about yet is not renderable — refuse
     // it, because a missing screen is recoverable and a fault is not.
     Proto* probe = nullptr;
-    if (protoGetProto(thief->pid, &probe) != 0 || protoGetProto(target->pid, &probe) != 0) {
+    if (protoGetProto(ProtoId(thief), &probe) != 0 || protoGetProto(ProtoId(target), &probe) != 0) {
         debugPrint("client_steal: subject slot not proto-resolvable — refusing the steal screen\n");
         return;
     }
@@ -4442,6 +4417,7 @@ static InventoryMoveResult _move_inventory(Object* item, int slotIndex, Object* 
 // 0x474DAC
 static void barterMoveToTable(Object* item, int quantity, int slotIndex, int indexOffset, Object* npc, Object* sourceTable, bool fromDude)
 {
+    MessageListItem messageListItem;
     Rect rect;
     if (fromDude) {
         rect.left = 31;
@@ -4517,6 +4493,7 @@ static void barterMoveToTable(Object* item, int quantity, int slotIndex, int ind
 // 0x475070
 static void barterMoveFromTable(Object* item, int quantity, int slotIndex, Object* npc, Object* sourceTable, bool fromDude)
 {
+    MessageListItem messageListItem;
     Rect rect;
     if (fromDude) {
         rect.left = INVENTORY_TRADE_INNER_LEFT_SCROLLER_X_PAD;
@@ -4602,7 +4579,7 @@ static void barterDisplayTables(int win, Object* leftTable, Object* rightTable, 
 
     auto [requestValue, offerValue] = gGameDialogSpeakerIsPartyMember
         ? barterComputeTablesWeight(gDude, _target_stack[0])
-        : barterComputeTablesValue(gDude, _target_stack[0]);
+        : barterComputeTablesValue(gDude, _target_stack[0], false);
 
     if (leftTable != nullptr) {
         unsigned char* src = windowGetBuffer(win);
@@ -4873,7 +4850,7 @@ void barterProcessUI(int win, Object* barterer, Object* playerTable, Object* bar
             // committing via the same barterAttemptTransaction the 'M' button
             // drives below. An empty queue ends the loop — we cannot block for
             // input (same policy as the server dialog/combat drains).
-            gBarterFinalModifier = barterMod + modifier;
+            gBarterFinalModifier = barterMod + barterReactionModifier;
 
             BarterIntent intent;
             bool haveIntent = barterIntentPeek(&intent);
@@ -4917,7 +4894,7 @@ void barterProcessUI(int win, Object* barterer, Object* playerTable, Object* bar
                 // to their owners, then leave barter to resume/close the dialog.
                 itemMoveAll(bartererTable, barterer);
                 itemMoveAll(playerTable, gDude);
-                _barter_end_to_talk_to();
+                gameDialogEndBarter();
                 presenter()->barterEnd();
                 break;
             }
@@ -5296,8 +5273,8 @@ void inventoryOpenTradeViewer(Object* merchant, Object* playerTable, Object* mer
     // recoverable and reportable, a fault takes the whole viewer down.
     Object* driver = clientBarterDriver();
     Proto* probe = nullptr;
-    if (driver == nullptr || protoGetProto(driver->pid, &probe) != 0
-        || protoGetProto(merchant->pid, &probe) != 0) {
+    if (driver == nullptr || protoGetProto(ProtoId(driver), &probe) != 0
+        || protoGetProto(ProtoId(merchant), &probe) != 0) {
         fprintf(stderr, "client_barter: subject slot not proto-resolvable — refusing the trade screen\n");
         return;
     }
@@ -5432,7 +5409,7 @@ void inventoryOpenTradeViewer(Object* merchant, Object* playerTable, Object* mer
     auto repaint = [&]() {
         _display_target_inventory(_target_stack_offset[_target_curr_stack], -1, _target_pud, INVENTORY_WINDOW_TYPE_TRADE);
         _display_inventory(_stack_offset[0], -1, INVENTORY_WINDOW_TYPE_TRADE);
-        _display_body(merchant->fid, INVENTORY_WINDOW_TYPE_TRADE);
+        _display_body(FrmId(merchant), INVENTORY_WINDOW_TYPE_TRADE);
         windowRefresh(gInventoryBarterBackgroundWindow);
         barterDisplayTables(win, gPlayerTableObj, gBartererTableObj, -1);
     };
@@ -5733,7 +5710,7 @@ static int inventoryViewerDropQuantity(Object* item, Object** itemSlot, int quan
     if (itemSlot != nullptr) {
         return 1;
     }
-    if (quantity > 1 && !explosiveIsActiveExplosive(item->pid)) {
+    if (quantity > 1 && !explosiveIsActiveExplosive(ProtoId(item))) {
         return inventoryQuantitySelect(INVENTORY_WINDOW_TYPE_MOVE_ITEMS, item, quantity);
     }
     return quantity > 1 ? quantity : 1;
@@ -6263,7 +6240,7 @@ static bool inventoryBackgroundLoad(FrmImage& image, InterfaceFrameId col1FrmId,
     return false;
 }
 
-static int buttonCreateSlot(int win, int x, int y, int width, int height, int keyCode, ButtonCallback* onEnter = nullptr, ButtonCallback* onExit = nullptr)
+static int buttonCreateSlot(int win, int x, int y, int width, int height, int keyCode, ButtonCallback* onEnter, ButtonCallback* onExit)
 {
     int btn = buttonCreate(win, x, y, width, height, keyCode, -1, keyCode);
     if (btn != -1) {
@@ -7120,7 +7097,7 @@ static void inventorySetLeftPaneCritter(Object* critter, Object* target, int inv
     Object* itemInHand = interfaceGetCurrentHand() == HAND_RIGHT ? gInventoryRightHandItem : gInventoryLeftHandItem;
     if (itemInHand != nullptr) {
         Proto* proto = nullptr;
-        if (protoGetProto(itemInHand, &proto) != -1
+        if (protoGetProto(ProtoId(itemInHand), &proto) != -1
             && proto != nullptr
             && proto->item.type == ITEM_TYPE_WEAPON) {
             animationCode = proto->item.data.weapon.animationCode;
@@ -7236,7 +7213,7 @@ static int barterGetMovedQuantity(Object* item, int maxQuantity, bool fromPlayer
     int suggestedValue = 1;
     if (ProtoId(item) == ItemProtoTypeId::Money && !gGameDialogSpeakerIsPartyMember) {
         // Calculate change money automatically
-        auto [totalCostNpc, totalCostPlayer] = barterComputeTablesValue(gDude, _target_stack[0]);
+        auto [totalCostNpc, totalCostPlayer] = barterComputeTablesValue(gDude, _target_stack[0], false);
         // Actor's balance: negative - the actor must add money to balance the tables and vice versa
         int balance = fromPlayer ? totalCostPlayer - totalCostNpc : totalCostNpc - totalCostPlayer;
 
@@ -7291,8 +7268,12 @@ static void _drag_item_loop(Object* item, bool immediate)
 
 static bool _ctrl_pressed()
 {
+#if defined(F2_SERVER)
+    return false;
+#else
     const Uint8* keyboardState = SDL_GetKeyboardState(nullptr);
     return keyboardState[SDL_SCANCODE_LCTRL] || keyboardState[SDL_SCANCODE_RCTRL];
+#endif
 }
 
 static void inventoryUnloadWeaponToOwner(Object* owner, Object* weapon)

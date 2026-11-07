@@ -86,7 +86,7 @@ static void serverMirrorArmorGrant(int opcode, Program* program)
         // is about to hand to `owner` (and which itemAdd would refuse anyway once
         // it has an owner).
         Object* copy = nullptr;
-        if (objectCreateWithPid(&copy, item->pid) != 0 || copy == nullptr) {
+        if (objectCreateWithProtoId(&copy, ProtoId(item)) != 0 || copy == nullptr) {
             fprintf(stderr, "f2_server: mirror-grant pid=%d slot=%d create FAILED\n", item->pid, slot);
             continue;
         }

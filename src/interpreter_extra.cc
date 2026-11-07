@@ -5300,7 +5300,7 @@ static void scriptRelocateOtherPlayerActors(Object* mover, int tile, int elevati
         // _partyMemberSyncPosition already uses — it finds a free tile near the target
         // and leaves the actor where it was if it cannot, so a cramped destination
         // degrades to "did not move" instead of stacking bodies.
-        objectAttemptPlacementPartyMember(actor, tile, elevation);
+        objectAttemptPlacementPartyMember(actor, tile, static_cast<MapElevation>(elevation));
     }
 }
 

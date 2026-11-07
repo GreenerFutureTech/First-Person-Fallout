@@ -94,7 +94,7 @@ static unsigned int objectInventoryHash(Object* obj)
         // path parking a non-item here, where data.item would alias
         // data.critter.combat.{maneuver,ap} (same offsets) and ap's per-beat churn
         // would spuriously fire the delta (review 2026-07-13).
-        if (PID_TYPE(item->pid) == OBJ_TYPE_ITEM) {
+        if (ProtoId(item).objectType() == OBJ_TYPE_ITEM) {
             itemHash += (unsigned int)item->data.item.weapon.ammoQuantity * 2166136261u
                 + (unsigned int)item->data.item.weapon.ammoTypePid * 16777619u;
         }
@@ -119,7 +119,7 @@ static int gLastAmbient = -1;
 
 static bool objectIsCritter(Object* obj)
 {
-    return PID_TYPE(obj->pid) == OBJ_TYPE_CRITTER;
+    return ProtoId(obj).objectType() == OBJ_TYPE_CRITTER;
 }
 
 // Sync the object unless it is a client-local non-entity (mouse cursors, the
@@ -255,7 +255,7 @@ void objectDeltaScan()
             // the latter before taking the beat snapshot so throw/pickup/re-equip and
             // other inventory-only paths cannot leave a player holding stale art.
             if (serverDedicatedActive() && objectIsCritter(obj) && playerActorIs(obj)
-                && !critterIsDead(obj) && FID_ANIM_TYPE(obj->fid) == ANIM_STAND) {
+                && !critterIsDead(obj) && FrmId(obj).animationType() == ANIM_STAND) {
                 invenRederiveWeaponFid(obj);
             }
             ObjectShadow current = objectCaptureShadow(obj);

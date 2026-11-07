@@ -58,13 +58,13 @@ static bool serverApplyDifficultyOverrides()
 {
     struct DifficultyOverride {
         const char* envName;
-        int* setting;
     } overrides[] = {
-        { "F2_GAME_DIFFICULTY", &settings.preferences.game_difficulty },
-        { "F2_COMBAT_DIFFICULTY", &settings.preferences.combat_difficulty },
+        { "F2_GAME_DIFFICULTY" },
+        { "F2_COMBAT_DIFFICULTY" },
     };
 
-    for (const DifficultyOverride& override : overrides) {
+    for (size_t index = 0; index < sizeof(overrides) / sizeof(overrides[0]); index++) {
+        const DifficultyOverride& override = overrides[index];
         const char* value = getenv(override.envName);
         if (value == nullptr || *value == '\0') {
             continue;
@@ -79,7 +79,11 @@ static bool serverApplyDifficultyOverrides()
             return false;
         }
 
-        *override.setting = static_cast<int>(parsed);
+        if (index == 0) {
+            settings.preferences.game_difficulty = static_cast<GameDifficulty>(parsed);
+        } else {
+            settings.preferences.combat_difficulty = static_cast<CombatDifficulty>(parsed);
+        }
     }
 
     static const char* gameNames[] = { "Easy", "Normal", "Hard" };
@@ -156,7 +160,7 @@ static int serverInitSubsystems(int argc, char** argv)
     queueInit();
     critterInit();
     aiInit();
-    _inven_reset_dude();
+    inventoryResetDude();
 
     // The sim-core subset of isoInit() (map_render.cc), which the client runs
     // here (between the movie inits and protoInit) with the real iso window. We
@@ -192,7 +196,7 @@ static int serverInitSubsystems(int argc, char** argv)
         return -1;
     }
 
-    mapSetEnteringLocation(-1, -1, -1);
+    mapSetEnteringLocation(ELEVATION_INVALID, -1, ROTATION_INVALID);
 
     if (protoInit() != 0) {
         debugPrint("server-boot: protoInit failed\n");
@@ -230,7 +234,7 @@ static int serverInitSubsystems(int argc, char** argv)
     }
 
     char path[COMPAT_MAX_PATH];
-    snprintf(path, sizeof(path), "%s%s", asc_5186C8, "misc.msg");
+    snprintf(path, sizeof(path), "%s%s", gGameMsgPath, "misc.msg");
     if (!messageListLoad(&gMiscMessageList, path)) {
         debugPrint("server-boot: messageListLoad(misc.msg) failed\n");
         return -1;
@@ -278,12 +282,12 @@ static int serverInitSubsystems(int argc, char** argv)
 // it and the FIRST map of a session is silent while every later one plays.
 static int serverLoadMap(const char* mapName)
 {
-    _game_user_wants_to_quit = 0;
+    _game_user_wants_to_quit = GAME_QUIT_REQUEST_NONE;
 
     gDude->flags &= ~OBJECT_FLAT;
     objectShow(gDude, nullptr);
 
-    _map_init();
+    mapInit();
 
     char* mapNameCopy = compat_strdup(mapName);
     int rc = mapLoadByName(mapNameCopy);
@@ -300,11 +304,11 @@ static int serverLoadMap(const char* mapName)
 // Same primitives the AI flee path uses (tileGetTileInDirection + the blocking
 // probe); deliberately conservative — a spawn that lands inside a wall would
 // leave an actor unable to move, which is worse than failing the boot.
-static int serverFindFreeTileNear(int center, int elevation)
+static int serverFindFreeTileNear(int center, MapElevation elevation)
 {
     for (int dist = 1; dist <= 6; dist++) {
         for (int rot = 0; rot < ROTATION_COUNT; rot++) {
-            int tile = tileGetTileInDirection(center, rot, dist);
+            int tile = tileGetTileInDirection(center, static_cast<Rotation>(rot), dist);
             if (tile == -1 || tile == center) {
                 continue;
             }
@@ -516,7 +520,7 @@ int serverBootLoadSlot(int slot)
     const char* seedValue = getenv("F2_SERVER_SEED");
     randomSeedPrerandom(seedValue != nullptr ? atoi(seedValue) : 1337);
 
-    _map_init();
+    mapInit();
 
     savegameRefreshPatchesPath();
     savegameSetSlot(slot);
@@ -623,7 +627,7 @@ void serverShutdown()
     // exit (queueExit/protoReset/…/gameDbExit) is deferred — a v1 server exits
     // the process at shutdown, so the OS reclaims everything. Kept as a named
     // seam for when a listen-server needs a clean in-process teardown.
-    _map_exit();
+    mapExit();
 }
 
 } // namespace fallout

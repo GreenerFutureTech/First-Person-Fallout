@@ -12,9 +12,9 @@
 //       pipeline) that lands with a real connecting client.
 //
 // The set of stubs in server_stubs.cc IS the enumerated client-severance
-// surface: replacing them with de-SDL'd implementations (timing, file I/O, the
-// movement/animation path, the background pump) is the incremental road from
-// this link milestone to a runnable standalone server.
+// surface. The server already has headless timing, file I/O, movement/animation,
+// and background-pump implementations; remaining stubs mark client-only
+// presentation behavior that still needs a deliberate server policy.
 
 #include <cstdint>
 #include <cstdio>
@@ -587,7 +587,7 @@ int main(int argc, char** argv)
                     return false;
                 }
                 if (haveNet && netSink.clientCount() == 0) {
-                    fprintf(stderr, "f2_server: wm-pump bail: no clients (haveNet=%d count=%d)\n", haveNet, netSink.clientCount());
+                    fprintf(stderr, "f2_server: wm-pump bail: no clients (haveNet=%d count=%zu)\n", haveNet, netSink.clientCount());
                     return false;
                 }
                 if (haveNet) {

@@ -67,7 +67,7 @@ static void emitState()
     // town map can open — and it has to be shipped because it is sim state the viewer's
     // own worldmap data cannot know: without it a viewer never sees that a city has a
     // layout to choose from, and every arrival lands on the front door.
-    int visitedState = 0;
+    VisitedState visitedState = VisitedState::Unknown;
     unsigned int entranceMask = 0;
     if (wmGenData.currentAreaId != -1) {
         CityInfo* city = &(wmAreaInfoList[wmGenData.currentAreaId]);
@@ -88,7 +88,7 @@ static void emitState()
         wmGenData.walkDestinationX, wmGenData.walkDestinationY,
         wmGenData.isWalking, wmGenData.walkDistance,
         wmGenData.carFuel, wmGenData.currentAreaId,
-        wmGenData.isInCar, visitedState, entranceMask);
+        wmGenData.isInCar, static_cast<int>(visitedState), entranceMask);
 
     // ►► THE CLOCK TRAVELS TOO. Travel burns game time (worldmapTravelClockTick →
     // wmGameTimeIncrement), but the only emitter of WORLD_DELTA_GAMETIME is the beat
@@ -307,18 +307,30 @@ int worldmapServerDriver()
                 // intent.x is the town-map ENTRANCE the traveller picked, or -1 for
                 // "wherever this city's front door is" — an unvisited city has no
                 // layout to show, so the viewer cannot pick and does not try.
+                auto findFirstValidMap = [&]() {
+                    Map resolvedMap;
+                    MapElevation elevation;
+                    int tile;
+                    Rotation rotation;
+                    if (wmAreaFindFirstValidMap(&resolvedMap, &elevation, &tile, &rotation) == -1) {
+                        return false;
+                    }
+                    map = static_cast<int>(resolvedMap);
+                    mapSetEnteringLocation(elevation, tile, rotation);
+                    return true;
+                };
                 bool resolved = intent.x >= 0
                     ? wmAreaResolveEntrance(intent.x, &map) != -1
-                    : wmAreaFindFirstValidMap(&map) != -1;
+                    : findFirstValidMap();
                 if (!resolved && intent.x >= 0) {
                     // A refused entrance must not silently become the front door: that
                     // would let a bad index quietly relocate the party. Fall back only
                     // to the same answer the player would have got without a town map.
                     fprintf(stderr, "f2_server: wmenter entrance %d refused (out of range or undiscovered)\n", intent.x);
-                    resolved = wmAreaFindFirstValidMap(&map) != -1;
+                    resolved = findFirstValidMap();
                 }
                 if (resolved) {
-                    city->visitedState = 2;
+                    city->visitedState = VisitedState::Visited;
 
                     if (wmGenData.isInCar) {
                         wmGenData.isInCar = false;
@@ -443,7 +455,7 @@ int worldmapServerDriver()
         wmTransitionSaveMap();
         wmTransitionSuspendScripts();
 
-        mapLoadById(map);
+        mapLoadById(static_cast<Map>(map));
         // ►► NOW that emissions are live again, say what this place is. The line is
         // built by wmSetupRandomEncounter INSIDE the load, where the network presenter
         // drops every console message, so co-op players used to arrive in a random

@@ -861,7 +861,7 @@ static int mainHeadlessProbe()
     if (getenv("F2_PROBE_LISTMAPS") != nullptr) {
         char mapName16[32];
         for (int mapIdx = 0; mapIdx < wmMapMaxCount(); mapIdx++) {
-            if (wmMapIdxToName(mapIdx, mapName16, sizeof(mapName16)) == 0) {
+            if (wmMapIdxToName(static_cast<Map>(mapIdx), mapName16, sizeof(mapName16)) == 0) {
                 debugPrint("headless-probe: map %d = %s\n", mapIdx, mapName16);
             }
         }
@@ -1147,7 +1147,7 @@ static void viewerSendActionMenuVerb(ClientConnection& conn, int menuItem, Objec
     switch (menuItem) {
     case GAME_MOUSE_ACTION_MENU_ITEM_USE:
         // Vanilla USE forks on target type: scenery=use, item=pickup-or-loot, critter=loot.
-        switch (FID_TYPE(target->fid)) {
+        switch (FrmId(target).objectType()) {
         case OBJ_TYPE_SCENERY:
             snprintf(cmd, sizeof(cmd), "use %d", target->netId);
             conn.sendLine(cmd);
@@ -1239,13 +1239,13 @@ static void viewerSendPrimaryVerb(ClientConnection& conn, Object* target)
     if (getenv("F2_TRACE_EVENTS") != nullptr) {
         fprintf(stderr, "[primary] net=%d pid=%d(type=%d) fid=0x%X(fidType=%d)"
                         " itemType=%d canUse=%d canUseOn=%d\n",
-            target->netId, target->pid, PID_TYPE(target->pid), target->fid,
-            FID_TYPE(target->fid),
-            PID_TYPE(target->pid) == OBJ_TYPE_ITEM ? itemGetType(target) : -1,
+            target->netId, target->pid, ProtoId(target).objectType(), target->fid,
+            FrmId(target).objectType(),
+            ProtoId(target).objectType() == OBJ_TYPE_ITEM ? itemGetType(target) : -1,
             _obj_action_can_use(target) ? 1 : 0,
-            _proto_action_can_use_on(target->pid) ? 1 : 0);
+            _proto_action_can_use_on(ProtoId(target)) ? 1 : 0);
     }
-    switch (FID_TYPE(target->fid)) {
+    switch (FrmId(target).objectType()) {
     case OBJ_TYPE_ITEM:
         // Container → loot (walk-then-open); any other item → ground pickup.
         if (itemGetType(target) == ITEM_TYPE_CONTAINER) {
@@ -1332,18 +1332,18 @@ static int viewerSkillForMode(int mode)
 static void viewerEnterSkillMode(int mode)
 {
     gameMouseSetCursor(MOUSE_CURSOR_USE_CROSSHAIR);
-    gameMouseSetMode(mode);
+    gameMouseSetMode(static_cast<GameMouseMode>(mode));
 }
 
 static bool viewerKeepRunning()
 {
-    if (_game_user_wants_to_quit == 1) {
+    if (_game_user_wants_to_quit == GAME_QUIT_REQUEST_END_COMBAT) {
         fprintf(stderr, "[viewer] consumed a stray in-band quit signal (=1); NOT exiting. "
                         "Something outside the viewer's own loops raised it — see object.cc's "
                         "exit-grid guard for the shape of this bug.\n");
-        _game_user_wants_to_quit = 0;
+        _game_user_wants_to_quit = GAME_QUIT_REQUEST_NONE;
     }
-    return _game_user_wants_to_quit == 0;
+    return _game_user_wants_to_quit == GAME_QUIT_REQUEST_NONE;
 }
 
 static int mainClientViewer(const char* connectSpec)
@@ -1434,24 +1434,25 @@ static int mainClientViewer(const char* connectSpec)
                 // displayed-out — the round trip is exact.
                 int special[7];
                 for (int i = 0; i < 7; i++) {
-                    special[i] = critterGetStat(gDude, STAT_STRENGTH + i);
+                    special[i] = critterGetStat(gDude, static_cast<Stat>(STAT_STRENGTH + i));
                 }
 
-                int tagged[NUM_TAGGED_SKILLS];
+                Skill tagged[NUM_TAGGED_SKILLS];
                 for (int i = 0; i < NUM_TAGGED_SKILLS; i++) {
-                    tagged[i] = -1;
+                    tagged[i] = static_cast<Skill>(-1);
                 }
                 skillsGetTagged(tagged, NUM_TAGGED_SKILLS);
 
-                int trait1 = -1;
-                int trait2 = -1;
+                Trait trait1 = static_cast<Trait>(-1);
+                Trait trait2 = static_cast<Trait>(-1);
                 traitsGetSelected(&trait1, &trait2);
 
                 snprintf(createFromUi, sizeof(createFromUi),
                     "%d %d %d %d %d %d %d %d %d %d %d %d",
                     special[0], special[1], special[2], special[3],
                     special[4], special[5], special[6],
-                    tagged[0], tagged[1], tagged[2], trait1, trait2);
+                    static_cast<int>(tagged[0]), static_cast<int>(tagged[1]),
+                    static_cast<int>(tagged[2]), static_cast<int>(trait1), static_cast<int>(trait2));
                 debugPrint("client-viewer: created character -> create %s\n", createFromUi);
             } else {
                 // Cancelled: join as whatever the account already is (or a clone
@@ -1636,7 +1637,7 @@ static int mainClientViewer(const char* connectSpec)
         programWindowSetTitle(titleBuf);
     }
 
-    _game_user_wants_to_quit = 0;
+    _game_user_wants_to_quit = GAME_QUIT_REQUEST_NONE;
     int puppetLoadCount = conn.loadCount();
 
     // Combat presentation gate (COMBAT_CLIENT_DESIGN.md §3.c). While the viewer owes
@@ -1900,8 +1901,8 @@ static int mainClientViewer(const char* connectSpec)
             // action arms the crosshair + enters combat. Match that split here rather
             // than always doing the attack path (which was forcing a combat-enter on a
             // reload, and never reloading — owner-reported).
-            int leftAction = INTERFACE_ITEM_ACTION_DEFAULT;
-            int rightAction = INTERFACE_ITEM_ACTION_DEFAULT;
+            InterfaceItemAction leftAction = INTERFACE_ITEM_ACTION_DEFAULT;
+            InterfaceItemAction rightAction = INTERFACE_ITEM_ACTION_DEFAULT;
             interfaceGetItemActions(&leftAction, &rightAction);
             int curHand = interfaceGetCurrentHand();
             int action = curHand == HAND_LEFT ? leftAction : rightAction;
@@ -1933,7 +1934,7 @@ static int mainClientViewer(const char* connectSpec)
                 // USE crosshair. Pure local cursor state — the click that follows
                 // resolves the target and sends `useitemon`, the same split every skill
                 // cursor uses.
-                if (_proto_action_can_use_on(handItem->pid)) {
+                if (_proto_action_can_use_on(ProtoId(handItem))) {
                     gameMouseSetCursor(MOUSE_CURSOR_USE_CROSSHAIR);
                     gameMouseSetMode(GAME_MOUSE_MODE_USE_CROSSHAIR);
                 } else if (_obj_action_can_use(handItem)) {
@@ -2126,7 +2127,7 @@ static int mainClientViewer(const char* connectSpec)
                 // vanilla AP. (Before Stage 4 only LOOK landed and the rest were
                 // dropped at the wire.) The run loop owns its own input/render spin;
                 // conn.pump() catches up on release. netId 0 = unsynced → ignore.
-                Object* targetObj = gameMouseGetObjectUnderCursor(-1, true, gElevation);
+                Object* targetObj = gameMouseGetObjectUnderCursor(OBJ_TYPE_INVALID, true, gElevation);
                 if (targetObj != nullptr && targetObj->netId > 0) {
                     int actionMenuItems[6];
                     int count = gameMouseBuildActionMenu(targetObj, actionMenuItems);
@@ -2147,7 +2148,7 @@ static int mainClientViewer(const char* connectSpec)
                     if (conn.myTurn() && !combatBusy) {
                         Object* targetObj = gameMouseGetObjectUnderCursor(OBJ_TYPE_CRITTER, false, gElevation);
                         if (targetObj == nullptr) {
-                            targetObj = gameMouseGetObjectUnderCursor(-1, false, gElevation);
+                            targetObj = gameMouseGetObjectUnderCursor(OBJ_TYPE_INVALID, false, gElevation);
                         }
                         if (targetObj != nullptr) {
                             // _combat_attack_this runs the vanilla selection UX and
@@ -2170,7 +2171,7 @@ static int mainClientViewer(const char* connectSpec)
                     // inventory screen's use-on leaf already speaks, and let the server do
                     // the approach + the 2 AP. Without this branch the click fell through to
                     // MOVE and the shovel just walked you somewhere.
-                    Object* targetObj = gameMouseGetObjectUnderCursor(-1, true, gElevation);
+                    Object* targetObj = gameMouseGetObjectUnderCursor(OBJ_TYPE_INVALID, true, gElevation);
                     Object* handItem = nullptr;
                     if (interfaceGetActiveItem(&handItem) == -1) {
                         handItem = nullptr;
@@ -2195,7 +2196,7 @@ static int mainClientViewer(const char* connectSpec)
                     // Allowed in combat since Stage 4: the verb is queued for our own
                     // turn, where actionUseSkill answers seven of the eight skills
                     // with msg 902 and toggles Sneak. The refusal is the feedback.
-                    Object* targetObj = gameMouseGetObjectUnderCursor(-1, true, gElevation);
+                    Object* targetObj = gameMouseGetObjectUnderCursor(OBJ_TYPE_INVALID, true, gElevation);
                     if (targetObj != nullptr && targetObj->netId > 0) {
                         char cmd[48];
                         snprintf(cmd, sizeof(cmd), "skill %d %d", targetObj->netId, viewerSkillForMode(mode));
@@ -2210,7 +2211,7 @@ static int mainClientViewer(const char* connectSpec)
                     // it used to degrade to LOOK here because the server dropped every
                     // acting verb mid-fight, which made view mode a dead end once a
                     // fight started.
-                    Object* targetObj = gameMouseGetObjectUnderCursor(-1, true, gElevation);
+                    Object* targetObj = gameMouseGetObjectUnderCursor(OBJ_TYPE_INVALID, true, gElevation);
                     if (targetObj != nullptr && targetObj->netId > 0) {
                         viewerSendPrimaryVerb(conn, targetObj);
                     }

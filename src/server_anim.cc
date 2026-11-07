@@ -120,6 +120,23 @@
 
 namespace fallout {
 
+static bool gServerRegAnimCombatCheck = true;
+
+bool animationCheckCombatMode()
+{
+    return gServerRegAnimCombatCheck && isInCombat();
+}
+
+void animationSetCombatCheck(bool enable)
+{
+    gServerRegAnimCombatCheck = enable;
+}
+
+void animationResetCombatCheck()
+{
+    gServerRegAnimCombatCheck = true;
+}
+
 // Arm the presentation recorder: THIS is the recording animation backend (the
 // leaves below record instead of executing). Linking this TU (f2_server only)
 // runs the ctor at static-init, so presRecordEnabled() may honor its env flag.
@@ -1108,6 +1125,14 @@ int animationRegisterPlaySoundEffect(Object* owner, const char* soundEffectName,
 int animationRegisterSetLightIntensity(Object* owner, int lightDistance, int lightIntensity, int delay)
 {
     if (presRecordActive()) presRecordSetLight(owner, lightDistance, lightIntensity, delay);
+    return 0;
+}
+
+int animationRegisterSetLightDistance(Object* owner, int lightDistance, int delay)
+{
+    (void)owner;
+    (void)lightDistance;
+    (void)delay;
     return 0;
 }
 

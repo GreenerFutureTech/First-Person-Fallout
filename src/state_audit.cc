@@ -45,7 +45,7 @@ static unsigned int auditInventoryHash(Object* obj)
 
 static bool auditIsCritter(Object* obj)
 {
-    return PID_TYPE(obj->pid) == OBJ_TYPE_CRITTER;
+    return ProtoId(obj).objectType() == OBJ_TYPE_CRITTER;
 }
 
 bool stateAuditCapture(Object* obj, StateAuditRecord* out)
@@ -160,7 +160,7 @@ int stateAuditCompare(const std::vector<StateAuditRecord>& authoritative, FILE* 
         }
         matched[theirs.netId] = true;
         const StateAuditRecord& ours = *it->second;
-        const bool isCritter = PID_TYPE(theirs.pid) == OBJ_TYPE_CRITTER;
+        const bool isCritter = ProtoId(theirs.pid).objectType() == OBJ_TYPE_CRITTER;
 
 #define AUDIT_FIELD(name)                                                        \
     if (theirs.name != ours.name) {                                              \

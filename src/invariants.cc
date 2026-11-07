@@ -51,7 +51,7 @@ void invariantsCheck(int beat)
         // is the always-live ObjectData member, valid outside the union).
         checkInventory(beat, obj);
 
-        if (PID_TYPE(obj->pid) != OBJ_TYPE_CRITTER) {
+        if (ProtoId(obj).objectType() != OBJ_TYPE_CRITTER) {
             continue;
         }
 
@@ -78,7 +78,7 @@ void invariantsCheck(int beat)
         // DAM_DEAD (not hp<=0) to avoid the transient window between HP hitting
         // zero and death being finalized within the beat.
         if ((obj->data.critter.combat.results & DAM_DEAD) != 0
-            && !_critter_flag_check(obj->pid, CRITTER_FLAT)
+            && !critterFlagCheck(ProtoId(obj), CRITTER_FLAT)
             && (obj->flags & OBJECT_NO_BLOCK) == 0) {
             fail(beat, obj, "dead critter still blocks (no OBJECT_NO_BLOCK)");
         }

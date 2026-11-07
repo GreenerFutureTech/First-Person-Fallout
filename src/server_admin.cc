@@ -17,14 +17,14 @@
 #include "game_dialog.h" // gameDialogServerNodeActive — never autosave mid-node
 #include "map.h" // mapTransitionPending / mapGetLoadGeneration / gElevation
 #include "map_defs.h" // HEX_GRID_SIZE / hexGridTileIsValid — random stress placement
-#include "object.h" // objectCreateWithPid / objectSetLocation / objectDestroy / _obj_blocking_at
+#include "object.h" // object creation, placement, destruction, and blocking queries
 #include "object_delta.h" // objectDeltaForgetShadow — re-announce a hand-repaired object
 #include "art.h" // artLock/artGetFrameCount — the trunk frame-range repair
 #include "proto.h" // protoGetProto — validate a spawn pid before creating
 #include "proto_instance.h" // _objPMAttemptPlacement (see why fixcar does NOT use it)
 #include "tile.h" // tileDistanceBetween — bias stress spawns toward the players
-#include "party_member.h" // partyMemberFindByPid — the `fixcar` trunk check
-#include "proto_types.h" // PROTO_ID_CAR_TRUNK — the `fixcar` trunk check
+#include "party_member.h" // partyMemberFindByProtoId — the `fixcar` trunk check
+#include "proto_types.h" // typed prototype IDs for stress spawns and `fixcar`
 #include "worldmap.h" // wmMapIsSaveable — some maps forbid saving outright;
                       // wmCar*/wmArea* — the `fixcar` verb
 #include "game_movie.h" // MOVIE_COUNT / gameMoviePlay — the `movie` test verb
@@ -34,7 +34,7 @@
 #include "queue.h"
 #include "savegame.h"
 #include "scripts.h" // gameTimeAddTicks / gameTimeGetTime — the `timeskip` verb
-#include "inventory.h" // _invenWieldFunc / HAND_RIGHT — arm stress hostiles
+#include "inventory.h" // inventoryEquipFunc / HAND_RIGHT — arm stress hostiles
 #include "item.h" // itemAdd
 #include "path.h" // _make_path — stress spawns must be REACHABLE, not merely unblocked
 #include "server_players.h"
@@ -348,7 +348,7 @@ static constexpr int kStressDefaultPid = 0x010000EE;
 // Checks EVERY player actor, not just gDude: in co-op the party can be spread across the
 // map, and "reachable by anyone" is the useful bar. Dead and off-elevation actors are
 // skipped — pathing to a corpse or through a floor proves nothing.
-static bool stressTileReachesAnyPlayer(int tile, int elevation)
+static bool stressTileReachesAnyPlayer(int tile, MapElevation elevation)
 {
     for (int slot = 0; slot < playerActorCount(); slot++) {
         Object* actor = playerActorAt(slot);
@@ -374,7 +374,7 @@ static bool stressTileReachesAnyPlayer(int tile, int elevation)
 //   2. "not blocking" is not "reachable": a free tile can sit behind a wall or in a closed
 //      room, where the AI can never path to anyone.
 // The reachability test subsumes BOTH: an off-map or sealed tile cannot path to a player.
-static int stressRandomFreeTile(int elevation, std::mt19937& rng, int& rejected)
+static int stressRandomFreeTile(MapElevation elevation, std::mt19937& rng, int& rejected)
 {
     // Cheap tests first, path LAST: A* is the only expensive step here, and the distance
     // gate keeps the searches short by construction.
@@ -479,7 +479,7 @@ static void stressArmOne(Object* critter, std::mt19937& rng)
     const StressLoadout& loadout = *chosen;
 
     Object* weapon = nullptr;
-    if (objectCreateWithPid(&weapon, loadout.weaponPid) == -1 || weapon == nullptr) {
+    if (objectCreateWithProtoId(&weapon, ProtoId(loadout.weaponPid)) == -1 || weapon == nullptr) {
         fprintf(stderr, "f2_server: stress could not create weapon pid 0x%X\n", loadout.weaponPid);
         return;
     }
@@ -493,7 +493,7 @@ static void stressArmOne(Object* critter, std::mt19937& rng)
 
     if (loadout.ammoPid >= 0 && loadout.ammoCount > 0) {
         Object* ammo = nullptr;
-        if (objectCreateWithPid(&ammo, loadout.ammoPid) == 0 && ammo != nullptr) {
+        if (objectCreateWithProtoId(&ammo, ProtoId(loadout.ammoPid)) == 0 && ammo != nullptr) {
             _obj_disconnect(ammo, nullptr);
             if (itemAdd(critter, ammo, loadout.ammoCount) == -1) {
                 objectDestroy(ammo, nullptr);
@@ -503,7 +503,7 @@ static void stressArmOne(Object* critter, std::mt19937& rng)
 
     // Right hand, no draw animation: these are being placed, not acting, and there is no
     // reg_anim context here to run a take-out through.
-    int rc = _invenWieldFunc(critter, weapon, HAND_RIGHT, false);
+    int rc = inventoryEquipFunc(critter, weapon, HAND_RIGHT, false);
     // Say what each hostile got. A stress run is a diagnostic, so "which of them had the
     // launcher" is exactly the question you ask afterwards — and it is the only way to tell
     // OUR loadouts apart from the weapons the map's own critters already carry.
@@ -518,14 +518,14 @@ static void stressArmOne(Object* critter, std::mt19937& rng)
     }
 }
 
-// objectCreateWithPid + objectSetLocation IS the whole recipe (mirrors the
+// objectCreateWithProtoId + objectSetLocation IS the whole recipe (mirrors the
 // script engine's op_create_object_sid): the proto hands the critter its HP,
 // AP, team, AI packet and default script, and under the serve loop the create
 // path assigns a netId and announces the SPAWN to every viewer by itself.
-static Object* stressSpawnOne(int pid, int tile, int elevation)
+static Object* stressSpawnOne(int pid, int tile, MapElevation elevation)
 {
     Object* obj = nullptr;
-    if (objectCreateWithPid(&obj, pid) == -1 || obj == nullptr) {
+    if (objectCreateWithProtoId(&obj, ProtoId(pid)) == -1 || obj == nullptr) {
         return nullptr;
     }
 
@@ -749,7 +749,8 @@ bool serverAdminLine(const char* line,
 
         snprintf(msg, sizeof(msg), "movie: playing %d — the tick is parked until a viewer acks", movie);
         reply(msg);
-        gameMoviePlay(movie, GAME_MOVIE_FADE_IN | GAME_MOVIE_FADE_OUT | GAME_MOVIE_PAUSE_MUSIC);
+        gameMoviePlay(static_cast<GameMovie>(movie),
+            GameMovieFlags::FadeIn | GameMovieFlags::FadeOut | GameMovieFlags::PauseMusic);
         reply("movie: barrier released");
         return true;
     }
@@ -815,10 +816,10 @@ bool serverAdminLine(const char* line,
         bool doList = rest != nullptr && strncmp(rest, "list", 4) == 0;
         bool doPark = rest != nullptr && strncmp(rest, "park", 4) == 0;
 
-        int carArea = wmCarCurrentArea();
+        City carArea = static_cast<City>(wmCarCurrentArea());
         char carAreaName[80];
         carAreaName[0] = '\0';
-        if (carArea >= 0 && carArea < wmAreaCount()) {
+        if (cityIsValid(carArea)) {
             wmGetAreaIdxName(carArea, carAreaName);
         }
         bool gotCar = gameGetGlobalVar(GVAR_PLAYER_GOT_CAR) != 0;
@@ -828,7 +829,7 @@ bool serverAdminLine(const char* line,
             gameGetGlobalVar(GVAR_CAR_PLACED_TILE));
         reply(msg);
 
-        int partyArea = -1;
+        City partyArea = CITY_INVALID;
         char partyAreaName[80];
         partyAreaName[0] = '\0';
         if (wmGetPartyCurArea(&partyArea) != -1 && partyArea >= 0 && partyArea < wmAreaCount()) {
@@ -844,9 +845,10 @@ bool serverAdminLine(const char* line,
             for (int areaIdx = 0; areaIdx < wmAreaCount(); areaIdx++) {
                 char name[80];
                 name[0] = '\0';
-                wmGetAreaIdxName(areaIdx, name);
+                City area = static_cast<City>(areaIdx);
+                wmGetAreaIdxName(area, name);
                 snprintf(msg, sizeof(msg), "  %3d %s %-28s%s", areaIdx,
-                    wmAreaIsKnown(areaIdx) ? "K" : " ", name,
+                    wmAreaIsKnown(area) ? "K" : " ", name,
                     areaIdx == carArea ? " <==" : "");
                 reply(msg);
             }
@@ -861,16 +863,16 @@ bool serverAdminLine(const char* line,
         // (object.cc:2714), so the obvious call-and-free shape frees an uninitialised
         // pointer on any empty elevation. That is what coredumped the first cut.
         Object* car = nullptr;
-        for (int elev = 0; elev < ELEVATION_COUNT && car == nullptr; elev++) {
+        for (MapElevation elev = ELEVATION_FIRST; elev < ELEVATION_COUNT && car == nullptr; elev++) {
             for (Object* obj = objectFindFirstAtElevation(elev); obj != nullptr;
                  obj = objectFindNextAtElevation()) {
-                if (obj->pid == PROTO_ID_CAR) {
+                if (ProtoId(obj) == SceneryProtoTypeId::Car) {
                     car = obj;
                     break;
                 }
             }
         }
-        Object* trunk = partyMemberFindByPid(PROTO_ID_CAR_TRUNK);
+        Object* trunk = partyMemberFindByProtoId(ProtoId(ItemProtoTypeId::CarTrunk));
 
         if (car != nullptr) {
             snprintf(msg, sizeof(msg), "fixcar: car object at tile=%d elev=%d (%s) netId=%d fid=0x%x frame=%d",
@@ -928,11 +930,11 @@ bool serverAdminLine(const char* line,
                 reply(msg);
                 return true;
             }
-            wmCarSetCurrentArea(target);
+            wmCarSetCurrentArea(static_cast<City>(target));
             wmCarClearPlacedTile();
             char targetName[80];
             targetName[0] = '\0';
-            wmGetAreaIdxName(target, targetName);
+            wmGetAreaIdxName(static_cast<City>(target), targetName);
             snprintf(msg, sizeof(msg), "fixcar: parked at area %d (%s), placed-tile cleared. "
                                        "⚠ the town script re-places the car on next map entry",
                 target, targetName[0] != '\0' ? targetName : "unnamed");
@@ -971,7 +973,7 @@ bool serverAdminLine(const char* line,
         // an already-broken trunk back on a frame its art actually has.
         int trunkFrameCount = 1;
         CacheEntry* trunkArtHandle;
-        Art* trunkArt = artLock(trunk->fid, &trunkArtHandle);
+        Art* trunkArt = artLock(FrmId(trunk), &trunkArtHandle);
         if (trunkArt != nullptr) {
             trunkFrameCount = artGetFrameCount(trunkArt);
             artUnlock(trunkArtHandle);
@@ -995,7 +997,7 @@ bool serverAdminLine(const char* line,
             bool found = false;
             for (int ring = 1; ring <= 2 && !found; ring++) {
                 for (int dir = 0; dir < ROTATION_COUNT; dir++) {
-                    int candidate = tileGetTileInDirection(car->tile, dir, ring);
+                    int candidate = tileGetTileInDirection(car->tile, static_cast<Rotation>(dir), ring);
                     if (candidate >= 0 && wmEvalTileNumForPlacement(candidate)) {
                         placed = candidate;
                         found = true;
@@ -1004,7 +1006,7 @@ bool serverAdminLine(const char* line,
                 }
             }
         }
-        objectSetLocation(trunk, placed, destElev, nullptr);
+        objectSetLocation(trunk, placed, static_cast<MapElevation>(destElev), nullptr);
 
         // ►► RE-ANNOUNCE THE WHOLE OBJECT. The delta scan is a diff, so a hand repair
         // reaches only clients that already hold the object AND whose shadow disagrees.
@@ -1297,7 +1299,7 @@ bool serverAdminLine(const char* line,
             int rc = up ? sheetEditSkillUp(actor, value) : sheetEditSkillDown(actor, value);
             snprintf(msg, sizeof(msg), "%s: slot %d (%s) skill %d -> %s (value %d, %d points left)",
                 verb, slot, critterGetName(actor), value, sheetEditReason(rc),
-                skillIsValid(value) ? skillGetValue(actor, value) : -1,
+                skillIsValid(value) ? skillGetValue(actor, static_cast<Skill>(value)) : -1,
                 pcGetStat(PC_STAT_UNSPENT_SKILL_POINTS, actor));
             reply(msg);
             fprintf(stderr, "f2_server: admin %s slot=%d skill=%d rc=%d\n", verb, slot, value, rc);
@@ -1358,7 +1360,7 @@ bool serverAdminLine(const char* line,
             reply("rest: not in combat");
             return true;
         }
-        if (!_critter_can_obj_dude_rest()) {
+        if (!critterCanDudeRest()) {
             reply("rest: you cannot rest at this location (vanilla's own gate)");
             return true;
         }
@@ -1404,10 +1406,10 @@ bool serverAdminLine(const char* line,
             if (actor == nullptr) {
                 continue;
             }
-            int tagged[NUM_TAGGED_SKILLS];
+            Skill tagged[NUM_TAGGED_SKILLS];
             skillsGetTagged(tagged, NUM_TAGGED_SKILLS, actor);
-            int trait1;
-            int trait2;
+            Trait trait1;
+            Trait trait2;
             traitsGetSelected(&trait1, &trait2, actor);
             snprintf(msg, sizeof(msg),
                 "sheet %d (%s): level %d, xp %d, unspent %d, owed perk %s (x%d), tags %d/%d/%d/%d, traits %d/%d",
@@ -1440,11 +1442,12 @@ bool serverAdminLine(const char* line,
             reply("party: no world loaded");
             return true;
         }
-        int skill = rest != nullptr && rest[0] != '\0' ? atoi(rest) : SKILL_BARTER;
-        if (!skillIsValid(skill)) {
+        int skillId = rest != nullptr && rest[0] != '\0' ? atoi(rest) : SKILL_BARTER;
+        if (!skillIsValid(skillId)) {
             reply("party: that is not a skill id");
             return true;
         }
+        Skill skill = static_cast<Skill>(skillId);
         // BOTH numbers, because the difference is load-bearing: script-count is what a
         // script may refuse you on (companions only, deliberately — players must never
         // be counted into a "leave your friends outside" gate), group-size is how many
@@ -1509,7 +1512,7 @@ bool serverAdminLine(const char* line,
         int wantTile = tileText[0] != '\0' ? atoi(tileText) : -1;
 
         Proto* proto;
-        if (PID_TYPE(pid) != OBJ_TYPE_CRITTER || protoGetProto(pid, &proto) == -1) {
+        if (ProtoId(pid).objectType() != OBJ_TYPE_CRITTER || protoGetProto(ProtoId(pid), &proto) == -1) {
             reply("spawn: want a valid critter pid (0x01000000 + critters.lst index)");
             return true;
         }
@@ -1567,7 +1570,7 @@ bool serverAdminLine(const char* line,
             : std::random_device {}();
 
         Proto* proto;
-        if (PID_TYPE(pid) != OBJ_TYPE_CRITTER || protoGetProto(pid, &proto) == -1) {
+        if (ProtoId(pid).objectType() != OBJ_TYPE_CRITTER || protoGetProto(ProtoId(pid), &proto) == -1) {
             reply("stress: bad pid");
             return true;
         }
@@ -1629,7 +1632,7 @@ bool serverAdminLine(const char* line,
                 skipped++;
                 continue;
             }
-            if (PID_TYPE(record.obj->pid) == OBJ_TYPE_CRITTER) {
+            if (ProtoId(record.obj).objectType() == OBJ_TYPE_CRITTER) {
                 _combat_delete_critter(record.obj);
             }
             reg_anim_clear(record.obj);

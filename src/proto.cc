@@ -2228,10 +2228,10 @@ int protoGetProto(const ProtoId& protoId, Proto** protoPtr)
         // assert here would be a comment. Same reason it is not debugPrint —
         // that too compiles to nothing without a registered proc. The
         // serverStubAbort idiom is what stays audible.
-        if (sheet->protoId.pid() != protoId.pid()) {
+        if (sheet->pid != protoId.pid()) {
             fprintf(stderr, "FATAL — player-actor sheet row for protoId.pid() 0x%X holds protoId.pid() 0x%X "
                             "(row unseeded, or the slot dispatch is off by one).\n",
-                protoId.pid(), sheet->protoId.pid());
+                protoId.pid(), sheet->pid);
             abort();
         }
 
@@ -2392,26 +2392,27 @@ void protoPlayerActorsUpdateLook()
         }
 
         Proto* proto;
-        if (protoGetProto(actor->pid, &proto) == -1) {
+        if (protoGetProto(ProtoId(actor), &proto) == -1) {
             continue;
         }
 
         int gender = critterGetStat(actor, STAT_GENDER) == GENDER_MALE ? GENDER_MALE : GENDER_FEMALE;
-        int frmId = _art_vault_person_nums[nativeLook][gender];
+        CritterFrameId frmId = _art_vault_person_nums[nativeLook][gender];
 
         if (critterGetArmor(actor) == nullptr) {
             int weaponCode = 0;
             if (critterGetItem2(actor) != nullptr || critterGetItem1(actor) != nullptr) {
-                weaponCode = (actor->fid & 0xF000) >> 12;
+                weaponCode = static_cast<int>(FrmId(actor).weaponAnimation());
             }
-            objectSetFid(actor, buildFid(OBJ_TYPE_CRITTER, frmId, 0, weaponCode, 0), nullptr);
+            FrmId actorFrmId(frmId, ANIM_STAND, static_cast<WeaponAnimation>(weaponCode), ROTATION_NE);
+            objectSetFrmId(actor, actorFrmId, nullptr);
             // frame-index-render-gotcha: objectSetFid does NOT reset obj->frame; a
             // tribal->jumpsuit swap can leave frame >= the new art's frame count,
             // which renders NOTHING (the "invisible after equip/load" symptom).
             objectSetFrame(actor, 0, nullptr);
         }
 
-        proto->fid = buildFid(OBJ_TYPE_CRITTER, frmId, 0, 0, 0);
+        proto->fid = FrmId(frmId, ANIM_STAND, WeaponAnimation::None, ROTATION_NE).fid();
     }
 }
 

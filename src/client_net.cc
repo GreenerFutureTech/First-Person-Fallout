@@ -1124,7 +1124,7 @@ private:
     {
         if (item == nullptr || pid < 0 || item->pid == pid) return;
         Proto* proto;
-        if (protoGetProto(pid, &proto) == -1) return;
+        if (protoGetProto(ProtoId(pid), &proto) == -1) return;
         item->pid = pid;
         item->fid = proto->fid;
     }
@@ -1443,7 +1443,7 @@ private:
         gInventoryLeftHandItem = nullptr;
         gInventoryRightHandItem = nullptr;
         gInventoryArmor = nullptr;
-        _inven_reset_dude();
+        inventoryResetDude();
 
         // The HUD bar reads gDude LIVE, so its source was always right — but only
         // whoever CALLS it redraws it, and the only caller is the dude-inventory
@@ -1453,7 +1453,7 @@ private:
         // makes it correct, not a later coincidence. All three self-guard on
         // gInterfaceBarWindow == -1, so this is a safe no-op before the bar exists
         // (rebinds can land during a blob apply, ahead of interface init).
-        int leftAction, rightAction;
+        InterfaceItemAction leftAction, rightAction;
         interfaceGetItemActions(&leftAction, &rightAction);
         interfaceUpdateItems(false, leftAction, rightAction);
         interfaceRenderHitPoints(false);
@@ -1867,7 +1867,7 @@ private:
         unsigned int flags = (unsigned int)r.i32(); // birth flags (encoder appends)
         if (netId == 0) return; // NO_SAVE transient — not addressable (§C, C2)
         Object* obj = nullptr;
-        if (objectCreateWithFidPid(&obj, fid, pid) == -1 || obj == nullptr) return;
+        if (objectCreateWithFrmIdProtoId(&obj, FrmId(fid), ProtoId(pid)) == -1 || obj == nullptr) return;
         // Reject a spawn whose pid does not resolve to a proto. objectCreateWithFidPid
         // returns success and stores the bad pid anyway, which would arm every
         // unchecked protoGetProto(obj->pid)-> deref downstream (the item.cc getters).
@@ -1875,12 +1875,12 @@ private:
         // genuinely corrupt/unknown wire pid — and it is a cheap lookup hit here since
         // objectCreateWithFidPid just resolved the same pid.
         Proto* spawnProto = nullptr;
-        if (protoGetProto(pid, &spawnProto) == -1 || spawnProto == nullptr) {
+        if (protoGetProto(ProtoId(pid), &spawnProto) == -1 || spawnProto == nullptr) {
             objectDestroy(obj, nullptr);
             debugPrint("client_net: SPAWN rejected — pid 0x%X does not resolve\n", pid);
             return;
         }
-        objectSetLocation(obj, tile, elev, nullptr);
+        objectSetLocation(obj, tile, static_cast<MapElevation>(elev), nullptr);
         // Birth flags, minus the server's lifetime classification: a viewer-side
         // spawn must die with the world like every other blob-loaded object.
         objectApplyWireFlags(obj, flags);
@@ -1935,7 +1935,7 @@ private:
             // vanishes, because the viewer keeps rendering the old floor. Keyed on
             // gDude, which on the viewer is the per-client ROLE, not the host.
             if (clientViewerActive() && obj == gDude && toElev != gElevation) {
-                mapSetElevation(toElev);
+                mapSetElevation(static_cast<MapElevation>(toElev));
                 tileSetCenter(toTile, TILE_SET_CENTER_REFRESH_WINDOW);
             }
             // ►► MY actor TELEPORTED on the same floor → follow it too. In single-player
@@ -1961,7 +1961,7 @@ private:
             // State first, always (authoritative, never lags the wire); the
             // presentation layer then decides whether the RENDERING glides
             // (durMs>0 hop) or stays snapped. No-op unless the viewer enabled it.
-            objectSetLocation(obj, toTile, toElev, nullptr);
+            objectSetLocation(obj, toTile, static_cast<MapElevation>(toElev), nullptr);
             // In-combat glide sequencing (§3.d): an in-combat stepped hop (durMs>0)
             // is HELD and released in wire order by the presentation pump, so a
             // not-yet-presented turn's approach cannot glide over the current turn.
@@ -2090,10 +2090,10 @@ private:
             // ITEMS ONLY, deliberately: this event is the item<->world lifecycle signal
             // (object.cc _obj_connect). A missing critter/scenery binding is a different
             // (and worse) bug — inventing a body would hide it, so trace and drop.
-            if (netId > 0 && PID_TYPE(pid) == OBJ_TYPE_ITEM) {
+            if (netId > 0 && ProtoId(pid).objectType() == OBJ_TYPE_ITEM) {
                 Object* healed = nullptr;
-                if (objectCreateWithPid(&healed, pid) == 0 && healed != nullptr) {
-                    objectSetLocation(healed, tile, elev, nullptr);
+                if (objectCreateWithProtoId(&healed, ProtoId(pid)) == 0 && healed != nullptr) {
+                    objectSetLocation(healed, tile, static_cast<MapElevation>(elev), nullptr);
                     healed->netId = netId;
                     _net[netId] = healed;
                     // Async wire repaint: nothing else redraws this frame, so an item
@@ -2101,7 +2101,7 @@ private:
                     // repaint ([[viewer-netid-map-indexes-inventories]]).
                     Rect rect;
                     objectGetRect(healed, &rect);
-                    tileWindowRefreshRect(&rect, elev);
+                    tileWindowRefreshRect(&rect, static_cast<MapElevation>(elev));
                     debugPrint("client_net: CONNECT healed unknown netId=%d pid=0x%X tile=%d\n",
                         netId, pid, tile);
                 } else {
@@ -2151,8 +2151,8 @@ private:
             // until some unrelated event forced a redraw — indistinguishable from "my drop
             // did nothing".
             Rect rect;
-            if (_obj_connect(obj, tile, elev, &rect) == 0) {
-                tileWindowRefreshRect(&rect, elev);
+            if (_obj_connect(obj, tile, static_cast<MapElevation>(elev), &rect) == 0) {
+                tileWindowRefreshRect(&rect, static_cast<MapElevation>(elev));
             }
         }
     }
@@ -2223,7 +2223,7 @@ private:
                 Rect rect;
                 int elevation = obj->elevation;
                 _obj_disconnect(obj, &rect);
-                tileWindowRefreshRect(&rect, elevation);
+                tileWindowRefreshRect(&rect, static_cast<MapElevation>(elevation));
             }
         }
     }
@@ -2343,7 +2343,7 @@ private:
                 // the critter toward each step, so this delta carries the end facing. A
                 // non-gliding rotation (facing without moving) applies immediately.
                 if (!(clientViewerActive() && clientAnimDeferRotation(obj, rot))) {
-                    objectSetRotation(obj, rot, nullptr);
+                    objectSetRotation(obj, static_cast<Rotation>(rot), nullptr);
                 }
             }
         }
@@ -2365,7 +2365,7 @@ private:
         // holds them, and objectSetFrame validates frame < art frameCount (fails safe vs
         // the frame-index-render gotcha). A critter's frame stays owned by its own local
         // animation (the fid/pose path above), so it is deliberately not forced here.
-        if (hasFrame && PID_TYPE(obj->pid) != OBJ_TYPE_CRITTER && obj->frame != frame) {
+        if (hasFrame && ProtoId(obj).objectType() != OBJ_TYPE_CRITTER && obj->frame != frame) {
             Rect rect;
             if (objectSetFrame(obj, frame, &rect) == 0) {
                 tileWindowRefreshRect(&rect, obj->elevation);
@@ -2406,8 +2406,8 @@ private:
         // delta: the later window opens empty, while Take All still succeeds because
         // the server inventory was correct. Removal remains lifetime-safe below by
         // unlinking now and deferring the actual free while combat replay is busy.
-        bool plainContainer = obj != gDude && PID_TYPE(obj->pid) != OBJ_TYPE_CRITTER;
-        bool deadCritter = obj != gDude && PID_TYPE(obj->pid) == OBJ_TYPE_CRITTER
+        bool plainContainer = obj != gDude && ProtoId(obj).objectType() != OBJ_TYPE_CRITTER;
+        bool deadCritter = obj != gDude && ProtoId(obj).objectType() == OBJ_TYPE_CRITTER
             && (critterIsDead(obj)
                 || (hasResults && (results & DAM_DEAD) != 0)
                 || (hasHp && hp <= 0));
@@ -2453,7 +2453,7 @@ private:
                     applyWireItemAmmo(inv->items[m].item, wi.ammoQuantity, wi.ammoTypePid);
                 } else {
                     Object* item = nullptr;
-                    if (objectCreateWithPid(&item, wi.pid) == 0 && item != nullptr) {
+                    if (objectCreateWithProtoId(&item, ProtoId(wi.pid)) == 0 && item != nullptr) {
                         _obj_disconnect(item, nullptr); // inventory-only, not in the world
                         applyWireItemAmmo(item, wi.ammoQuantity, wi.ammoTypePid);
                         itemAdd(obj, item, qty);
@@ -2516,7 +2516,7 @@ private:
                 // just scalar writes on items the mirror already holds.)
                 for (int i = 0; i < inv->length; i++) {
                     if (inv->items[i].item != nullptr && inv->items[i].item->pid == wi.pid) {
-                        if (equip != 0) inv->items[i].item->flags |= equip;
+                        if (equip != 0) inv->items[i].item->flags |= static_cast<ObjectFlags>(equip);
                         applyWireItemAmmo(inv->items[i].item, wi.ammoQuantity, wi.ammoTypePid);
                         break;
                     }
@@ -2587,7 +2587,7 @@ private:
                 if (m >= 0) {
                     claimed[m] = 1;
                     inv->items[m].quantity = qty;
-                    inv->items[m].item->flags |= equip;
+                    inv->items[m].item->flags |= static_cast<ObjectFlags>(equip);
                     // A netId match can still be a DIFFERENT kind of thing now (an
                     // explosive that was armed) — see applyWireItemPid.
                     applyWireItemPid(inv->items[m].item, wi.pid);
@@ -2598,9 +2598,9 @@ private:
                     adoptItemNetId(inv->items[m].item, wi.netId);
                 } else {
                     Object* item = nullptr;
-                    if (objectCreateWithPid(&item, wi.pid) == 0 && item != nullptr) {
+                    if (objectCreateWithProtoId(&item, ProtoId(wi.pid)) == 0 && item != nullptr) {
                         _obj_disconnect(item, nullptr); // inventory-only, not in the world
-                        item->flags |= equip;
+                        item->flags |= static_cast<ObjectFlags>(equip);
                         applyWireItemAmmo(item, wi.ammoQuantity, wi.ammoTypePid);
                         adoptItemNetId(item, wi.netId);
                         itemAdd(obj, item, qty);
@@ -2663,7 +2663,7 @@ private:
             // preserving the current attack-mode cycle position. Do NOT touch gDude->fid —
             // the character sprite is server-authoritative (a local equip anim is Slice 3,
             // server-driven).
-            int leftAction, rightAction;
+            InterfaceItemAction leftAction, rightAction;
             interfaceGetItemActions(&leftAction, &rightAction);
             interfaceUpdateItems(false, leftAction, rightAction);
             if (getenv("F2_TRACE_EVENTS") != nullptr) {
@@ -2712,8 +2712,8 @@ private:
             // 0->1 edge of DAM_DEAD only, so this runs once per death rather than on
             // every subsequent results delta for an already-dead body.
             bool wasDead = (obj->data.critter.combat.results & DAM_DEAD) != 0;
-            bool nowDead = (results & DAM_DEAD) != 0;
-            obj->data.critter.combat.results = results;
+            bool nowDead = (static_cast<Dam>(results) & DAM_DEAD) != 0;
+            obj->data.critter.combat.results = static_cast<Dam>(results);
             if (nowDead && !wasDead && clientViewerActive()) {
                 presEndGlideFor(obj);
             }
@@ -2909,8 +2909,8 @@ private:
         _presQueue.clear();
         _pendingDudeTick = 0;
         _dudeApDeferring = false;
-        gCombatState &= ~(COMBAT_STATE_0x01 | COMBAT_STATE_0x02);
-        gCombatState |= COMBAT_STATE_0x02;
+        gCombatState &= ~(COMBAT_STATE_IN_COMBAT | COMBAT_STATE_PLAYER_TURN);
+        gCombatState |= COMBAT_STATE_PLAYER_TURN;
         interfaceBarEndButtonsHide(false);
         interfaceRenderActionPoints(0, 0);
         interfaceBarRefresh();
@@ -2977,16 +2977,16 @@ private:
                 if (obj == nullptr) {
                     continue;
                 }
-                objectSetLocation(obj, pos.tile, pos.elevation, nullptr);
-                objectSetRotation(obj, pos.rotation, nullptr);
+                objectSetLocation(obj, pos.tile, static_cast<MapElevation>(pos.elevation), nullptr);
+                objectSetRotation(obj, static_cast<Rotation>(pos.rotation), nullptr);
                 if (obj == gDude && pos.elevation != gElevation) {
-                    mapSetElevation(pos.elevation);
+                    mapSetElevation(static_cast<MapElevation>(pos.elevation));
                     tileSetCenter(pos.tile, TILE_SET_CENTER_REFRESH_WINDOW);
                 }
             }
             // 0x01 = in combat; 0x02 (free to act) stays clear until our TURN_START.
-            gCombatState |= COMBAT_STATE_0x01;
-            gCombatState &= ~COMBAT_STATE_0x02;
+            gCombatState |= COMBAT_STATE_IN_COMBAT;
+            gCombatState &= ~COMBAT_STATE_PLAYER_TURN;
             // Cursor is owned entirely by the frame loop's combat-busy latch — do NOT
             // set the watch cursor here. A player-initiated fight (cstart) opens on the
             // DUDE's own turn, so combatBusy is false from the first frame; a watch set
@@ -3016,8 +3016,8 @@ private:
         setInCombat(false);
         _myTurn = false;
         if (clientViewerActive()) {
-            gCombatState &= ~(COMBAT_STATE_0x01 | COMBAT_STATE_0x02);
-            gCombatState |= COMBAT_STATE_0x02;
+            gCombatState &= ~(COMBAT_STATE_IN_COMBAT | COMBAT_STATE_PLAYER_TURN);
+            gCombatState |= COMBAT_STATE_PLAYER_TURN;
         }
         if (clientViewerActive()) {
             if (!wasInCombat) {
@@ -3045,8 +3045,8 @@ private:
         setInCombat(false);
         _myTurn = false;
         // Vanilla resting state (mirror of _combat_over): 0x01 clear, 0x02 set.
-        gCombatState &= ~(COMBAT_STATE_0x01 | COMBAT_STATE_0x02);
-        gCombatState |= COMBAT_STATE_0x02;
+        gCombatState &= ~(COMBAT_STATE_IN_COMBAT | COMBAT_STATE_PLAYER_TURN);
+        gCombatState |= COMBAT_STATE_PLAYER_TURN;
         // Doors slide shut over the buttons (vanilla), THEN the AP bar goes unlit —
         // not red (red is the in-combat not-your-turn state, §3.a).
         interfaceBarEndButtonsHide(true);
@@ -3103,10 +3103,10 @@ private:
         // Keyed on netId, never isPlayer alone (another player's turn is isPlayer
         // too — [[mp-actor-architecture-principle]] UI-driving corollary).
         _myTurn = isPlayer != 0 && gDude != nullptr && netId == gDude->netId;
-        gCombatState |= COMBAT_STATE_0x01;
+        gCombatState |= COMBAT_STATE_IN_COMBAT;
         interfaceBarEndButtonsShow(true); // idempotent: animates only the first reveal
         if (_myTurn) {
-            gCombatState |= COMBAT_STATE_0x02; // free to act
+            gCombatState |= COMBAT_STATE_PLAYER_TURN; // free to act
             // Mirror the bonus-move budget into the real engine global (§3.0) so the
             // AP dots draw the green bonus-move dots and game_mouse's in-combat path
             // preview reads the right move budget. Derived state only — the viewer
@@ -3124,7 +3124,7 @@ private:
             interfaceRenderActionPoints(ap, freeMove);
             interfaceBarEndButtonsRenderGreenLights();
         } else {
-            gCombatState &= ~COMBAT_STATE_0x02; // another actor's turn
+            gCombatState &= ~COMBAT_STATE_PLAYER_TURN; // another actor's turn
             interfaceRenderActionPoints(-1, -1); // all dots red — not your turn
             interfaceBarEndButtonsRenderRedLights();
         }
@@ -3279,7 +3279,7 @@ private:
             switch (op) {
             case PRES_OP_SEQ_BEGIN: {
                 int flags = r.i32();
-                if (execute) reg_anim_begin(flags);
+                if (execute) reg_anim_begin(static_cast<AnimationRequestOptions>(flags));
                 break;
             }
             case PRES_OP_SEQ_END:
@@ -3301,12 +3301,12 @@ private:
                 (void)flags; // transients are always born hidden+NO_SAVE below
                 auto spawnTransient = [&]() -> Object* {
                     Object* obj = nullptr;
-                    if (objectCreateWithFidPid(&obj, fid, -1) == 0 && obj != nullptr) {
+                    if (objectCreateWithFrmIdProtoId(&obj, FrmId(fid), ProtoId::Empty()) == 0 && obj != nullptr) {
                         _seqTransients++;
                         objectHide(obj, nullptr); // born hidden — the ANIMATE/MOVE ops reveal it
-                        obj->flags |= OBJECT_NO_SAVE;
-                        objectSetLocation(obj, tile, elev, nullptr);
-                        objectSetRotation(obj, rotation, nullptr);
+                        obj->flags = obj->flags | OBJECT_NO_SAVE;
+                        objectSetLocation(obj, tile, static_cast<MapElevation>(elev), nullptr);
+                        objectSetRotation(obj, static_cast<Rotation>(rotation), nullptr);
                     }
                     return obj;
                 };
@@ -3391,10 +3391,10 @@ private:
                 if (execute) {
                     Object* o = resolveSeqRef(ref, handles);
                     if (o != nullptr) {
-                        if (op == PRES_OP_ANIMATE) animationRegisterAnimate(o, anim, delay);
-                        else if (op == PRES_OP_ANIMATE_REV) animationRegisterAnimateReversed(o, anim, delay);
-                        else if (op == PRES_OP_ANIMATE_FOREVER) animationRegisterAnimateForever(o, anim, delay);
-                        else animationRegisterAnimateAndHide(o, anim, delay);
+                        if (op == PRES_OP_ANIMATE) animationRegisterAnimate(o, static_cast<AnimationType>(anim), delay);
+                        else if (op == PRES_OP_ANIMATE_REV) animationRegisterAnimateReversed(o, static_cast<AnimationType>(anim), delay);
+                        else if (op == PRES_OP_ANIMATE_FOREVER) animationRegisterAnimateForever(o, static_cast<AnimationType>(anim), delay);
+                        else animationRegisterAnimateAndHide(o, static_cast<AnimationType>(anim), delay);
                     }
                 } else {
                     reserveSeqRef(ref);
@@ -3409,7 +3409,7 @@ private:
             }
             case PRES_OP_SET_FID: {
                 int ref = r.i32(); int fid = r.i32(); int delay = r.i32();
-                if (execute) { Object* o = resolveSeqRef(ref, handles); if (o) animationRegisterSetFid(o, fid, delay); }
+                if (execute) { Object* o = resolveSeqRef(ref, handles); if (o) animationRegisterSetFrmId(o, FrmId(fid), delay); }
                 else reserveSeqRef(ref);
                 break;
             }
@@ -3421,19 +3421,19 @@ private:
             }
             case PRES_OP_UNSET_FLAG: {
                 int ref = r.i32(); int flag = r.i32(); int delay = r.i32();
-                if (execute) { Object* o = resolveSeqRef(ref, handles); if (o) animationRegisterUnsetFlag(o, flag, delay); }
+                if (execute) { Object* o = resolveSeqRef(ref, handles); if (o) animationRegisterUnsetFlag(o, static_cast<ObjectFlags>(flag), delay); }
                 else reserveSeqRef(ref);
                 break;
             }
             case PRES_OP_MOVE_STRAIGHT: {
                 int ref = r.i32(); int tile = r.i32(); int elev = r.i32(); int anim = r.i32(); int delay = r.i32();
-                if (execute) { Object* o = resolveSeqRef(ref, handles); if (o) animationRegisterMoveToTileStraight(o, tile, elev, anim, delay); }
+                if (execute) { Object* o = resolveSeqRef(ref, handles); if (o) animationRegisterMoveToTileStraight(o, tile, static_cast<MapElevation>(elev), static_cast<AnimationType>(anim), delay); }
                 else reserveSeqRef(ref);
                 break;
             }
             case PRES_OP_MOVE_STRAIGHT_WAIT: {
                 int ref = r.i32(); int tile = r.i32(); int elev = r.i32(); int anim = r.i32(); int delay = r.i32();
-                if (execute) { Object* o = resolveSeqRef(ref, handles); if (o) animationRegisterMoveToTileStraightAndWaitForComplete(o, tile, elev, anim, delay); }
+                if (execute) { Object* o = resolveSeqRef(ref, handles); if (o) animationRegisterMoveToTileStraightAndWaitForComplete(o, tile, static_cast<MapElevation>(elev), static_cast<AnimationType>(anim), delay); }
                 else reserveSeqRef(ref);
                 break;
             }
@@ -3452,7 +3452,7 @@ private:
                         // Fuel the replayed walk with the server's PRE-walk AP: the real engine
                         // charges AP per step (animation.cc:2117) and the mover's LOCAL AP is
                         // stale/drained, so without this the walk dies after ~1 tile and snaps.
-                        if (preWalkAp >= 0 && FID_TYPE(o->fid) == OBJ_TYPE_CRITTER) {
+                        if (preWalkAp >= 0 && FrmId(o).objectType() == OBJ_TYPE_CRITTER) {
                             o->data.critter.combat.ap = preWalkAp;
                         }
                         // Walk to the tile the server's walk ACTUALLY reached (the held
@@ -3479,8 +3479,8 @@ private:
                         // heldTile is logged for the same reason: heldTile=-1 means walkTile is
                         // the recorded INTENT dest, so a dist far above ap is the other cause.
                         int walkRc = (anim == ANIM_RUNNING)
-                            ? animationRegisterRunToTile(o, walkTile, elev, ap, delay)
-                            : animationRegisterMoveToTile(o, walkTile, elev, ap, delay);
+                            ? animationRegisterRunToTile(o, walkTile, static_cast<MapElevation>(elev), ap, delay)
+                            : animationRegisterMoveToTile(o, walkTile, static_cast<MapElevation>(elev), ap, delay);
                         if (getenv("F2_TRACE_EVENTS") != nullptr) {
                             fprintf(stderr, "[cmove-play] net=%d curTile=%d destTile=%d walkTile=%d dist=%d anim=%d ap=%d preAp=%d heldTile=%d rc=%d\n",
                                 o->netId, o->tile, tile, walkTile, tileDistanceBetween(o->tile, walkTile), anim, ap, preWalkAp, heldTile, walkRc);
@@ -3500,7 +3500,7 @@ private:
                 if (execute) {
                     Object* o = resolveSeqRef(ref, handles);
                     Object* target = resolveSeqRef(targetRef, handles);
-                    if (o && preWalkAp >= 0 && FID_TYPE(o->fid) == OBJ_TYPE_CRITTER) {
+                    if (o && preWalkAp >= 0 && FrmId(o).objectType() == OBJ_TYPE_CRITTER) {
                         o->data.critter.combat.ap = preWalkAp;
                     }
                     // Prefer the held authoritative END tile (where the server's walk stopped
@@ -3550,7 +3550,7 @@ private:
                             o ? o->netId : -1, code, o ? o->fid : 0, o != nullptr ? 1 : 0);
                     }
                     if (o) {
-                        animationRegisterTakeOutWeapon(o, code, delay);
+                        animationRegisterTakeOutWeapon(o, static_cast<WeaponAnimation>(code), delay);
                         // Mark the drawing critter Active so (1) the pump HOLDS the following
                         // attack until the draw finishes (else the attack's reg_anim cancels
                         // the take-out mid-draw → the wield is never seen), and (2) the held
@@ -3566,7 +3566,7 @@ private:
             }
             case PRES_OP_PING: {
                 int flags = r.i32(); int delay = r.i32();
-                if (execute) animationRegisterPing(flags, delay);
+                if (execute) animationRegisterPing(static_cast<AnimationRequestOptions>(flags), delay);
                 break;
             }
             case PRES_OP_CALL: {
@@ -3671,7 +3671,7 @@ private:
         Attack attack;
         memset(&attack, 0, sizeof(attack));
         attack.attacker = attacker;
-        attack.hitMode = pa.hitMode;
+        attack.hitMode = static_cast<HitMode>(pa.hitMode);
         // Weapon comes from the mirrored inventory by hit mode. This is authoritative
         // because onObjectDelta applies OBJECT_DELTA_INVENTORY — an AI critter that
         // equips/switches its weapon mid-fight updates the mirror, so a ranged NPC
@@ -3684,7 +3684,7 @@ private:
         // lazily recreate it in the mirror (CREATE-ONLY, never free — so the in-flight-
         // replay double-free hazard the equip-flags path avoids stays untouched) and
         // seat it in the firing hand so _action_attack's inventory re-resolve finds it.
-        Object* weapon = critterGetWeaponForHitMode(attacker, pa.hitMode);
+        Object* weapon = critterGetWeaponForHitMode(attacker, static_cast<HitMode>(pa.hitMode));
         if (pa.weaponPid < 0) {
             weapon = nullptr; // authoritative unarmed
         } else if (weapon == nullptr || weapon->pid != pa.weaponPid) {
@@ -3716,7 +3716,7 @@ private:
             // Not in the mirror at all → recreate it (the gDude-reconcile idiom).
             if (found == nullptr && handFlag != 0) {
                 Object* item = nullptr;
-                if (objectCreateWithPid(&item, pa.weaponPid) == 0 && item != nullptr) {
+                if (objectCreateWithProtoId(&item, ProtoId(pa.weaponPid)) == 0 && item != nullptr) {
                     _obj_disconnect(item, nullptr); // inventory-only, not in the world
                     itemAdd(attacker, item, 1);
                     if (pa.weaponNetId != 0) {
@@ -3732,21 +3732,21 @@ private:
                 for (int i = 0; i < attacker->data.inventory.length; i++) {
                     Object* it = attacker->data.inventory.items[i].item;
                     if (it != nullptr && it != found) {
-                        it->flags &= ~handFlag;
+                        it->flags &= ~static_cast<ObjectFlags>(handFlag);
                     }
                 }
-                found->flags = (found->flags & ~OBJECT_IN_ANY_HAND) | handFlag;
+                found->flags = (found->flags & ~OBJECT_IN_ANY_HAND) | static_cast<ObjectFlags>(handFlag);
                 weapon = found;
             }
         }
         attack.weapon = weapon;
-        attack.attackerDamage = pa.attackerDamage;
-        attack.attackerFlags = pa.attackerFlags;
+        attack.attackerDamage = static_cast<Dam>(pa.attackerDamage);
+        attack.attackerFlags = static_cast<Dam>(pa.attackerFlags);
         attack.defender = defender;
         attack.tile = defender->tile;
-        attack.defenderHitLocation = pa.defenderHitLocation;
-        attack.defenderDamage = pa.defenderDamage;
-        attack.defenderFlags = pa.defenderFlags;
+        attack.defenderHitLocation = static_cast<HitLocation>(pa.defenderHitLocation);
+        attack.defenderDamage = static_cast<Dam>(pa.defenderDamage);
+        attack.defenderFlags = static_cast<Dam>(pa.defenderFlags);
         // Compact out unmapped extras (a null Object* would crash _show_damage_extras,
         // which dereferences obj->fid). Keep damage/flags aligned to survivors.
         attack.extrasLength = 0;
@@ -3757,8 +3757,8 @@ private:
             }
             int j = attack.extrasLength;
             attack.extras[j] = extra;
-            attack.extrasDamage[j] = pa.extraDamage[i];
-            attack.extrasFlags[j] = pa.extraFlags[i];
+            attack.extrasDamage[j] = static_cast<Dam>(pa.extraDamage[i]);
+            attack.extrasFlags[j] = static_cast<Dam>(pa.extraFlags[i]);
             attack.extrasLength = j + 1;
         }
 
@@ -3770,7 +3770,7 @@ private:
                 pa.attackerNetId, pa.hitMode,
                 attack.weapon != nullptr ? attack.weapon->pid : -1,
                 attack.weapon != nullptr ? attack.weapon->fid : 0,
-                weaponGetAnimationForHitMode(attack.weapon, pa.hitMode));
+                weaponGetAnimationForHitMode(attack.weapon, static_cast<HitMode>(pa.hitMode)));
         }
         clientCombatAnimPlay(&attack);
 
@@ -3986,7 +3986,7 @@ private:
         // Marking seen locally too keeps the viewer's own ledger honest for anything
         // client-side that reads it; the server's copy is the authority and the one
         // that reaches the save.
-        gameMoviePlay(movie, flags);
+        gameMoviePlay(static_cast<GameMovie>(movie), static_cast<GameMovieFlags>(flags));
 
         // Release the room. FIRST ACK WINS by design (game_movie.h): whoever gets
         // here first — finished or skipped — ends it for everybody.
@@ -4166,8 +4166,9 @@ private:
         int count = (int)r.u16();
         bool changed = false;
         for (int i = 0; i < count; i++) {
-            if (r.u8() != 0 && !gameMovieIsSeen(i)) {
-                gameMovieMarkSeen(i); // bounds-guarded; monotonic (seen never clears)
+            GameMovie gameMovie = static_cast<GameMovie>(i);
+            if (r.u8() != 0 && !gameMovieIsSeen(gameMovie)) {
+                gameMovieMarkSeen(gameMovie); // bounds-guarded; monotonic (seen never clears)
                 changed = true;
             }
         }
@@ -4197,7 +4198,7 @@ private:
         if (name == _musicTrack) return;
         _musicTrack = name;
 
-        _gsound_background_play_level_music(name.c_str(), fadeIn);
+        _gsound_background_play_level_music(name.c_str(), static_cast<GameSoundReadLimitMode>(fadeIn));
     }
 
     void onMusicStop(Reader& r)
@@ -4447,9 +4448,9 @@ private:
         wmGenData.isWalking = walking;
         wmGenData.walkDistance = walkDist;
         wmGenData.carFuel = r.i32();
-        wmGenData.currentAreaId = r.i32();
+        wmGenData.currentAreaId = static_cast<City>(r.i32());
         wmGenData.isInCar = r.u8() != 0;
-        int visitedState = r.i32();
+        VisitedState visitedState = static_cast<VisitedState>(r.i32());
         unsigned int entranceMask = (unsigned int)r.i32();
         if (r.overflow()) return;
 
@@ -4466,7 +4467,9 @@ private:
                 count = 32;
             }
             for (int index = 0; index < count; index++) {
-                city->entrances[index].state = (entranceMask & (1u << index)) != 0 ? 1 : 0;
+                city->entrances[index].state = (entranceMask & (1u << index)) != 0
+                    ? SUBTILE_STATE_VISITED
+                    : SUBTILE_STATE_UNKNOWN;
             }
         }
 
@@ -4498,7 +4501,7 @@ private:
             TileInfo* tile = &(wmTileInfoList[tileIndex]);
             for (int column = 0; column < SUBTILE_GRID_HEIGHT; column++) {
                 for (int row = 0; row < SUBTILE_GRID_WIDTH; row++, i++) {
-                    tile->subtiles[column][row].state = r.u8();
+                    tile->subtiles[column][row].state = static_cast<SubtileState>(r.u8());
                 }
             }
         }

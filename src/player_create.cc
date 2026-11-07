@@ -127,7 +127,7 @@ int playerCreateApply(int slot, const PlayerCreateSpec* spec)
     }
 
     Proto* proto = nullptr;
-    if (protoGetProto(actor->pid, &proto) == -1 || proto == nullptr) {
+    if (protoGetProto(ProtoId(actor), &proto) == -1 || proto == nullptr) {
         return -1;
     }
 
@@ -155,11 +155,11 @@ int playerCreateApply(int slot, const PlayerCreateSpec* spec)
     // requested 1 became 0, was rejected outright, and left the reset default 5.
     // Establishing this character's own traits first makes the subtraction the
     // vanilla one the character editor performs.
-    traitsSetSelected(spec->traits[0], spec->traits[1], actor);
+    traitsSetSelected(static_cast<Trait>(spec->traits[0]), static_cast<Trait>(spec->traits[1]), actor);
 
     for (int i = 0; i < kSpecialCount; i++) {
         int stat = STAT_STRENGTH + i;
-        int rc = critterSetBaseStat(actor, stat, spec->special[i]);
+        int rc = critterSetBaseStat(actor, static_cast<Stat>(stat), spec->special[i]);
         if (rc != 0) {
             // ⚠ Never let this pass quietly: the stat keeps whatever the reset left
             // it at, so the player silently gets a different character than the one
@@ -176,7 +176,11 @@ int playerCreateApply(int slot, const PlayerCreateSpec* spec)
     for (int i = 0; i < NUM_TAGGED_SKILLS; i++) {
         tagged[i] = spec->tagged[i];
     }
-    skillsSetTagged(tagged, NUM_TAGGED_SKILLS, actor);
+    Skill taggedSkills[NUM_TAGGED_SKILLS];
+    for (int i = 0; i < NUM_TAGGED_SKILLS; i++) {
+        taggedSkills[i] = static_cast<Skill>(tagged[i]);
+    }
+    skillsSetTagged(taggedSkills, NUM_TAGGED_SKILLS, actor);
 
     // Finish exactly the way _proto_dude_init finishes a freshly loaded character:
     // derived stats follow from the SPECIAL just written, and the heal takes
@@ -191,7 +195,7 @@ int playerCreateApply(int slot, const PlayerCreateSpec* spec)
         // downstream is how a silently-ignored write gets blessed.
         fprintf(stderr, "[create] slot=%d SPECIAL:", slot);
         for (int i = 0; i < kSpecialCount; i++) {
-            fprintf(stderr, " %d", critterGetStat(actor, STAT_STRENGTH + i));
+            fprintf(stderr, " %d",             critterGetStat(actor, static_cast<Stat>(STAT_STRENGTH + i)));
         }
         fprintf(stderr, " maxhp=%d hp=%d\n",
             critterGetStat(actor, STAT_MAXIMUM_HIT_POINTS), critterGetHitPoints(actor));

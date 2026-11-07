@@ -35,7 +35,7 @@ public:
 
     void worldInvalidateRect(const Rect* rect, int elevation) override
     {
-        tileWindowRefreshRect(const_cast<Rect*>(rect), elevation);
+        tileWindowRefreshRect(const_cast<Rect*>(rect), static_cast<MapElevation>(elevation));
     }
 
     void worldClear() override
@@ -46,7 +46,10 @@ public:
 
     void ambientSoundLoad(const char* name, int a2, int a3, int a4) override
     {
-        backgroundSoundLoad(name, a2, a3, a4);
+        backgroundSoundLoad(name,
+            static_cast<GameSoundReadLimitMode>(a2),
+            static_cast<GameSoundStorageType>(a3),
+            static_cast<GameSoundLoopingMode>(a4));
     }
 
     void hudBarShow() override
@@ -61,7 +64,7 @@ public:
 
     void mouseResetBouncingCursor() override
     {
-        gameMouseResetBouncingCursorFid();
+        gameMouseResetBouncingCursorFrmId();
     }
 
     void worldEnable() override
@@ -85,7 +88,9 @@ public:
     void floatText(Object* owner, const char* text, int font, int color, int outlineColor) override
     {
         Rect rect;
-        if (textObjectAdd(owner, const_cast<char*>(text), font, color, outlineColor, &rect) == 0) {
+        if (textObjectAdd(owner, const_cast<char*>(text), font,
+                static_cast<Color>(color) | DRAW_TEXT_FLAG_NONE,
+                static_cast<Color>(outlineColor) | DRAW_TEXT_FLAG_NONE, &rect) == 0) {
             tileWindowRefreshRect(&rect, owner->elevation);
         }
     }
@@ -107,7 +112,9 @@ public:
 
     void hudItems(bool animated, int leftItemAction, int rightItemAction) override
     {
-        interfaceUpdateItems(animated, leftItemAction, rightItemAction);
+        interfaceUpdateItems(animated,
+            static_cast<InterfaceItemAction>(leftItemAction),
+            static_cast<InterfaceItemAction>(rightItemAction));
     }
 
     void hudIndicatorBar() override
@@ -176,12 +183,12 @@ public:
 
     void cursorSet(int cursor) override
     {
-        gameMouseSetCursor(cursor);
+        gameMouseSetCursor(static_cast<MouseCursorType>(cursor));
     }
 
     void cursorModeSet(int mode) override
     {
-        gameMouseSetMode(mode);
+        gameMouseSetMode(static_cast<GameMouseMode>(mode));
     }
 
     void cursorRefresh() override
@@ -211,7 +218,7 @@ public:
 
     int musicPlayLevel(const char* fileName, int fadeIn) override
     {
-        return _gsound_background_play_level_music(fileName, fadeIn);
+        return _gsound_background_play_level_music(fileName, static_cast<GameSoundReadLimitMode>(fadeIn));
     }
 
     void musicStop() override
@@ -221,7 +228,7 @@ public:
 
     void errorBox(const char* text) override
     {
-        showMesageBox(text);
+        showMessageBox(text);
     }
 };
 

@@ -8,12 +8,12 @@
 
 #include "actions.h" // _action_attack
 #include "animation.h" // reg_anim_* / animationRegister* / animationIsBusy / animationStop / _object_animate / ANIM_*
-#include "art.h" // buildFid / artExists / artLock / artGetFramesPerSecond
+#include "art.h"
 #include "debug.h"
 #include "game_sound.h" // sfxBuildOpenName / SCENERY_SOUND_EFFECT_*
 #include "input.h" // getTicks / getTicksBetween
 #include "item.h" // critterGetAnimationForHitMode / weaponGetAnimationCode / itemGetType
-#include "object.h" // objectSetFid / objectSetFrame / objectSetLocation / objectSetRotation / _obj_offset
+#include "object.h"
 #include "tile.h" // tileToScreenXY / tileGetRotationTo / tileDistanceBetween
 
 // See client_present.h for the module overview. This is step 2 ENTRY FUSION: the
@@ -288,7 +288,12 @@ bool glideSuspended(const PresEntry& e)
 // Rebuild obj's fid with a different anim code, keeping id/weapon, facing rot.
 int animFid(Object* obj, int anim, int rotation)
 {
-    return buildFid(FID_TYPE(obj->fid), obj->fid & 0xFFF, anim, (obj->fid & 0xF000) >> 12, rotation + 1);
+    FrmId frmId(obj);
+    return FrmId(obj,
+               static_cast<AnimationType>(anim),
+               frmId.weaponAnimation(),
+               static_cast<Rotation>(rotation))
+        .fid();
 }
 
 // Desired obj->x/y so the sprite renders at fraction t256/256 along the front hop,
@@ -300,9 +305,9 @@ bool walkOffset(const PresEntry& e, int t256, int* dx, int* dy)
 {
     const Hop& hop = e.hops.front();
     int fx, fy, tx, ty, ax, ay;
-    if (tileToScreenXY(hop.fromTile, &fx, &fy, e.elevation) == -1) return false;
-    if (tileToScreenXY(hop.toTile, &tx, &ty, e.elevation) == -1) return false;
-    if (tileToScreenXY(e.obj->tile, &ax, &ay, e.elevation) == -1) return false;
+    if (tileToScreenXY(hop.fromTile, &fx, &fy) == -1) return false;
+    if (tileToScreenXY(hop.toTile, &tx, &ty) == -1) return false;
+    if (tileToScreenXY(e.obj->tile, &ax, &ay) == -1) return false;
     *dx = fx + (tx - fx) * t256 / 256 - ax;
     *dy = fy + (ty - fy) * t256 / 256 - ay;
     return true;
@@ -338,7 +343,7 @@ void walkRebucket(PresEntry& e, int tile)
     if (e.obj->tile == tile) {
         return;
     }
-    objectSetLocation(e.obj, tile, e.elevation, nullptr);
+    objectSetLocation(e.obj, tile, static_cast<MapElevation>(e.elevation), nullptr);
     e.appliedX = 0;
     e.appliedY = 0;
 }
@@ -368,7 +373,7 @@ void walkSnapToAuthority(PresEntry& e)
 {
     if (!e.hops.empty() && e.obj->tile == e.hops.front().toTile
         && e.obj->tile != e.hops.back().toTile) {
-        objectSetLocation(e.obj, e.hops.back().toTile, e.elevation, nullptr);
+        objectSetLocation(e.obj, e.hops.back().toTile, static_cast<MapElevation>(e.elevation), nullptr);
         e.appliedX = 0;
         e.appliedY = 0;
     }
@@ -402,7 +407,7 @@ void endGlide(PresEntry& e)
         tileWindowRefreshRect(&dirty, e.obj->elevation);
     }
     if (e.hasPendingRot) {
-        objectSetRotation(e.obj, e.pendingRot, nullptr);
+        objectSetRotation(e.obj, static_cast<Rotation>(e.pendingRot), nullptr);
     }
     e.hops.clear();
     e.startedAt = 0;
@@ -453,7 +458,7 @@ void resolveHeld(PresEntry& e, bool resume, FrameReap reap = FrameReap::All)
             if (getenv("F2_TRACE_EVENTS") != nullptr && obj->tile != tile) {
                 fprintf(stderr, "[cmove-drift] net=%d walkedTo=%d authTile=%d\n", obj->netId, obj->tile, tile);
             }
-            objectSetLocation(obj, tile, elev, nullptr);
+            objectSetLocation(obj, tile, static_cast<MapElevation>(elev), nullptr);
             reconciledPos = true;
         }
         if (hasAp) {
@@ -471,11 +476,11 @@ void resolveHeld(PresEntry& e, bool resume, FrameReap reap = FrameReap::All)
         if (getenv("F2_TRACE_EVENTS") != nullptr && obj->tile != e.dSnapTile) {
             fprintf(stderr, "[knock-commit] net=%d slidTo=%d authTile=%d\n", obj->netId, obj->tile, e.dSnapTile);
         }
-        objectSetLocation(obj, e.dSnapTile, e.dSnapElev, nullptr);
+        objectSetLocation(obj, e.dSnapTile, static_cast<MapElevation>(e.dSnapElev), nullptr);
     }
     e.dHasSnapPos = false; // consumed (or superseded by a recorded-walk pos) — never linger
     if (e.dHasFid) {
-        objectSetFid(obj, e.dFid, nullptr);
+        objectSetFrmId(obj, FrmId(e.dFid), nullptr);
         // Reset the frame to 0. objectSetFid changes only obj->fid, never obj->frame,
         // and the held fid is a SETTLED pose — most importantly the single-frame SF
         // corpse a kill produces. The just-finished fall/hit animation left obj->frame
@@ -491,7 +496,7 @@ void resolveHeld(PresEntry& e, bool resume, FrameReap reap = FrameReap::All)
         objectApplyWireFlags(obj, e.dFlags);
     }
     if (e.dHasRot) {
-        objectSetRotation(obj, e.dRot, nullptr);
+        objectSetRotation(obj, static_cast<Rotation>(e.dRot), nullptr);
     }
     e.dHasFid = false;
     e.dHasFlags = false;
@@ -675,7 +680,7 @@ void advanceGlides()
                     clientApplyPose(obj, pendingFid);
                 }
                 if (hasPendingRot) {
-                    objectSetRotation(obj, pendingRot, nullptr);
+                    objectSetRotation(obj, static_cast<Rotation>(pendingRot), nullptr);
                 }
                 eraseIfEmpty(id);
                 continue;
@@ -884,7 +889,7 @@ void presStandDownAll()
             clientApplyPose(e.obj, e.pendingFid);
         }
         if (e.hasPendingRot) {
-            objectSetRotation(e.obj, e.pendingRot, nullptr);
+            objectSetRotation(e.obj, static_cast<Rotation>(e.pendingRot), nullptr);
         }
         e.hops.clear();
         e.heldHops = 0;
@@ -1025,11 +1030,11 @@ void clientAnimOnMove(Object* obj, int fromTile, int toTile, int fromElevation, 
     // any in-flight glide.
     if (durMs <= 0 || fromElevation != toElevation
         || tileDistanceBetween(fromTile, toTile) != 1
-        || FID_TYPE(obj->fid) != OBJ_TYPE_CRITTER) {
+        || FrmId(obj).objectType() != OBJ_TYPE_CRITTER) {
         if (getenv("F2_TRACE_EVENTS") != nullptr) {
             fprintf(stderr, "[walk] SNAP net=%d dur=%d dElev=%d dist=%d type=%d\n",
                 obj->netId, durMs, (fromElevation != toElevation) ? 1 : 0,
-                tileDistanceBetween(fromTile, toTile), FID_TYPE(obj->fid));
+                tileDistanceBetween(fromTile, toTile), FrmId(obj).objectType());
         }
         if (hasGlide) {
             endGlide(*ep);
@@ -1089,17 +1094,17 @@ void clientAnimOnMove(Object* obj, int fromTile, int toTile, int fromElevation, 
     int anim = run ? ANIM_RUNNING : ANIM_WALK;
     int rotation = tileGetRotationTo(fromTile, toTile);
     int fid = animFid(obj, anim, rotation);
-    if (anim == ANIM_RUNNING && !artExists(fid)) {
+    if (anim == ANIM_RUNNING && !FrmId(fid).exist()) {
         anim = ANIM_WALK;
         fid = animFid(obj, ANIM_WALK, rotation);
     }
-    if (!artExists(fid)) {
+    if (!FrmId(fid).exist()) {
         return;
     }
 
     int fps = 10;
     CacheEntry* artKey;
-    Art* art = artLock(fid, &artKey);
+    Art* art = artLock(FrmId(fid), &artKey);
     if (art != nullptr) {
         fps = artGetFramesPerSecond(art);
         artUnlock(artKey);
@@ -1131,7 +1136,7 @@ void clientAnimOnMove(Object* obj, int fromTile, int toTile, int fromElevation, 
     // facing until the pump releases it (posed at first playable advance), else it snaps
     // to face its destination while parked. An out-of-combat glide poses immediately.
     if (!hold) {
-        objectSetRotation(obj, rotation, nullptr);
+        objectSetRotation(obj, static_cast<Rotation>(rotation), nullptr);
         clientApplyPose(obj, fid);
     }
 
@@ -1171,7 +1176,7 @@ void clientApplyPose(Object* obj, int fid)
     // never resets obj->frame; a stale high frame index on the new art renders the wrong
     // frame or NOTHING ([[frame-index-render-gotcha]]). Every fid write on a synced sprite
     // must go through here so the frame reset can never be forgotten.
-    objectSetFid(obj, fid, nullptr);
+    objectSetFrmId(obj, FrmId(fid), nullptr);
     objectSetFrame(obj, 0, nullptr);
 }
 
@@ -1565,11 +1570,15 @@ void clientCombatAnimPlay(Attack* attack)
     // this same beat), so it is still unarmed — the fire fid would resolve to
     // body+FIRE+unarmed, which has no art and renders NOTHING. Set the armed stand fid.
     // Unarmed (weapon == null) → code 0 → unarmed stand, so melee/punch is unchanged.
-    int weaponCode = (attack->weapon != nullptr && itemGetType(attack->weapon) == ITEM_TYPE_WEAPON)
+    WeaponAnimation weaponCode = (attack->weapon != nullptr && itemGetType(attack->weapon) == ITEM_TYPE_WEAPON)
         ? weaponGetAnimationCode(attack->weapon)
-        : 0;
-    objectSetFid(attack->attacker,
-        buildFid(OBJ_TYPE_CRITTER, attack->attacker->fid & 0xFFF, ANIM_STAND, weaponCode, attack->attacker->rotation + 1),
+        : WeaponAnimation::None;
+    objectSetFrmId(attack->attacker,
+        FrmId(OBJ_TYPE_CRITTER,
+            FrmId(attack->attacker).frameId(),
+            ANIM_STAND,
+            weaponCode,
+            attack->attacker->rotation),
         nullptr);
     objectSetFrame(attack->attacker, 0, nullptr);
 

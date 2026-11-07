@@ -135,25 +135,6 @@ void wmCarClearPlacedTile();
 
 
 
-#define WM_TOWN_LIST_X (501)
-#define WM_TOWN_LIST_Y (135)
-#define WM_TOWN_LIST_WIDTH (119)
-#define WM_TOWN_LIST_HEIGHT (178)
-
-
-
-
-
-
-
-
-#define WM_TOWN_LIST_VISIBLE_SLOT_COUNT (7)
-#define WM_TOWN_LIST_SLOT_HEIGHT (27)
-
-
-
-
-
 ;
 
 
@@ -241,8 +222,8 @@ void wmSetScriptWorldMapMulti(float value)
 }
 
 static std::vector<std::pair<int, std::string>> wmTerrainNameOverrides;
-static std::unordered_map<int, std::string> wmTownTitleOverrides;
-static bool wmTownNamesHidden;
+std::unordered_map<int, std::string> wmTownTitleOverrides;
+bool wmTownNamesHidden;
 
 static void wmSetFlags(MapFlags* flagsPtr, MapFlags flag, bool set);
 static int wmGenDataInit();
@@ -293,7 +274,7 @@ static int wmMatchAreaFromMap(Map mapIdx, City* areaIdxPtr);
 
 
 static void wmClearRandomEncounterState();
-static bool wmTryMatchAreaContainingMapIdx(Map mapIdx, City* areaIdxPtr);
+bool wmTryMatchAreaContainingMapIdx(Map mapIdx, City* areaIdxPtr);
 static int wmRndEncounterOccurred(Map* mapToLoadPtr);
 static int wmPartyFindCurSubTile();
 static int wmFindCurSubTileFromPos(int x, int y, SubtileInfo** subtilePtr);
@@ -308,7 +289,7 @@ static bool wmGameTimeIncrement(int ticksToAdd);
 static int wmGrabTileWalkMask(int tileIdx);
 static bool wmWorldPosInvalid(int x, int y);
 
-static bool wmTravelTickDue(unsigned int now);
+bool wmTravelTickDue(unsigned int now);
 static void wmPartyWalkingStep();
 
 
@@ -322,21 +303,21 @@ static int wmMarkSubTileOffsetVisited(int tile, int subtileX, int subtileY, int 
 static int wmMarkSubTileOffsetKnown(int tile, int subtileX, int subtileY, int offsetX, int offsetY);
 static int wmMarkSubTileOffsetVisitedFunc(int tile, int subtileX, int subtileY, int offsetX, int offsetY, SubtileState subtileState);
 static void wmMarkSubTileRadiusVisited(int x, int y);
-static void wmAreaGetMarkWorldPos(CityInfo* city, int* xPtr, int* yPtr);
+void wmAreaGetMarkWorldPos(CityInfo* city, int* xPtr, int* yPtr);
 
 
 
-static bool wmLockCarInterfaceArt(InterfaceFrameId artIndex, Art** artPtr, CacheEntry** handlePtr);
+bool wmLockCarInterfaceArt(InterfaceFrameId artIndex, Art** artPtr, CacheEntry** handlePtr);
 int wmMatchWorldPosToArea(int x, int y, City* areaIdxPtr);
 
-static int wmInterfaceDrawCircleOverlaySafe(CityInfo* city, CitySizeDescription* citySizeDescription, unsigned char* dest, int x, int y);
+int wmInterfaceDrawCircleOverlaySafe(CityInfo* city, CitySizeDescription* citySizeDescription, unsigned char* dest, int x, int y);
 
 
 
-static void wmInterfaceDrawTerrainInfo();
-static const char* wmGetHotspotText();
+void wmInterfaceDrawTerrainInfo();
+const char* wmGetHotspotText();
 
-static void wmResetTerrainInfo();
+void wmResetTerrainInfo();
 
 static void wmMarkAllSubTiles(SubtileState state);
 
@@ -352,7 +333,7 @@ static void wmMarkAllSubTiles(SubtileState state);
 
 
 int wmAreaFindFirstValidMap(Map* mapIdxPtr, MapElevation* elevationPtr, int* tilePtr, Rotation* rotationPtr);
-static void wmRunLocalMapEnterHook(Map* mapIdxPtr);
+void wmRunLocalMapEnterHook(Map* mapIdxPtr);
 
 
 // 0x4BC860 can_rest_here
@@ -470,7 +451,7 @@ static MapInfo* wmMapInfoList = nullptr;
 static int wmMaxMapNum = 0;
 
 // 0x51DE14 wmBkWin
-
+int wmBkWin = -1;
 
 int worldmapGetWindow()
 {
@@ -478,10 +459,10 @@ int worldmapGetWindow()
 }
 
 // 0x51DE24 wmBkWinBuf
-
+unsigned char* wmBkWinBuf = nullptr;
 
 // CE: Offscreen buffer for safe city overlay rendering
-static unsigned char* wmOverlayOffscreenBuf = nullptr;
+unsigned char* wmOverlayOffscreenBuf = nullptr;
 #define WM_OVERLAY_BUFFER_SIZE (200)
 
 // 0x51DE2C wmWorldOffsetX
@@ -496,9 +477,9 @@ Color* circleBlendTable = nullptr;
 // 0x51DE38 wmInterfaceWasInitialized
 
 
-static constexpr InterfaceFrameId kDefaultCarInterfaceArtFrmId = InterfaceFrameId::WorldMapCarMovie;
+const InterfaceFrameId kDefaultCarInterfaceArtFrmId = InterfaceFrameId::WorldMapCarMovie;
 
-static InterfaceFrameId carInterfaceArtFrmId = kDefaultCarInterfaceArtFrmId;
+InterfaceFrameId carInterfaceArtFrmId = kDefaultCarInterfaceArtFrmId;
 
 // 0x51DE3C wmEncOpStrs
 static const char* wmEncOpStrs[ENCOUNTER_SITUATION_COUNT] = {
@@ -534,33 +515,19 @@ static const char* wmFormationStrs[ENCOUNTER_FORMATION_TYPE_COUNT] = {
 };
 
 // 0x51DE84 wmRndCursorFrmIds
-constexpr InterfaceFrmId wmRndCursorFrmIds[WORLD_MAP_ENCOUNTER_FRM_COUNT] = {
+const InterfaceFrmId wmRndCursorFrmIds[WORLD_MAP_ENCOUNTER_FRM_COUNT] = {
     InterfaceFrameId::WorldMapFightIcon1,
     InterfaceFrameId::WorldMapFightIcon2,
     InterfaceFrameId::WorldMapRandomEncounterCursor2Bright,
     InterfaceFrameId::WorldMapRandomEncounterCursor2Dark,
 };
 
-#define MAX_TRAIL_LENGTH 1000
 #define TRAIL_MARKER_STYLE_COUNT 4
 
 typedef struct TrailMarkerStyle {
     int length;
     int spacing;
 } TrailMarkerStyle;
-
-typedef struct {
-    int x;
-    int y;
-} TrailDot;
-
-typedef struct TrailMarkerState {
-    bool hasPattern;
-    int dotCount;
-    TrailDot dots[MAX_TRAIL_LENGTH];
-    int remainingDots;
-    int remainingSpacing;
-} TrailMarkerState;
 
 // 0x51DE94 wmLabelList
 
@@ -716,6 +683,11 @@ void wmSetTownTitle(City areaIdx, const char* title)
     wmTownTitleOverrides[areaIdx] = title;
 }
 
+bool wmHasTownTitleOverrides()
+{
+    return !wmTownTitleOverrides.empty();
+}
+
 void wmRemoveTownNames(bool state)
 {
     if (wmTownNamesHidden == state) {
@@ -763,7 +735,7 @@ static int wmMaxEncBaseTypes;
 // 0x67303C wmMaxEncounterInfoTables
 static int wmMaxEncounterInfoTables;
 
-static bool townMapHotkeysFix;
+bool gTownMapHotkeysFix;
 static double gameTimeIncRemainder = 0.0;
 
 
@@ -771,13 +743,13 @@ static Map wmForceEncounterMapId = MAP_INVALID;
 static EncounterFlag wmForceEncounterFlags = ENCOUNTER_FLAG_NONE;
 static bool wmEncounterDetectionEnabled = true;
 static int worldmapTravelDelay;
-static unsigned int wmLastTravelTick;
-static int worldmapTrailMarkers;
-static bool worldmapTerrainInfo;
-static bool wmTerrainInfoIsVisible;
-static TrailMarkerState trailMarkerState = {};
+unsigned int wmLastTravelTick;
+int worldmapTrailMarkers;
+bool worldmapTerrainInfo;
+bool wmTerrainInfoIsVisible;
+TrailMarkerState trailMarkerState = {};
 
-static const Color worldmapTrailMarkerColor = Color(134);
+const Color worldmapTrailMarkerColor = Color(134);
 static const TrailMarkerStyle worldmapTrailMarkerStyles[TRAIL_MARKER_STYLE_COUNT] = {
     { 1, 2 },
     { 2, 1 },
@@ -822,7 +794,7 @@ static void wmAddTrailMarker(int terrainId, int x, int y)
     wmAddTrailDot(trailMarkerState.dots, &(trailMarkerState.dotCount), x, y);
 }
 
-static void wmResetTrailMarkers()
+void wmResetTrailMarkers()
 {
     trailMarkerState.hasPattern = false;
     trailMarkerState.dotCount = 0;
@@ -1198,7 +1170,7 @@ int wmWorldMap_init()
     wmWorldMapSaveTempData();
 
     // SFALL
-    configGetBool(&gContentConfig, CONTENT_CONFIG_WORLDMAP_SECTION, "town_map_hotkeys_fix", &townMapHotkeysFix, true);
+    configGetBool(&gContentConfig, CONTENT_CONFIG_WORLDMAP_SECTION, "town_map_hotkeys_fix", &gTownMapHotkeysFix, true);
     configGetInt(&gContentConfig, CONTENT_CONFIG_WORLDMAP_SECTION, "travel_delay", &worldmapTravelDelay, 0);
     worldmapTravelDelay = std::clamp(worldmapTravelDelay, 0, 150);
     configGetInt(&gContentConfig, CONTENT_CONFIG_WORLDMAP_SECTION, "trail_markers", &worldmapTrailMarkers, 0);
@@ -3490,7 +3462,7 @@ static void wmClearRandomEncounterState()
     wmGenData.encounterEntryId = -1;
 }
 
-static bool wmTryMatchAreaContainingMapIdx(Map mapIdx, City* areaIdxPtr)
+bool wmTryMatchAreaContainingMapIdx(Map mapIdx, City* areaIdxPtr)
 {
     assert(areaIdxPtr != nullptr);
 
@@ -4302,7 +4274,7 @@ void wmPartyInitWalking(int x, int y)
     }
 }
 
-static bool wmTravelTickDue(unsigned int now)
+bool wmTravelTickDue(unsigned int now)
 {
     if (worldmapTravelDelay == 0) {
         return true;
@@ -4539,7 +4511,7 @@ static void wmSubTileMarkRadiusKnown(int x, int y, int radius)
     }
 }
 
-static void wmAreaGetMarkWorldPos(CityInfo* city, int* xPtr, int* yPtr)
+void wmAreaGetMarkWorldPos(CityInfo* city, int* xPtr, int* yPtr)
 {
     assert(city != nullptr);
     assert(xPtr != nullptr);
@@ -4694,7 +4666,7 @@ int wmMatchWorldPosToArea(int x, int y, City* areaIdxPtr)
 }
 
 // CE: Safe city overlay drawing with proper bounds checking
-static int wmInterfaceDrawCircleOverlaySafe(CityInfo* city, CitySizeDescription* citySizeDescription, unsigned char* dest, int xArg, int yArg)
+int wmInterfaceDrawCircleOverlaySafe(CityInfo* city, CitySizeDescription* citySizeDescription, unsigned char* dest, int xArg, int yArg)
 {
     MessageListItem messageListItem;
     char name[CITY_NAME_SIZE];
@@ -4854,7 +4826,7 @@ static int wmInterfaceDrawCircleOverlaySafe(CityInfo* city, CitySizeDescription*
 // 0x4C41EC wmDrawCursorStopped
 
 
-static void wmInterfaceDrawTerrainInfo()
+void wmInterfaceDrawTerrainInfo()
 {
     if (!wmTerrainInfoIsVisible || !wmCursorIsVisible()) {
         return;
@@ -4880,7 +4852,7 @@ static void wmInterfaceDrawTerrainInfo()
         COLOR_GREEN | DRAW_TEXT_FLAG_SHADOWED);
 }
 
-static const char* wmGetHotspotText()
+const char* wmGetHotspotText()
 {
     if (wmGenData.currentAreaId != CITY_INVALID) {
         return wmGetTownTitle(wmGenData.currentAreaId);
@@ -4892,7 +4864,7 @@ static const char* wmGetHotspotText()
 // 0x4C4490 wmCursorIsVisible
 
 
-static void wmResetTerrainInfo()
+void wmResetTerrainInfo()
 {
     wmTerrainInfoIsVisible = false;
 }
@@ -5188,7 +5160,7 @@ int wmCarGasAmount()
     return wmGenData.carFuel;
 }
 
-static bool wmLockCarInterfaceArt(InterfaceFrameId artIndex, Art** artPtr, CacheEntry** handlePtr)
+bool wmLockCarInterfaceArt(InterfaceFrameId artIndex, Art** artPtr, CacheEntry** handlePtr)
 {
     if (artIndex < InterfaceFrameId::First || artIndex > InterfaceFrameId::Last) {
         return false;
@@ -5408,7 +5380,7 @@ int wmSfxIdxName(int sfxIdx, char** namePtr)
 // 0x4C57BC wmInterfaceDialSyncTime
 
 
-static void wmRunLocalMapEnterHook(Map* mapIdxPtr)
+void wmRunLocalMapEnterHook(Map* mapIdxPtr)
 {
     Map originalMap = *mapIdxPtr;
     scriptHooks_Encounter(EncounterHookEventType::LocalMapEnter, mapIdxPtr, false, -1, -1);
@@ -5653,7 +5625,7 @@ void worldmapTravelStep(int worldX, int worldY)
                 wmAreaSetWorldPos(CITY_CAR_OUT_OF_GAS, worldmapX, worldmapY);
 
                 city->state = CITY_STATE_KNOWN;
-                city->visitedState = 1;
+                city->visitedState = VisitedState::Visited;
 
                 wmGenData.currentAreaId = CITY_CAR_OUT_OF_GAS;
             } else {
@@ -5811,7 +5783,7 @@ void wmTransitionSuspendScripts()
 void wmEncounterStagingClear()
 {
     wmGenData.encounterIconIsVisible = false;
-    wmGenData.encounterMapId = -1;
+    wmGenData.encounterMapId = MAP_INVALID;
     wmGenData.encounterTableId = -1;
     wmGenData.encounterEntryId = -1;
     // Drop an unflushed description with the encounter it describes. Single player
@@ -5846,7 +5818,7 @@ static void wmCitySizeDimensions(int citySize, int* widthPtr, int* heightPtr)
 
     bool wasLocked = citySizeDescription->frmImage.isLocked();
     if (!wasLocked) {
-        citySizeDescription->frmImage.lock(citySizeDescription->fid);
+        citySizeDescription->frmImage.lock(FrmId(citySizeDescription->fid));
     }
 
     *widthPtr = citySizeDescription->frmImage.getWidth();
@@ -5861,7 +5833,7 @@ static void wmHotspotDimensions(int* widthPtr, int* heightPtr)
 {
     bool wasLocked = wmGenData.hotspotNormalFrmImage.isLocked();
     if (!wasLocked) {
-        wmGenData.hotspotNormalFrmImage.lock(buildFid(OBJ_TYPE_INTERFACE, 168, 0, 0, 0));
+        wmGenData.hotspotNormalFrmImage.lock(FrmId(OBJ_TYPE_INTERFACE, 168));
     }
 
     *widthPtr = wmGenData.hotspotNormalFrmImage.getWidth();
@@ -5905,8 +5877,8 @@ int wmAreaResolveEntrance(int entranceIndex, int* mapIdxPtr)
 
 void wmCarParkAtMapArea(int mapIdx)
 {
-    int areaIdx;
-    if (wmMatchAreaContainingMapIdx(mapIdx, &areaIdx) == 0) {
+    City areaIdx;
+    if (wmMatchAreaContainingMapIdx(static_cast<Map>(mapIdx), &areaIdx) == 0) {
         wmGenData.currentCarAreaId = areaIdx;
     }
 }

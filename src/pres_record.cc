@@ -74,10 +74,12 @@ static int animDurationMs(Object* owner, int anim, int weaponCode)
     if (owner == nullptr) {
         return -1;
     }
-    int code = weaponCode >= 0 ? weaponCode : ((owner->fid & 0xF000) >> 12);
-    int fid = buildFid(FID_TYPE(owner->fid), owner->fid & 0xFFF, anim, code, owner->rotation + 1);
+    WeaponAnimation code = weaponCode >= 0
+        ? static_cast<WeaponAnimation>(weaponCode)
+        : FrmId(owner).weaponAnimation();
+    FrmId frmId(owner, static_cast<AnimationType>(anim), code, static_cast<Rotation>(owner->rotation));
     CacheEntry* handle;
-    Art* art = artLock(fid, &handle);
+    Art* art = artLock(frmId, &handle);
     if (art == nullptr) {
         return -1;
     }

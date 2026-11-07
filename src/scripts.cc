@@ -1093,7 +1093,7 @@ static void _script_chk_critters()
                 Script* script = &(scriptListExtent->scripts[scriptIndex]);
                 if (getenv("F2_TRACE_AGGRO") != nullptr) {
                     fprintf(stderr, "[aggro] heartbeat tick: firing sid=%d (%d/%d critters this cycle)\n",
-                        script->sid, gScriptListEntriesLength, scriptsCount);
+                        script->sid, gCritterProcessingIndex + 1, scriptsCount);
                 }
                 scriptExecProc(script->sid, proc);
             }

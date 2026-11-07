@@ -139,14 +139,14 @@ void clientSayRender()
     fontSetCurrent(SAY_FONT);
 
     windowDrawText(gSayWindow, "Say:", 0, kSayTextInsetX, kSayTextInsetY,
-        _colorTable[kSayPromptColorIndex]);
+        _colorTable[kSayPromptColorIndex] | DRAW_TEXT_FLAG_NONE);
     int promptWidth = fontGetStringWidth("Say: ");
 
     // A blinking caret would need a clock; a static one is honest and cheap.
     char line[kMaxSayLength + 2];
     snprintf(line, sizeof(line), "%s_", gSayBuffer);
     windowDrawText(gSayWindow, line, 0, kSayTextInsetX + promptWidth, kSayTextInsetY,
-        _colorTable[kSayColorIndex]);
+        _colorTable[kSayColorIndex] | DRAW_TEXT_FLAG_NONE);
 
     fontSetCurrent(oldFont);
     windowRefresh(gSayWindow);

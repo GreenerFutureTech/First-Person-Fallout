@@ -1040,7 +1040,7 @@ int inventoryEquipFunc(Object* critter, Object* item, Hand handIndex, bool anima
             fprintf(stderr, "f2_server: inven_wield FAILED (art missing) critter_net=%d pid=%d "
                             "item_pid=%d fid=0x%x baseFrm=%d hitAnim=%d weapAnim=%d — it will "
                             "fight UNARMED\n",
-                critter->netId, critter->pid, item->pid, fid, critter->fid & 0xFFF,
+                critter->netId, critter->pid, item->pid, frmId.fid(), critter->fid & 0xFFF,
                 hitModeAnimationCode, weaponAnimationCode);
             if (recording) {
                 presRecordSectionAbort();
@@ -1385,7 +1385,7 @@ int inventoryUnequipFunc(Object* critter, Hand hand, bool animate)
 
 void invenRederiveWeaponFid(Object* critter)
 {
-    if (critter == nullptr || FID_TYPE(critter->fid) != OBJ_TYPE_CRITTER) {
+    if (critter == nullptr || FrmId(critter).objectType() != OBJ_TYPE_CRITTER) {
         return;
     }
 
@@ -1394,15 +1394,15 @@ void invenRederiveWeaponFid(Object* critter)
     bool leftIsWeapon = leftItem != nullptr && itemGetType(leftItem) == ITEM_TYPE_WEAPON;
     bool rightIsWeapon = rightItem != nullptr && itemGetType(rightItem) == ITEM_TYPE_WEAPON;
 
-    int weaponAnimationCode;
+    WeaponAnimation weaponAnimationCode;
     if (!leftIsWeapon && !rightIsWeapon) {
-        weaponAnimationCode = 0;
+        weaponAnimationCode = WeaponAnimation::None;
     } else if (leftIsWeapon != rightIsWeapon) {
         weaponAnimationCode = weaponGetAnimationCode(leftIsWeapon ? leftItem : rightItem);
     } else {
-        int currentCode = (critter->fid & 0xF000) >> 12;
-        int leftCode = weaponGetAnimationCode(leftItem);
-        int rightCode = weaponGetAnimationCode(rightItem);
+        WeaponAnimation currentCode = FrmId(critter).weaponAnimation();
+        WeaponAnimation leftCode = weaponGetAnimationCode(leftItem);
+        WeaponAnimation rightCode = weaponGetAnimationCode(rightItem);
         if (currentCode == leftCode || currentCode == rightCode) {
             return;
         }
@@ -1415,15 +1415,12 @@ void invenRederiveWeaponFid(Object* critter)
         }
     }
 
-    if (((critter->fid & 0xF000) >> 12) == weaponAnimationCode) {
+    if (FrmId(critter).weaponAnimation() == weaponAnimationCode) {
         return;
     }
 
-    // objectSetFrame because objectSetFid does NOT reset obj->frame, and a frame index past
-    // the new art's count renders NOTHING ([[frame-index-render-gotcha]]).
-    int fid = buildFid(OBJ_TYPE_CRITTER, critter->fid & 0xFFF, ANIM_STAND, weaponAnimationCode,
-        (critter->fid & 0x70000000) >> 28);
-    _dude_stand(critter, critter->rotation, fid);
+    FrmId frmId(critter, ANIM_STAND, weaponAnimationCode, static_cast<Rotation>(critter->rotation));
+    _dude_stand(critter, static_cast<Rotation>(critter->rotation), frmId);
     objectSetFrame(critter, 0, nullptr);
 }
 

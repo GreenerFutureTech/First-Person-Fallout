@@ -445,9 +445,9 @@ int _GNW95_init_mode_ex(int width, int height, int bpp)
         height /= scale;
     }
 
-    bool windowed = settings.screen.windowed;
+    WindowMode windowed = settings.screen.windowed;
     if (const char* overrideValue = getenv("F2_WINDOWED")) {
-        windowed = atoi(overrideValue) != 0;
+        windowed = atoi(overrideValue) != 0 ? WindowMode::Windowed : WindowMode::Fullscreen;
     }
     if (_GNW95_init_window(width, height, windowed, scale) == -1) {
         return -1;
@@ -525,7 +525,7 @@ int _GNW95_init_window(int width, int height, WindowMode mode, int scale)
         // pointer slips off the edge and clicks land outside (mode already
         // confines). SDL releases the confine while the window is unfocused, so
         // alt-tab still works; input.cc re-applies it on focus gain.
-        gSdlWindowedMode = !mode;
+        gSdlWindowedMode = mode != WindowMode::Fullscreen;
         SDL_SetWindowGrab(gSdlWindow, gSdlWindowedMode ? SDL_TRUE : SDL_FALSE);
     }
 

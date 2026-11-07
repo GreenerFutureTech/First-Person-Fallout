@@ -95,7 +95,7 @@ static void dumpObject(FILE* f, Object* obj)
             obj->scriptIndex);
     }
 
-    if (PID_TYPE(obj->pid) == OBJ_TYPE_CRITTER) {
+    if (ProtoId(obj).objectType() == OBJ_TYPE_CRITTER) {
         Object* whoHitMe = obj->data.critter.combat.whoHitMe;
         fprintf(f, "  critter hp=%d rad=%d poison=%d ap=%d team=%d ai=%d maneuver=%d results=0x%X who_hit_me=%d\n",
             obj->data.critter.hp,
@@ -141,7 +141,7 @@ bool stateDumpWrite(const char* path)
         int wmX;
         int wmY;
         wmGetPartyWorldPos(&wmX, &wmY);
-        int wmArea;
+        City wmArea;
         wmGetPartyCurArea(&wmArea);
         int wmSubtileState;
         wmSubTileGetVisitedState(wmX, wmY, &wmSubtileState);
@@ -216,17 +216,17 @@ bool stateDumpWrite(const char* path)
             actor->netId);
     }
     for (int stat = 0; stat < SPECIAL_STAT_COUNT; stat++) {
-        fprintf(f, "dude_stat %d %d\n", stat, critterGetStat(gDude, stat));
+        fprintf(f, "dude_stat %d %d\n", stat, critterGetStat(gDude, static_cast<Stat>(stat)));
     }
     for (int pcStat = 0; pcStat < PC_STAT_COUNT; pcStat++) {
-        fprintf(f, "dude_pcstat %d %d\n", pcStat, pcGetStat(pcStat));
+        fprintf(f, "dude_pcstat %d %d\n", pcStat, pcGetStat(static_cast<PcStat>(pcStat)));
     }
 
     // Skill values (v1): the SPECIAL stats above do not reflect skills, so
     // skilldex use / book / doctor / first-aid effects and skill-point spends
     // were previously invisible in the dump. Dumped for the dude only.
     for (int skill = 0; skill < SKILL_COUNT; skill++) {
-        fprintf(f, "dude_skill %d %d\n", skill, skillGetValue(gDude, skill));
+        fprintf(f, "dude_skill %d %d\n", skill, skillGetValue(gDude, static_cast<Skill>(skill)));
     }
 
     // Kill counters by critter type (v1): a kill is otherwise only visible as a
@@ -234,8 +234,8 @@ bool stateDumpWrite(const char* path)
     // damage / explosion / combat kills explicit and self-documenting in the
     // diff — the correctness signal whose absence let a scripted-kill divergence
     // (dropped XP / destroy proc) get blessed. Non-zero entries only.
-    for (int killType = 0; killType < KILL_TYPE_COUNT; killType++) {
-        int killCount = killsGetByType(killType);
+    for (int killType = KILL_TYPE_FIRST; killType < KILL_TYPE_OVERRIDE_COUNT; killType++) {
+        int killCount = killsGetByType(static_cast<KillType>(killType));
         if (killCount != 0) {
             fprintf(f, "kills %d %d\n", killType, killCount);
         }
@@ -247,7 +247,7 @@ bool stateDumpWrite(const char* path)
     // stays spammable with no cooldown; dumped so that divergence is visible.
     // Non-zero entries only.
     for (int skill = 0; skill < SKILL_COUNT; skill++) {
-        int uses = skillGetUsesToday(skill);
+        int uses = skillGetUsesToday(static_cast<Skill>(skill));
         if (uses != 0) {
             fprintf(f, "skill_uses_today %d %d\n", skill, uses);
         }
@@ -256,12 +256,12 @@ bool stateDumpWrite(const char* path)
     // Tagged skills and selected traits (H-47/H-48 coverage): the Tag!/
     // Mutate! perk commits are otherwise invisible in the dump.
     {
-        int taggedSkills[NUM_TAGGED_SKILLS];
+        Skill taggedSkills[NUM_TAGGED_SKILLS];
         skillsGetTagged(taggedSkills, NUM_TAGGED_SKILLS);
         fprintf(f, "dude_tags %d %d %d %d\n", taggedSkills[0], taggedSkills[1], taggedSkills[2], taggedSkills[3]);
 
-        int trait1;
-        int trait2;
+        Trait trait1;
+        Trait trait2;
         traitsGetSelected(&trait1, &trait2);
         fprintf(f, "dude_traits %d %d\n", trait1, trait2);
     }

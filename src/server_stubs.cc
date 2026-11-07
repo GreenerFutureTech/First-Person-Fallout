@@ -6,10 +6,10 @@
 // SURFACE: each entry is a client dependency the simulation core has not yet
 // been decoupled from. Making the server actually RUN standalone means
 // replacing these, roughly in this order of leverage:
-//   * INFRASTRUCTURE the server genuinely needs — the movement/animation path
-//     (reg_anim_*/animationRegister*/_object_animate), still living in the
-//     SDL-coupled f2_client animation.cc. Timing, debug output, and file/string
-//     I/O were already extracted to f2_core (timing.cc, debug.cc,
+//   * INFRASTRUCTURE the server genuinely needs — movement/animation is handled
+//     by the synchronous headless backend in server_anim.cc; the SDL-coupled
+//     animation.cc remains in f2_client. Timing, debug output, and file/string
+//     I/O are shared through f2_core (timing.cc, debug.cc,
 //     platform_compat.cc); the background pump (_process_bk) and the three
 //     _doBkProcesses hooks (_updateWindows/_gdialogActive/gameMovieIsPlaying) are
 //     now server behavior SHIMS in server_shim.cc, not aborts.
@@ -22,8 +22,7 @@
 // prototype and the linker confirms the set is complete. Regenerate with
 // tools in the P5-C session if the core's client-symbol surface changes.
 //
-// 232 function stubs + 11 data placeholders
-// + 2 global-namespace sfall_kb helpers. De-stubbed so far in P5-C Step 1:
+// Headless function stubs and data placeholders. De-stubbed so far in P5-C Step 1:
 //   1a timing/ticker infra (getTicks/_get_bk_time/tickers*) -> f2_core/timing.cc
 //      with a client-registered clock backend;
 //   1b debug output (debugPrint + _debug_register_*) -> f2_core/debug.cc, the
@@ -42,6 +41,7 @@
 //      pipboy/char-editor/automap/loadsave/screenshot fns + gModernFontManager.
 
 #include <cstdio>
+#include <cstdarg>
 #include <cstdlib>
 #include <cstring>
 
@@ -53,6 +53,7 @@
 #include "character_editor.h"
 #include "character_selector.h"
 #include "color.h"
+#include "dinput.h"
 #include "combat.h"
 #include "combat_ui.h"
 #include "cycle.h"
@@ -62,6 +63,7 @@
 #include "draw.h"
 #include "elevator.h"
 #include "endgame.h"
+#include "first_person_sky.h"
 #include "font_manager.h"
 #include "game.h"
 #include "game_dialog.h"
@@ -88,6 +90,7 @@
 #include "loadsave.h"
 #include "map.h"
 #include "map_render.h"
+#include "mainmenu.h"
 #include "mouse.h"
 #include "mouse_manager.h"
 #include "movie.h"
@@ -101,15 +104,19 @@
 #include "preferences.h"
 #include "preferences_state.h"
 #include "settings.h"
+#include "skilldex.h"
 #include "platform_compat.h"
 #include "presenter_client.h"
 #include "sfall_kb_helpers.h"
 #include "sound.h"
+#include "script_sound.h"
 #include "svga.h"
 #include "text_font.h"
 #include "text_object.h"
 #include "tile.h"
 #include "tile_render.h"
+#include "tile_hires_stencil.h"
+#include "touch.h"
 #include "window.h"
 #include "window_manager.h"
 #include "window_manager_private.h"
@@ -173,8 +180,8 @@ static constexpr int kHeadlessScreenHeight = 480;
 
 // ---- data placeholders (globals the core names; never meaningfully read on
 // the aborting server — storage only, so the link resolves) ----
-unsigned char _cmap[768];
-unsigned char _colorTable[32768];
+Color _commonGrayTable[COLOR_COUNT];
+unsigned char gPaletteBlack[256 * 3];
 FontManagerGetStringWidthProc* fontGetStringWidth;
 int gCharacterEditorRemainingCharacterPoints;
 Object* gGameMouseBouncingCursor;
@@ -183,7 +190,6 @@ int gIsoWindow;
 Rect _scr_size;
 
 // ---- free-function stubs (auto-generated from the headers above) ----
-char* _colorError() { serverStubAbort("_colorError"); }
 int combatInputClient() { serverStubAbort("combatInputClient"); }
 void combatTurnRunClient() { serverStubAbort("combatTurnRunClient"); }
 int _createWindow(const char* windowName, int x, int y, int width, int height, int a6, int flags) { serverStubAbort("_createWindow"); }
@@ -226,7 +232,6 @@ void _freeColorBlendTable(int a1) { (void)a1; /* Benign: paired with the null-re
 // result solely for blitting (e.g. worldmap circleBlendTable) and null-check
 // before use/free, so nullptr — "no blend table headless" — is safe.
 unsigned char* _getColorBlendTable(int ch) { (void)ch; return nullptr; }
-unsigned char* _getSystemPalette() { serverStubAbort("_getSystemPalette"); }
 void _gmouse_disable(int a1) { (void)a1; /* Benign: mouse cursor gating; no mouse headless. */ }
 // Benign: clears the outline on the item under the mouse cursor
 // (gGameMouseHighlightedItem). That highlight is client-only state and is
@@ -262,10 +267,10 @@ int _register_priority(int a1)
     serverStubAbort("_register_priority");
 }
 bool _selectWindowID(int index) { serverStubAbort("_selectWindowID"); }
-void _setSystemPalette(unsigned char* palette) { serverStubAbort("_setSystemPalette"); }
 int _soundType(Sound* sound, int type) { serverStubAbort("_soundType"); }
-int _win_debug(char* string) { serverStubAbort("_win_debug"); }
-int _win_list_select(const char* title, char** fileList, int fileListLength, ListSelectionHandler* callback, int x, int y, int color) { serverStubAbort("_win_list_select"); }
+int _win_debug(const char* string) { serverStubAbort("_win_debug"); }
+int _win_list_select(const char* title, const char* const* fileList, int fileListLength, ListSelectionHandler* callback, int x, int y, ColorWithFlags color) { return -1; }
+int _win_last_button_winID() { return -1; }
 bool _windowActivateRegion(const char* regionName, int a2) { serverStubAbort("_windowActivateRegion"); }
 bool _windowAddButton(const char* buttonName, int x, int y, int width, int height, int flags) { serverStubAbort("_windowAddButton"); }
 bool _windowAddButtonGfx(const char* buttonName, char* pressedFileName, char* normalFileName, char* hoverFileName) { serverStubAbort("_windowAddButtonGfx"); }
@@ -318,7 +323,8 @@ int ambientSoundEffectEventProcess(Object* a1, void* a2) { serverStubAbort("ambi
 // stays a LOUD abort: it opens the modal automap screen, which the server must never
 // reach (the viewer runs that locally) — hitting it would be a real bug, not this class.
 int automapSaveCurrent() { return 0; }
-void automapSetDisplayMap(int map, bool available) { (void)map; (void)available; }
+void automapSetDisplayMap(Map map, bool available) { (void)map; (void)available; }
+int automapGetWindow() { return -1; }
 void automapShow(bool isInGame, bool isUsingScanner) { serverStubAbort("automapShow"); }
 // Benign no-op: bufferDrawLine only ever writes color indices into display
 // buffers (here, the tileInit hex-grid overlay bitmaps _tile_grid*). The server
@@ -334,14 +340,13 @@ void bufferFill(unsigned char* buf, int width, int height, int pitch, int a5)
         buf += pitch;
     }
 }
-int calledShotSelectHitLocationClient(Object* critter, int* hitLocation, int hitMode) { serverStubAbort("calledShotSelectHitLocationClient"); }
+int calledShotSelectHitLocationClient(Object* critter, HitLocation* hitLocation, HitMode hitMode) { serverStubAbort("calledShotSelectHitLocationClient"); }
 void characterEditorReset() { /* Benign: char-editor UI temp state; no editor headless. */ }
 // Benign, and exactly faithful: the client body is wholly guarded by
 // gColorCycleInitialized, which only colorCycleInit sets and no headless run
 // calls — so even the real implementation would do nothing here. Palette
 // animation besides. Reached through isoReset, on the load path's gameResetSim.
 void colorCycleReset() { }
-bool colorPaletteLoad(const char* path) { serverStubAbort("colorPaletteLoad"); }
 bool cursorIsHidden() { serverStubAbort("cursorIsHidden"); }
 void dialogInit() { /* Benign: empty in dialog.cc (client body is a no-op too). */ }
 int dialogSetBorder(int a1, int a2) { serverStubAbort("dialogSetBorder"); }
@@ -369,7 +374,7 @@ int dialogSetReplyWindow(int a1, int a2, int a3, int a4, char* a5) { (void)a1; (
 void endgamePlayMovie()
 {
     serverStubHeadlessOnce("endgamePlayMovie");
-    _game_user_wants_to_quit = 2;
+    _game_user_wants_to_quit = GAME_QUIT_REQUEST_MAIN_MENU;
 }
 // Benign: selects which death-ending narration/slideshow to show — presentation
 // the server hands to clients, and it picks from gEndgameDeathEndings, which is
@@ -380,9 +385,9 @@ void endgamePlayMovie()
 void endgameSetupDeathEnding(int reason) { (void)reason; }
 // Benign: no hardware cursor headless. Any non-WAIT_PLANET value is fine (the sim
 // only compares it and round-trips it through the no-op presenter cursorSet).
-int gameMouseGetCursor() { return MOUSE_CURSOR_NONE; }
+MouseCursorType gameMouseGetCursor() { return MOUSE_CURSOR_NONE; }
 // HEADLESS-SAFE (sfall metarule `get_cursor_mode`): no cursor, report mode 0.
-int gameMouseGetMode() { serverStubHeadlessOnce("gameMouseGetMode"); return 0; }
+GameMouseMode gameMouseGetMode() { serverStubHeadlessOnce("gameMouseGetMode"); return GAME_MOUSE_MODE_MOVE; }
 // Benign: nothing is shown headless.
 bool gameMouseObjectsIsVisible() { return false; }
 // Benign: _map_init registers this as a ticker (fires every _process_bk beat).
@@ -392,7 +397,6 @@ void gameMouseRefresh() { }
 void gameMouseRefreshImmediately() { /* Benign: fileRead's load-progress cursor spin; no mouse headless. */ }
 int gameMouseReset() { serverStubAbort("gameMouseReset"); }
 // HEADLESS-SAFE (sfall metarule `set_cursor_mode`): nothing to set.
-void gameMouseSetMode(int a1) { (void)a1; serverStubHeadlessOnce("gameMouseSetMode"); }
 // Benign: movies never play headless, so none are "seen" on a fresh boot — which
 // is the correct answer for the one sim-affecting caller (_proto_dude_update_gender
 // gates the dude's native-look FID on MOVIE_VSUIT). NOTE: gGameMovieFlags is saved
@@ -403,7 +407,7 @@ void gameMouseSetMode(int a1) { (void)a1; serverStubHeadlessOnce("gameMouseSetMo
 // branch exactly (mark seen, report success). gameMovieIsSeen is no longer a
 // stub at all: game_movie_state.cc owns the ledger in f2_core, so the server
 // answers it truthfully. A future NetworkPresenter emits the movie to clients.
-int gameMoviePlay(int movie, int flags)
+int gameMoviePlay(GameMovie movie, GameMovieFlags flags)
 {
     // No longer a stub in the "lie and move on" sense. Three real steps:
     //
@@ -435,8 +439,7 @@ int gameMoviePlay(int movie, int flags)
     if (!serverFeatureEnabled("F2_MOVIES")) {
         return 0;
     }
-
-    presenter()->moviePlay(movie, flags);
+    presenter()->moviePlay(static_cast<int>(movie), static_cast<int>(flags));
     gameMovieServerBarrier();
     // The barrier just freed on the FIRST ack (game_movie.h — first skip ends it for
     // the room). Tell every OTHER viewer to stop its local playback NOW; without this
@@ -446,6 +449,8 @@ int gameMoviePlay(int movie, int flags)
     presenter()->movieStop();
     return 0;
 }
+const char* gameMovieGetDefaultFileName(GameMovie movie) { (void)movie; return nullptr; }
+bool gameMovieSetPath(GameMovie movie, const char* fileName) { (void)movie; (void)fileName; return false; }
 // HEADLESS-SAFE, and it USED TO ABORT. The sole caller is radiation death
 // (critter.cc _process_rads), which now routes the news to the dying actor's own
 // console on a dedicated server — but "abort if anything ever reaches this again"
@@ -482,18 +487,28 @@ void interfaceBarRefresh() { }
 // value the client initializes and resets it to, so it matches the server's
 // effective state for a dude who never swapped hands. Must be relocated to
 // f2_core when hand-swapping joins the inbound protocol.
-int interfaceGetCurrentHand() { return HAND_LEFT; }
+Hand interfaceGetCurrentHand() { return HAND_LEFT; }
 // Benign: no interface bar headless. Return -1 WITHOUT writing the out-params —
 // combat.cc:3467 relies on exactly this (pre-inits `aiming=false`, treats -1 as
 // "no called-shot"). Was a LATENT server crash (abort would fire on the combat path).
-int interfaceGetCurrentHitMode(int* hitMode, bool* aiming) { return -1; }
+int interfaceGetCurrentHitMode(HitMode* hitMode, bool* aiming) { return -1; }
 // Benign: no item-action buttons headless — report none.
-int interfaceGetItemActions(int* leftItemAction, int* rightItemAction)
+int interfaceGetItemActions(InterfaceItemAction* leftItemAction, InterfaceItemAction* rightItemAction)
 {
-    if (leftItemAction != nullptr) *leftItemAction = 0;
-    if (rightItemAction != nullptr) *rightItemAction = 0;
+    if (leftItemAction != nullptr) *leftItemAction = static_cast<InterfaceItemAction>(0);
+    if (rightItemAction != nullptr) *rightItemAction = static_cast<InterfaceItemAction>(0);
     return 0;
 }
+void interfaceRenderHitPoints(bool animate) { (void)animate; }
+void interfaceRenderActionPoints(int actionPointsLeft, int bonusActionPoints) { }
+int interfaceUpdateItems(bool animated, InterfaceItemAction leftItemAction, InterfaceItemAction rightItemAction) { serverStubAbort("interfaceUpdateItems"); }
+int interfaceBarSwapHands(bool animated) { serverStubAbort("interfaceBarSwapHands"); }
+int interfaceTagAdd() { return -1; }
+int interfaceTagGetMax() { return 0; }
+bool interfaceTagShow(int tag) { (void)tag; return false; }
+bool interfaceTagHide(int tag) { (void)tag; return false; }
+bool interfaceTagIsActive(int tag) { (void)tag; return false; }
+void interfaceTagSetText(int tag, const char* text, int color) { (void)tag; (void)text; (void)color; }
 // Benign HERE, but read the caveat. The body is HUD teardown (interface bar,
 // display monitor, indicator bar) which headless has none of — EXCEPT its last
 // line, `gInterfaceCurrentHand = 0`, which is sim-relevant: it is the active
@@ -507,7 +522,7 @@ void interfaceReset() { }
 // HEADLESS-SAFE (sfall `get_attack_type`): the server has no interface-bar hand, so
 // report "no current attack mode" and let the caller take its failure branch. This
 // was the latent server crash flagged in the cut-list.
-bool interface_get_current_attack_mode(int* hit_mode) { (void)hit_mode; serverStubHeadlessOnce("interface_get_current_attack_mode"); return false; }
+bool interface_get_current_attack_mode(HitMode* hit_mode) { (void)hit_mode; serverStubHeadlessOnce("interface_get_current_attack_mode"); return false; }
 void isoWindowRefreshRectGame(Rect* rect) { serverStubAbort("isoWindowRefreshRectGame"); }
 void isoWindowRefreshRectMapper(Rect* rect) { serverStubAbort("isoWindowRefreshRectMapper"); }
 void keyboardReset() { /* Benign: no keyboard headless. */ }
@@ -528,6 +543,7 @@ unsigned char* pcxRead(const char* path, int* widthPtr, int* heightPtr, unsigned
 // rest loop moved to f2_core (rest.cc), so the server drives the real simulation
 // instead of calling a client symbol that aborted the process.
 void renderPresent() { serverStubAbort("renderPresent"); }
+void paletteFadeTo(unsigned char* palette) { (void)palette; }
 // HEADLESS-SAFE (sfall `get_screen_height`): vanilla's native resolution.
 int screenGetHeight() { serverStubHeadlessOnce("screenGetHeight"); return kHeadlessScreenHeight; }
 // HEADLESS-SAFE (sfall `get_screen_width`): vanilla's native resolution.
@@ -537,7 +553,7 @@ int screenGetWidth() { serverStubHeadlessOnce("screenGetWidth"); return kHeadles
 // the same choice the streamed encounter prompt makes when no viewer replies.
 // ►► A prompt a PLAYER should answer must be streamed (see wmEncounterPromptBarrier),
 // not routed here; this is the backstop that keeps an unstreamed one from being fatal.
-int showDialogBox(const char* title, const char** body, int bodyLength, int x, int y, int titleColor, const char* a8, int bodyColor, int flags)
+int showDialogBox(const char* title, const char** body, int bodyLength, int x, int y, ColorWithFlags titleColor, const char* a8, ColorWithFlags bodyColor, int flags)
 {
     (void)title; (void)body; (void)bodyLength; (void)x; (void)y;
     (void)titleColor; (void)a8; (void)bodyColor; (void)flags;
@@ -555,18 +571,36 @@ bool showMesageBox(const char* str)
     fprintf(stderr, "f2_server: %s\n", str != nullptr ? str : "(no message)");
     return false;
 }
-Sound* soundAllocate(int type, int soundFlags) { serverStubAbort("soundAllocate"); }
+bool showMessageBox(const char* str)
+{
+    return showMesageBox(str);
+}
+Sound* soundAllocate(SoundType type, SoundFlags soundFlags) { serverStubAbort("soundAllocate"); }
 void soundContinueAll() { /* Benign: no audio pump headless. */ }
-int soundDelete(Sound* sound) { serverStubAbort("soundDelete"); }
+bool soundIsType(Sound* sound, SoundType type) { (void)sound; (void)type; return false; }
+SoundError soundDelete(Sound* sound) { serverStubAbort("soundDelete"); }
 bool soundIsPlaying(Sound* sound) { serverStubAbort("soundIsPlaying"); }
-int soundLoad(Sound* sound, char* filePath) { serverStubAbort("soundLoad"); }
-int soundPause(Sound* sound) { serverStubAbort("soundPause"); }
-int soundPlay(Sound* sound) { serverStubAbort("soundPlay"); }
-int soundResume(Sound* sound) { serverStubAbort("soundResume"); }
-int soundSetCallback(Sound* sound, SoundCallback* callback, void* userData) { serverStubAbort("soundSetCallback"); }
-int soundSetChannels(Sound* sound, int channels) { serverStubAbort("soundSetChannels"); }
-int soundSetLooping(Sound* sound, int loops) { serverStubAbort("soundSetLooping"); }
-int soundStop(Sound* sound) { serverStubAbort("soundStop"); }
+SoundError soundLoad(Sound* sound, char* filePath) { serverStubAbort("soundLoad"); }
+SoundError soundPause(Sound* sound) { serverStubAbort("soundPause"); }
+SoundError soundPlay(Sound* sound) { serverStubAbort("soundPlay"); }
+SoundError soundResume(Sound* sound) { serverStubAbort("soundResume"); }
+SoundError soundSetCallback(Sound* sound, SoundCallback* callback, void* userData) { serverStubAbort("soundSetCallback"); }
+SoundError soundSetChannels(Sound* sound, int channels) { serverStubAbort("soundSetChannels"); }
+SoundError soundSetLooping(Sound* sound, int loops) { serverStubAbort("soundSetLooping"); }
+SoundError soundStop(Sound* sound) { serverStubAbort("soundStop"); }
+bool backgoundSoundIsPlaying() { return false; }
+const char* gameSoundGetMusicOverride(const char* key, const char* defaultValue) { (void)key; return defaultValue; }
+int speechIsEnabled() { return 0; }
+int speechLoad(const char* fileName, GameSoundReadLimitMode readLimitMode, GameSoundStorageType storageType, GameSoundLoopingMode loopingMode)
+{
+    (void)fileName; (void)readLimitMode; (void)storageType; (void)loopingMode;
+    return -1;
+}
+void scriptSoundInit() { }
+int scriptSoundPlay(const char* path, int mode) { (void)path; (void)mode; return -1; }
+void scriptSoundStop(int id) { (void)id; }
+void scriptSoundReset() { }
+void scriptSoundExit() { }
 int sub_430FD4(const char* a1, const char* a2, int timeout) { serverStubAbort("sub_430FD4"); }
 int sub_431088(int a1) { serverStubAbort("sub_431088"); }
 int sub_4B7AC4(const char* windowName, int x, int y, int width, int height) { serverStubAbort("sub_4B7AC4"); }
@@ -589,14 +623,122 @@ void textObjectsRemoveByOwner(Object* object) { (void)object; }
 // gTextObjectsInitialized is false and the real function returns -1 without
 // touching anything. Callers (map.cc/object.cc) ignore the result.
 int textObjectsReset() { return -1; }
-void tileRefreshGame(Rect* rect, int elevation) { serverStubAbort("tileRefreshGame"); }
-void tileRefreshMapper(Rect* rect, int elevation) { serverStubAbort("tileRefreshMapper"); }
+void tileRefreshGame(Rect* rect, MapElevation elevation) { (void)rect; (void)elevation; }
+void tileRefreshMapper(Rect* rect, MapElevation elevation) { (void)rect; (void)elevation; }
+void tileRenderFloor(const TileFrmId& frmId, int x, int y, Rect* rect) { serverStubAbort("tileRenderFloor"); }
+void tile_hires_stencil_init() { }
+void tile_hires_stencil_on_map_load() { }
+void tile_hires_stencil_on_center_tile_or_elevation_change() { }
+void tile_hires_stencil_draw(Rect* rect, unsigned char* buffer, int windowWidth, int windowHeight) { }
 void tileWindowRefresh() { /* Benign: full-window tile repaint (e.g. tileSetCenter tail); no blit headless. */ }
 // Benign: the dirty-rect screen repaint tail of the relocated _dude_stand (and
 // other tile mutators). The server never blits, so invalidating a screen rect
 // is a no-op; the sim state those mutators set has already been applied.
-void tileWindowRefreshRect(Rect* rect, int elevation) { (void)rect; (void)elevation; }
+void tileWindowRefreshRect(Rect* rect, MapElevation elevation) { (void)rect; (void)elevation; }
+
+// Script windows and other client presentation surfaces are unavailable on the
+// dedicated server. Return the same kind of "no window/action" result a failed
+// client lookup would produce rather than aborting simulation script execution.
+bool scriptWindowActivateRegion(const char* regionName, int mouseEvent) { (void)regionName; (void)mouseEvent; return false; }
+bool scriptWindowAddButton(const char* buttonName, int x, int y, int width, int height, int flags) { return false; }
+bool scriptWindowAddButtonGfx(const char* buttonName, char* pressedFileName, char* normalFileName, char* hoverFileName) { return false; }
+bool scriptWindowAddButtonProc(const char* buttonName, Program* program, int mouseEnterProc, int mouseExitProc, int mouseDownProc, int mouseUpProc) { return false; }
+bool scriptWindowAddButtonRightProc(const char* buttonName, Program* program, int rightMouseDownProc, int rightMouseUpProc) { return false; }
+bool scriptWindowAddButtonText(const char* buttonName, const char* text) { return false; }
+void scriptWindowAddInputFunc(WindowInputHandler* handler) { (void)handler; }
+bool scriptWindowAddRegionName(const char* regionName) { return false; }
+bool scriptWindowAddRegionPoint(int x, int y, bool a3) { return false; }
+bool scriptWindowAddRegionProc(const char* regionName, Program* program, int a3, int a4, int a5, int a6) { return false; }
+bool scriptWindowAddRegionRightProc(const char* regionName, Program* program, int a3, int a4) { return false; }
+bool scriptWindowCheckRegionExists(const char* regionName) { return false; }
+int scriptWindowCreate(const char* windowName, int x, int y, int width, int height, ColorWithFlags color, int flags) { return -1; }
+bool scriptWindowDelete(const char* windowName) { return false; }
+bool scriptWindowDeleteButton(const char* buttonName) { return false; }
+bool scriptWindowDeleteRegion(const char* regionName) { return false; }
+bool scriptWindowDisplay(char* fileName, int x, int y, int width, int height) { return false; }
+bool scriptWindowDraw() { return false; }
+void scriptWindowEndRegion() { }
+bool scriptWindowFill(float r, float g, float b) { return false; }
+bool scriptWindowFillRect(int x, int y, int width, int height, float r, float g, float b) { return false; }
+bool scriptWindowFormatMessage(char* string, int x, int y, int width, int height, TextAlignment textAlignment) { return false; }
+unsigned char* scriptWindowGetBuffer() { return nullptr; }
+int scriptWindowGetWindow(int index) { return -1; }
+bool scriptWindowGotoXY(int x, int y) { return false; }
+int scriptWindowHeight() { return 0; }
+bool scriptWindowHide() { return false; }
+bool scriptWindowHideNamed(const char* name) { return false; }
+int scriptWindowMoviePlaying() { return 0; }
+int scriptWindowOutput(const char* string) { return -1; }
+bool scriptWindowPlayMovie(char* filePath) { return false; }
+bool scriptWindowPlayMovieRect(char* filePath, int x, int y, int w, int h) { return false; }
+bool scriptWindowPrintRect(char* string, int wrapWidth, TextAlignment textAlignment) { return false; }
+int scriptWindowPush(const char* windowName) { return -1; }
+bool scriptWindowRefreshRegions() { return false; }
+int scriptWindowResize(const char* windowName, int x, int y, int width, int height) { return -1; }
+int scriptWindowScale(const char* windowName, int x, int y, int width, int height) { return -1; }
+bool scriptWindowSelectId(int index) { return false; }
+bool scriptWindowSetButtonFlag(const char* buttonName, int value) { return false; }
+bool scriptWindowSetFlag(int windowId, int bitFlag, bool enabled) { return false; }
+int scriptWindowSetHighlightColor(float r, float g, float b) { return -1; }
+bool scriptWindowSetMovieFlags(int flags) { return false; }
+bool scriptWindowSetNamedFlag(const char* name, int bitFlag, bool enabled) { return false; }
+bool scriptWindowSetRegionFlag(const char* regionName, int value) { return false; }
+int scriptWindowSetTextColor(float r, float g, float b) { return -1; }
+int scriptWindowSetTextFlags(DrawTextFlags flags) { return -1; }
+bool scriptWindowShow() { return false; }
+bool scriptWindowShowNamed(const char* name) { return false; }
+bool scriptWindowStartRegion(int initialCapacity) { return false; }
+void scriptWindowStopMovie() { }
+void scriptWindowUpdateAll() { }
+int scriptWindowWidth() { return 0; }
+
+int buttonCreateWithFrm(int win, int x, int y, int mouseEnterEventCode, int mouseExitEventCode, int mouseDownEventCode, int mouseUpEventCode, const InterfaceFrmId& normalId, const InterfaceFrmId& pressedId, const InterfaceFrmId& hoverId, int flags) { return -1; }
+int buttonSetDisabledFrm(int btn, const InterfaceFrmId& normalId, const InterfaceFrmId& pressedId, const InterfaceFrmId& hoverId) { return -1; }
+int characterEditorGetWindow() { return -1; }
+void characterEditorDisplayStats() { }
+int dialogGo(int a1) { return -1; }
+int dialogMessage(const char* a1, const char* a2, int timeout) { return -1; }
+void directDrawSetPalette(unsigned char* palette) { }
+void directDrawSetPaletteInRange(unsigned char* palette, int start, int count) { }
+void firstPersonSkyRender(unsigned char* buffer, int width, int height, int pitch, double yaw, double fieldOfViewScale, int ambientIntensityIndex, FirstPersonSkyType skyType) { }
+void gameHandleFirstPersonPreviewInput(int eventCode) { }
+Object* gameMouseGetObjectUnderCursor(ObjectType objectType, bool includeDude, MapElevation elevation) { return nullptr; }
+Object* gameMouseGetObjectUnderCursor(int objectType, bool includeDude, int elevation) { return nullptr; }
+void gameMouseSetMode(GameMouseMode mode) { }
+void inputEventQueueReset() { }
+void mainMenuRequestExit() { serverStubHeadlessOnce("mainMenuRequestExit"); }
+int optionsGetWindow() { return -1; }
+int pipboyGetWindow() { return -1; }
+bool pipboyIsResting() { return false; }
+bool pipboyRestOptionMsgsSetBase(int baseMessageId) { return false; }
+bool pipboyRestOptionSet(int restOption, int value) { return false; }
+void pipboySetRestHealTime(int minutes) { }
+int skilldexGetWindow() { return -1; }
+void textObjectsRenderForOwner(Object* object, unsigned char* buffer, int pitch, int width, int height, int centerX, int top) { }
+int wmInterfaceRefresh() { return 0; }
+int wmRefreshInterfaceOverlay(bool shouldRefreshWindow) { return 0; }
+void _dark_translucent_trans_buf_to_buf(unsigned char* src, int srcWidth, int srcHeight, int srcPitch, unsigned char* dest, int destX, int destY, int destPitch, int light, Color* blendTable, Color* colorTable) { }
+int _gsound_compute_relative_volume(Object* obj) { return 0; }
+int floatSoundPlay(const char* fileName, Object* speaker) { return -1; }
+void gpuBillboardBeginFrame(unsigned char lightModulation) { }
+void gpuBillboardMarkSceneComplete() { }
+void gpuBillboardClear() { }
+void gpuBillboardSubmit(const unsigned char* pixels, int width, int height, const SDL_Rect& destination, const SDL_Rect& clip, double depth) { }
+bool gBlockMouseUpEvent = false;
+int gInterfaceBarWindow = -1;
+bool _ctrl_pressed() { return false; }
+bool mouseDeviceSetRelativeModeForced(bool enabled) { (void)enabled; return false; }
+void touch_set_touchscreen_mode(const bool value) { (void)value; }
+void touch_set_pan_mode(const bool value) { (void)value; }
 void windowHide(int win) { (void)win; /* Benign: no GNW windows headless; nothing to hide (e.g. _map_exit teardown). */ }
+int windowGetXres() { return kHeadlessScreenWidth; }
+int windowGetYres() { return kHeadlessScreenHeight; }
+Buffer2D windowGetBuffer2D(int win) { (void)win; return {}; }
+Window* windowGetWindow(int win) { (void)win; return nullptr; }
+int windowGetAtPoint(int x, int y) { (void)x; (void)y; return -1; }
+void windowFill(int win, int x, int y, int width, int height, ColorWithFlags color) { serverStubAbort("windowFill"); }
+bool screenIsHardwareAccelerated() { return false; }
+int screenGetVisibleHeight() { return kHeadlessScreenHeight; }
 int windowSetFont(int a1) { serverStubAbort("windowSetFont"); }
 int windowSetHighlightColor(float a1, float a2, float a3) { serverStubAbort("windowSetHighlightColor"); }
 int windowSetTextColor(float a1, float a2, float a3) { serverStubAbort("windowSetTextColor"); }
@@ -631,7 +773,7 @@ FpsLimiter sharedFpsLimiter;
 FpsLimiter::FpsLimiter(unsigned int fps) : _fps(fps), _ticks(0) {}
 void FpsLimiter::mark() { serverStubAbort("FpsLimiter::mark"); }
 void FpsLimiter::throttle() const { serverStubAbort("FpsLimiter::throttle"); }
-FontManagerDrawTextProc* fontDrawText = nullptr;
+FontManagerDrawTextProc* fontDrawTextPtr = nullptr;
 FontManagerGetLineHeightProc* fontGetLineHeight = nullptr;
 int gMusicVolume = 0;
 unsigned char gLipsCurrentPhoneme = 0;
@@ -648,27 +790,29 @@ bool indicatorBarShow() { return false; }
 bool indicatorBarHide() { return false; }
 void gameMouseObjectsShow() { }
 void gameMouseObjectsHide() { }
-int gameMouseSetCursor(int cursor) { (void)cursor; return 0; }
+int gameMouseSetCursor(MouseCursorType cursor) { (void)cursor; return 0; }
 void _gmouse_enable() { }
 void _gmouse_enable_scrolling() { }
 void _gmouse_disable_scrolling() { }
 int _gsound_background_volume_get_set(int a1) { (void)a1; return 0; }
 void backgroundSoundDelete() { }
-void backgroundSoundRestart(int value) { (void)value; }
+void backgroundSoundRestart(GameSoundReadLimitMode value) { (void)value; }
 void backgroundSoundSetVolume(int value) { (void)value; }
 int soundPlayFile(const char* name) { (void)name; return -1; }
 
 // ---- loud aborts (pure render/input — unreachable headless) ----
-void blitBufferToBuffer(unsigned char* src, int width, int height, int srcPitch, unsigned char* dest, int destPitch) { serverStubAbort("blitBufferToBuffer"); }
-void blitBufferToBufferTrans(unsigned char* src, int width, int height, int srcPitch, unsigned char* dest, int destPitch) { serverStubAbort("blitBufferToBufferTrans"); }
 int buttonCreate(int win, int x, int y, int width, int height, int mouseEnterEventCode, int mouseExitEventCode, int mouseDownEventCode, int mouseUpEventCode, unsigned char* up, unsigned char* dn, unsigned char* hover, int flags) { serverStubAbort("buttonCreate"); }
 int buttonDestroy(int btn) { serverStubAbort("buttonDestroy"); }
 int buttonDisable(int btn) { serverStubAbort("buttonDisable"); }
 int buttonSetCallbacks(int btn, ButtonCallback* pressSoundFunc, ButtonCallback* releaseSoundFunc) { serverStubAbort("buttonSetCallbacks"); }
 int buttonSetMouseCallbacks(int btn, ButtonCallback* mouseEnterProc, ButtonCallback* mouseExitProc, ButtonCallback* mouseDownProc, ButtonCallback* mouseUpProc) { serverStubAbort("buttonSetMouseCallbacks"); }
-int Color2RGB(Color c) { serverStubAbort("Color2RGB"); }
 void convertMouseWheelToArrowKey(int* keyCodePtr) { serverStubAbort("convertMouseWheelToArrowKey"); }
-void displayMonitorAddMessage(char* string) { serverStubAbort("displayMonitorAddMessage"); }
+void displayMonitorAddMessage(const char* string)
+{
+    if (string != nullptr) {
+        presenter()->consoleMessage(string);
+    }
+}
 int inputGetInput() { serverStubAbort("inputGetInput"); }
 int lipsFree() { serverStubAbort("lipsFree"); }
 int lipsLoad(const char* audioFileName, const char* headFileName) { serverStubAbort("lipsLoad"); }
@@ -678,13 +822,28 @@ bool _mouse_click_in(int left, int top, int right, int bottom) { serverStubAbort
 int mouseGetEvent() { serverStubAbort("mouseGetEvent"); }
 bool mouseHitTestInWindow(int win, int left, int top, int right, int bottom) { serverStubAbort("mouseHitTestInWindow"); }
 int showQuitConfirmationDialog() { serverStubAbort("showQuitConfirmationDialog"); }
-int windowCreate(int x, int y, int width, int height, int color, int flags) { serverStubAbort("windowCreate"); }
+int windowCreate(int x, int y, int width, int height, ColorWithFlags color, int flags) { serverStubAbort("windowCreate"); }
 void windowDestroy(int win) { serverStubAbort("windowDestroy"); }
-void windowDrawText(int win, const char* str, int a3, int x, int y, int a6) { serverStubAbort("windowDrawText"); }
+void windowDrawText(int win, const char* str, int maxWidth, int x, int y, ColorWithFlags color) { serverStubAbort("windowDrawText"); }
 unsigned char* windowGetBuffer(int win) { serverStubAbort("windowGetBuffer"); }
 int windowGetWidth(int win) { serverStubAbort("windowGetWidth"); }
 int windowGetHeight(int win) { serverStubAbort("windowGetHeight"); }
-int windowGetRect(int win, Rect* rect) { serverStubAbort("windowGetRect"); }
+int windowGetRect(int win, Rect* rect)
+{
+    if (rect == nullptr || win != gIsoWindow) {
+        return -1;
+    }
+
+    // The server retains map-edge geometry, which asks for the isometric
+    // viewport bounds when loading an .EDG file. Match its synthetic render
+    // buffer dimensions without creating a client window.
+    rect->left = 0;
+    rect->top = 0;
+    rect->right = kHeadlessScreenWidth - 1;
+    rect->bottom = kHeadlessScreenHeight - 1;
+    serverStubHeadlessOnce("windowGetRect");
+    return 0;
+}
 void windowRefresh(int win) { serverStubAbort("windowRefresh"); }
 void windowRefreshRect(int win, const Rect* rect) { serverStubAbort("windowRefreshRect"); }
 int _win_register_button_disable(int btn, unsigned char* up, unsigned char* down, unsigned char* hover) { serverStubAbort("_win_register_button_disable"); }
@@ -739,10 +898,10 @@ int preferencesLoad(File* stream)
         return -1;
     }
 
-    settings.preferences.game_difficulty = block.gameDifficulty;
-    settings.preferences.combat_difficulty = block.combatDifficulty;
-    settings.preferences.violence_level = block.violenceLevel;
-    settings.preferences.target_highlight = block.targetHighlight;
+    settings.preferences.game_difficulty = static_cast<GameDifficulty>(block.gameDifficulty);
+    settings.preferences.combat_difficulty = static_cast<CombatDifficulty>(block.combatDifficulty);
+    settings.preferences.violence_level = static_cast<ViolenceLevel>(block.violenceLevel);
+    settings.preferences.target_highlight = static_cast<TargetHighlight>(block.targetHighlight);
     settings.preferences.combat_looks = block.combatLooks;
     settings.preferences.combat_messages = block.combatMessages;
     settings.preferences.combat_taunts = block.combatTaunts;
@@ -838,7 +997,7 @@ void interfaceBarEndButtonsHide(bool animated) { (void)animated; }
 // sends verbs instead of mutating its mirror). On the server those are nonsense
 // by definition: the server IS the authority, so there is nobody to send to.
 // ============================================================================
-void artRender(int fid, unsigned char* dest, int width, int height, int pitch) { serverStubAbort("artRender"); }
+void artRender(const FrmId& fid, unsigned char* dest, int width, int height, int pitch) { serverStubAbort("artRender"); }
 int buttonEnable(int btn) { serverStubAbort("buttonEnable"); }
 void clientViewerArmExplosive(int pid, int seconds) { serverStubAbort("clientViewerArmExplosive"); }
 bool clientViewerConsumeDudeInvDirty() { serverStubAbort("clientViewerConsumeDudeInvDirty"); }
@@ -854,8 +1013,8 @@ void clientViewerUseItem(int pid) { serverStubAbort("clientViewerUseItem"); }
 void clientViewerUseItemOn(int targetNetId, int pid) { serverStubAbort("clientViewerUseItemOn"); }
 void clientViewerWield(Object* item, int hand) { serverStubAbort("clientViewerWield"); }
 int gameMouseHighlightActionMenuItemAtIndex(int menuItemIndex) { serverStubAbort("gameMouseHighlightActionMenuItemAtIndex"); }
-int gameMouseRenderActionMenuItems(int x, int y, const int* menuItems, int menuItemsCount, int width, int height) { serverStubAbort("gameMouseRenderActionMenuItems"); }
-int gameMouseRenderPrimaryAction(int x, int y, int menuItem, int width, int height) { serverStubAbort("gameMouseRenderPrimaryAction"); }
+int gameMouseRenderActionMenuItems(int x, int y, const GameMouseActionMenuItem* menuItems, int menuItemsCount, int width, int height) { serverStubAbort("gameMouseRenderActionMenuItems"); }
+int gameMouseRenderPrimaryAction(int x, int y, GameMouseActionMenuItem menuItem, int width, int height) { serverStubAbort("gameMouseRenderPrimaryAction"); }
 int _gmouse_3d_pick_frame_hot(int* a1, int* a2) { serverStubAbort("_gmouse_3d_pick_frame_hot"); }
 void inputPauseForTocks(unsigned int ms) { serverStubAbort("inputPauseForTocks"); }
 void interfaceRenderArmorClass(bool animate) { serverStubAbort("interfaceRenderArmorClass"); }
@@ -893,14 +1052,11 @@ bool clientStealConsumeCloseRequest() { serverStubAbort("clientStealConsumeClose
 void clientViewerStealVerb(const char* verb, int pid, int quantity) { serverStubAbort("clientViewerStealVerb"); }
 void clientModalWindowsSync() { serverStubAbort("clientModalWindowsSync"); }
 void clientDialogRenderPendingNode() { serverStubAbort("clientDialogRenderPendingNode"); }
+// No physical keyboard exists on the dedicated server.
+bool sfall_kb_is_key_pressed(int key) { (void)key; return false; }
+void sfall_kb_press_key(int key) { (void)key; }
 
 } // namespace fallout
 
-// ---- global-namespace symbols ----
 // delay_ms: dialog ticker throttle (game_dialog gameDialogTicker); render-only, unreachable headless.
 void delay_ms(int ms) { (void)ms; fallout::serverStubAbort("delay_ms"); }
-// ---- sfall keyboard helpers live in the GLOBAL namespace ----
-// HEADLESS-SAFE (sfall `key_pressed`): no keyboard attached to a server.
-bool sfall_kb_is_key_pressed(int key) { (void)key; fallout::serverStubHeadlessOnce("sfall_kb_is_key_pressed"); return false; }
-// HEADLESS-SAFE (sfall `tap_key`): nothing to type into.
-void sfall_kb_press_key(int key) { (void)key; fallout::serverStubHeadlessOnce("sfall_kb_press_key"); }

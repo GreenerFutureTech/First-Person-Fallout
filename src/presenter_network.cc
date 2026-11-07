@@ -692,7 +692,7 @@ public:
         for (Object* obj = objectFindFirstAtElevation(gElevation);
              obj != nullptr;
              obj = objectFindNextAtElevation()) {
-            if (obj->netId > 0 && FID_TYPE(obj->fid) == OBJ_TYPE_CRITTER) {
+            if (obj->netId > 0 && FrmId(obj).objectType() == OBJ_TYPE_CRITTER) {
                 critters.push_back(obj);
             }
         }

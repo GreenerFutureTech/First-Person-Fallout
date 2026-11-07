@@ -20,6 +20,8 @@
 
 namespace fallout {
 
+struct QueueListNode;
+
 static bool queueEventBelongsToExtra(QueueListNode* node);
 
 int queueSaveEventsForOwner(File* stream, Object* owner);
@@ -696,7 +698,7 @@ int queueLoadEventsForOwner(File* stream, Object* owner)
 
         // queueAddEvent takes ownership of `data`; free it ourselves only if the
         // add fails (it never frees on failure).
-        if (queueAddEvent(delay, owner, data, type) == -1) {
+        if (queueAddEvent(delay, owner, data, static_cast<EventType>(type)) == -1) {
             if (data != nullptr && eventTypeDescription->freeProc != nullptr) {
                 eventTypeDescription->freeProc(data);
             }
