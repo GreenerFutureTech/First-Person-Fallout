@@ -25,6 +25,10 @@ void lsgInit();
 int MapDirErase(const char* path, const char* extension);
 int _MapDirEraseFile_(const char* relativePath, const char* fileName);
 
+#if defined(__EMSCRIPTEN__)
+void do_save_idbfs_loadsave();
+#endif
+
 // `_ResetLoadSave` and `lsgInit` now live in savegame.h (core).
 
 } // namespace fallout
