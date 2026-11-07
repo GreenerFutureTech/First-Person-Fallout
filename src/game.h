@@ -37,9 +37,9 @@ extern bool gGameLoaded;
 int gameInitWithOptions(const char* windowTitle, bool isMapper, int font, int flags, int argc, char** argv);
 void gameReset();
 void gameExit();
-// Processes the first-person camera and Shift-held cursor mode.
+// Processes first-person camera input and cursor-mode controls.
 // This is also called while combat AI animations are running.
-void gameHandleFirstPersonPreviewInput();
+void gameHandleFirstPersonPreviewInput(int eventCode);
 int gameHandleKey(int eventCode, bool isInCombatMode);
 void gameUiDisable(int allowScrolling);
 void gameUiEnable();
