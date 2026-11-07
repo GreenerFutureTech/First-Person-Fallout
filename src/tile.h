@@ -42,6 +42,8 @@ void tileEnable();
 void tileWindowRefreshRect(Rect* rect, MapElevation elevation);
 void tileWindowRefresh();
 bool tileFirstPersonPreviewIsEnabled();
+bool tileFirstPersonPreviewIsCursorCaptured();
+void tileFirstPersonPreviewSetCursorCaptured(bool captured);
 Rotation tileFirstPersonPreviewGetFacingRotation(int tile);
 Object* tileFirstPersonPreviewPickCritter();
 Object* tileFirstPersonPreviewPickCritterAt(int screenX, int screenY);

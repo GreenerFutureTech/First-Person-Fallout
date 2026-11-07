@@ -1664,6 +1664,7 @@ static int mainClientViewer(const char* connectSpec)
     bool handSwitchPending = false;
     unsigned int handSwitchSince = 0;
 
+    bool previousFirstPersonCursorCaptured = tileFirstPersonPreviewIsCursorCaptured();
     while (viewerKeepRunning()) {
         sharedFpsLimiter.mark();
 
@@ -1744,6 +1745,11 @@ static int mainClientViewer(const char* connectSpec)
             gameToggleFirstPersonPreview();
             keyCode = -1;
         }
+        bool firstPersonCursorCaptured = tileFirstPersonPreviewIsCursorCaptured();
+        if (conn.inCombat() && previousFirstPersonCursorCaptured != firstPersonCursorCaptured) {
+            conn.recomputeCombatOutlines();
+        }
+        previousFirstPersonCursorCaptured = firstPersonCursorCaptured;
 
         // LALT toggles the highlight-lootables overlay. Safe in the viewer: it only
         // sets client-side outlines (rendering), never touches the sim.

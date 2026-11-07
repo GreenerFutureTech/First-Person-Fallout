@@ -634,8 +634,14 @@ public:
         if (!clientViewerActive()) {
             return;
         }
-        clientOutlineClearAll(); // clean slate → idempotent regardless of prior state
+        clientOutlineClearAll();
         if (!_inCombat) {
+            return;
+        }
+        // F11 free-look captures the mouse while the combat cursor can remain
+        // CROSSHAIR. Do not show combat outlines while captured in free-look.
+        if (tileFirstPersonPreviewIsEnabled()
+            && tileFirstPersonPreviewIsCursorCaptured()) {
             return;
         }
         if (_myTurn) {

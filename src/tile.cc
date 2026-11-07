@@ -223,6 +223,7 @@ TileWindowRefreshElevationProc* gTileWindowRefreshElevationProc = tileRefreshGam
 // 0x51D968 refresh_enabled
 bool gTileEnabled = true;
 static bool gFirstPersonPreviewEnabled = false;
+static bool gFirstPersonPreviewCursorCaptured = false;
 static bool gFirstPersonPreviewRefreshPending = false;
 static bool gFirstPersonPreviewRefreshing = false;
 static bool gFirstPersonPreviewTopologyEnabled = false;
@@ -2445,6 +2446,7 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         && gDude->elevation == object->elevation
         && tileIsValid(gDude->tile)
         && isInCombat()
+        && !gFirstPersonPreviewCursorCaptured
         && gameMouseGetMode() == GAME_MOUSE_MODE_CROSSHAIR
         && settings.preferences.target_highlight != TARGET_HIGHLIGHT_OFF
         && !_combat_is_shot_blocked(gDude, gDude->tile, object->tile, object, nullptr);
@@ -3833,6 +3835,16 @@ bool tileFirstPersonPreviewIsEnabled()
     return gFirstPersonPreviewEnabled;
 }
 
+bool tileFirstPersonPreviewIsCursorCaptured()
+{
+    return gFirstPersonPreviewCursorCaptured;
+}
+
+void tileFirstPersonPreviewSetCursorCaptured(bool captured)
+{
+    gFirstPersonPreviewCursorCaptured = captured;
+}
+
 Rotation tileFirstPersonPreviewGetFacingRotation(int tile)
 {
     if (!gFirstPersonPreviewEnabled
@@ -4389,6 +4401,7 @@ void tileFirstPersonPreviewToggle()
         tileFirstPersonPreviewResetForModeRefresh();
         tileFirstPersonPreviewRefresh();
     } else {
+        gFirstPersonPreviewCursorCaptured = false;
         gFirstPersonPreviewRefreshPending = false;
         gpuBillboardClear();
         tileRefreshGame(&gTileWindowRect, gElevation);

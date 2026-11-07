@@ -150,6 +150,7 @@ void gameHandleFirstPersonPreviewInput(int eventCode)
     } else {
         mouseHideCursor();
     }
+    tileFirstPersonPreviewSetCursorCaptured(mouseDeviceUsesRelativeMode());
 
     const bool shiftHeld = gPressedPhysicalKeys[SDL_SCANCODE_LSHIFT] != KEY_STATE_UP
         || gPressedPhysicalKeys[SDL_SCANCODE_RSHIFT] != KEY_STATE_UP;
@@ -508,6 +509,7 @@ static bool gameFirstPersonPreviewSetMouseReleased(bool enabled)
 {
     if (mouseDeviceSetRelativeModeForced(!enabled)) {
         gFirstPersonPreviewMouseReleased = enabled;
+        tileFirstPersonPreviewSetCursorCaptured(!enabled);
         if (enabled) {
             mouseShowCursor();
         } else {
