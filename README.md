@@ -180,6 +180,7 @@ $ mv fallout2 /Applications/Fallout2
 
 - One-finger tap → left click; hold → left button held.
 - Two-finger tap → right click (cycles cursor mode between walk and attack).
+- Hold Shift → temporarily switch between cursor and viewing modes in F11; release Shift to return to the mode selected with right-click.
 - One-finger drag → scroll map / windows.
 - Two-finger drag → mouse wheel.
 - **Three-finger swipe down → ESC** (opens options / main menu).
