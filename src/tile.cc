@@ -4094,29 +4094,14 @@ void tileFirstPersonPreviewSetMoveMarkerTile(int tile)
     }
 }
 
-bool tileFirstPersonPreviewMove(int relativeDirection)
+int tileFirstPersonPreviewGetMoveDestination(int relativeDirection)
 {
     if (!gFirstPersonPreviewEnabled
         || gDude == nullptr
         || !tileIsValid(gDude->tile)
         || relativeDirection < 0
         || relativeDirection > 3) {
-        return false;
-    }
-
-    if (animationIsBusy(gDude) == -1) {
-        gFirstPersonPreviewPendingMoveDirection = relativeDirection;
-        gFirstPersonPreviewPendingMoveTime = getTicks();
-        return true;
-    }
-    gFirstPersonPreviewPendingMoveDirection = -1;
-
-    int actionPoints = -1;
-    if (isInCombat()) {
-        actionPoints = gDude->data.critter.combat.ap + _combat_free_move;
-        if (actionPoints <= 0) {
-            return false;
-        }
+        return -1;
     }
 
     constexpr double kPi = 3.14159265358979323846;
@@ -4128,7 +4113,7 @@ bool tileFirstPersonPreviewMove(int relativeDirection)
     double playerX;
     double playerY;
     if (!tileFirstPersonGetWorldPosition(gDude->tile, &playerX, &playerY)) {
-        return false;
+        return -1;
     }
     for (int rotationIndex = ROTATION_FIRST; rotationIndex < ROTATION_COUNT; rotationIndex++) {
         const Rotation candidate = static_cast<Rotation>(rotationIndex);
@@ -4156,11 +4141,40 @@ bool tileFirstPersonPreviewMove(int relativeDirection)
     }
 
     if (bestDot == -std::numeric_limits<double>::infinity()) {
-        return false;
+        return -1;
     }
 
     const int destinationTile = tileGetTileInDirection(gDude->tile, movementRotation, 1);
-    if (!tileIsValid(destinationTile)) {
+    return tileIsValid(destinationTile) ? destinationTile : -1;
+}
+
+bool tileFirstPersonPreviewMove(int relativeDirection)
+{
+    if (!gFirstPersonPreviewEnabled
+        || gDude == nullptr
+        || !tileIsValid(gDude->tile)
+        || relativeDirection < 0
+        || relativeDirection > 3) {
+        return false;
+    }
+
+    if (animationIsBusy(gDude) == -1) {
+        gFirstPersonPreviewPendingMoveDirection = relativeDirection;
+        gFirstPersonPreviewPendingMoveTime = getTicks();
+        return true;
+    }
+    gFirstPersonPreviewPendingMoveDirection = -1;
+
+    int actionPoints = -1;
+    if (isInCombat()) {
+        actionPoints = gDude->data.critter.combat.ap + _combat_free_move;
+        if (actionPoints <= 0) {
+            return false;
+        }
+    }
+
+    const int destinationTile = tileFirstPersonPreviewGetMoveDestination(relativeDirection);
+    if (destinationTile == -1) {
         return false;
     }
 

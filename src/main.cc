@@ -1812,6 +1812,57 @@ static int mainClientViewer(const char* connectSpec)
 
         if (!clientDialogActive()) {
 
+        // The normal game loop routes F11 movement through gameHandleKey. The
+        // viewer owns a separate input loop, so forward the same camera-relative
+        // steps to the authoritative server instead of animating the local mirror.
+        if (tileFirstPersonPreviewIsEnabled()) {
+            int movementDirection = -1;
+            switch (keyCode) {
+            case KEY_LOWERCASE_W:
+            case KEY_UPPERCASE_W:
+                movementDirection = 0;
+                break;
+            case KEY_LOWERCASE_D:
+            case KEY_UPPERCASE_D:
+                movementDirection = 1;
+                break;
+            case KEY_LOWERCASE_S:
+            case KEY_UPPERCASE_S:
+                movementDirection = 2;
+                break;
+            case KEY_LOWERCASE_A:
+            case KEY_UPPERCASE_A:
+                movementDirection = 3;
+                break;
+            default:
+                break;
+            }
+
+            if (movementDirection != -1) {
+                keyCode = -1;
+                const bool inCombat = conn.inCombat();
+                if ((!inCombat && !oocBusy) || (inCombat && conn.myTurn() && !combatBusy)) {
+                    const int destinationTile =
+                        tileFirstPersonPreviewGetMoveDestination(movementDirection);
+                    if (destinationTile >= 0) {
+                        char cmd[32];
+                        if (inCombat) {
+                            snprintf(cmd, sizeof(cmd), "cmove %d 1", destinationTile);
+                            conn.sendLine(cmd);
+                            actionPending = true;
+                            actionPendingSince = getTicks();
+                        } else {
+                            if (settings.system.interrupt_walk) {
+                                reg_anim_clear(gDude);
+                            }
+                            snprintf(cmd, sizeof(cmd), "mv %d 1", destinationTile);
+                            conn.sendLine(cmd);
+                        }
+                    }
+                }
+            }
+        }
+
         // Vanilla combat input, driven from the viewer frame loop (COMBAT_CLIENT_DESIGN.md
         // §3.a/§3.b). No bespoke keys/widgets: the end-turn / end-combat interface-bar
         // buttons post keycodes 32 (SPACE) / 13 (RETURN) into the SAME input queue as the
