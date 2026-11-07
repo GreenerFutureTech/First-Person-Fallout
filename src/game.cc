@@ -111,6 +111,7 @@ static char _aBuildHash[] = _BUILD_HASH;
 // 0x5186B4 game_ui_disabled
 static bool gGameUiDisabled = false;
 static bool gFirstPersonPreviewMouseReleased = false;
+static bool gFirstPersonPreviewMouseReleasedWithoutShift = false;
 static bool gFirstPersonPreviewLootPending = false;
 static bool gFirstPersonPreviewLootWindowShown = false;
 static bool gFirstPersonPreviewLootMouseReleased = false;
@@ -586,12 +587,16 @@ void gameHandleFirstPersonPreviewInput(int eventCode)
 
     const bool shiftHeld = gPressedPhysicalKeys[SDL_SCANCODE_LSHIFT] != KEY_STATE_UP
         || gPressedPhysicalKeys[SDL_SCANCODE_RSHIFT] != KEY_STATE_UP;
-    if (gFirstPersonPreviewMouseReleased != shiftHeld) {
-        gameFirstPersonPreviewSetMouseReleased(shiftHeld);
-    }
-
     if (eventCode == INPUT_EVENT_FIRST_PERSON_RIGHT_CLICK) {
-        gameFirstPersonPreviewSetMouseReleased(!gFirstPersonPreviewMouseReleased);
+        const bool nextMouseReleasedWithoutShift = !gFirstPersonPreviewMouseReleasedWithoutShift;
+        if (gameFirstPersonPreviewSetMouseReleased(nextMouseReleasedWithoutShift != shiftHeld)) {
+            gFirstPersonPreviewMouseReleasedWithoutShift = nextMouseReleasedWithoutShift;
+        }
+    } else {
+        const bool mouseReleased = gFirstPersonPreviewMouseReleasedWithoutShift != shiftHeld;
+        if (gFirstPersonPreviewMouseReleased != mouseReleased) {
+            gameFirstPersonPreviewSetMouseReleased(mouseReleased);
+        }
     }
 
     if (mouseDeviceUsesRelativeMode()) {
@@ -1352,6 +1357,7 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                 tileFirstPersonPreviewToggle();
                 mouseShowCursor();
                 gFirstPersonPreviewMouseReleased = false;
+                gFirstPersonPreviewMouseReleasedWithoutShift = false;
                 gFirstPersonPreviewActionMenuShown = false;
                 gFirstPersonPreviewLeftClickStartTime = 0;
                 if (!mouseDeviceSetRelativeModeForced(false)) {
@@ -1713,6 +1719,7 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
             inputEventQueueReset();
             mouseResetButtonState();
             mouseHideCursor();
+            gFirstPersonPreviewMouseReleasedWithoutShift = false;
             tileFirstPersonPreviewToggle();
         } else {
             debugPrint("Failed to enable relative mouse mode for preview: %s\n", SDL_GetError());
