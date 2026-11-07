@@ -437,7 +437,7 @@ static void mainLoop()
         // continuously even when no other map refresh is requested.
         if (tileFirstPersonPreviewIsEnabled()) {
             tileFirstPersonPreviewProcessPendingMove();
-            tileFirstPersonPreviewRefresh();
+            tileFirstPersonPreviewRequestRefresh();
         }
 
         if (_main_game_paused != 0) {

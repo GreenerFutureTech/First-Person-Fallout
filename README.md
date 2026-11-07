@@ -1,8 +1,17 @@
-# Fallout 2: Community Engine
+# First-Person Fallout
 
-Fallout 2:CE is a fully working re-implementation of the classic Fallout engine, optimized for a hassle-free experience on multiple platforms, including Windows, Mac, iOS, Android, and Linux.  It provides high resolution support, quality-of-life improvements, and dozens upon dozens of bug fixes.
+This repository builds on Fallout 2: Community Edition with an optional first-person camera and renderer. Press `F11` to toggle between the original isometric view and the experimental first-person view while keeping the rest of the engine and mod compatibility intact.
 
-This is a fork of the original Fallout 2:CE project, which is no longer getting regular updates.
+It is a fork of Fallout 2:CE focused on adding a first-person play style without replacing the existing game systems. The project keeps the standard Fallout 2 experience available by default and adds the first-person mode as an opt-in view.
+
+## Quick start
+
+- Install the game data as usual for Fallout 2:CE.
+- Build or run this fork with the normal CE setup.
+- Press `F11` in-game to switch to first-person mode.
+- Press `F11` again to return to the classic isometric camera.
+
+The base project still includes the original Community Edition features, compatibility notes, and installation instructions below.
 
 Popular total conversion mods are supported:
  * [Fallout Et Tu](https://github.com/rotators/Fo1in2): Full Support.  Use v2.0+
@@ -180,6 +189,7 @@ $ mv fallout2 /Applications/Fallout2
 
 - One-finger tap → left click; hold → left button held.
 - Two-finger tap → right click (cycles cursor mode between walk and attack).
+- Hold Shift → temporarily switch between cursor and viewing modes in F11; release Shift to return to the mode selected with right-click.
 - One-finger drag → scroll map / windows.
 - Two-finger drag → mouse wheel.
 - **Three-finger swipe down → ESC** (opens options / main menu).

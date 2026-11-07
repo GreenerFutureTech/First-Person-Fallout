@@ -16,6 +16,7 @@
 #include "palette.h"
 #include "svga.h"
 #include "text_font.h"
+#include "transparent_window_rects.h"
 #include "win32.h"
 #include "window_manager_private.h"
 
@@ -1205,7 +1206,14 @@ void windowGetVisibleRects(std::vector<Rect>& rects, int excludedWindowId)
             std::min(window->rect.bottom, _scr_size.bottom),
         };
         if (rect.left <= rect.right && rect.top <= rect.bottom) {
-            rects.push_back(rect);
+            if (_buffering && (window->flags & WINDOW_TRANSPARENT) != 0) {
+                // A transparent action-menu window spans the entire screen.
+                // Its empty pixels must not cover GPU-rendered world sprites.
+                appendTransparentWindowRects(rects, window->buffer, window->width,
+                    window->rect.left, window->rect.top, rect);
+            } else {
+                rects.push_back(rect);
+            }
         }
     }
 }
