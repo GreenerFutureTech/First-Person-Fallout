@@ -61,6 +61,8 @@ build. To use a different configuration, build output, or game folder, pass
 `-Configuration`, `-BuildDirectory`, or `-GameDirectory`.
 Add `-WhatIf` to review and save the selected settings without launching the
 game or recording the account as used.
+You can run this launcher again from a second PowerShell window to open another
+co-op client at the same time; use a different account name for each player.
 
 To configure and start the dedicated server interactively on Windows, run:
 

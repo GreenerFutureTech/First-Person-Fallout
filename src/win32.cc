@@ -60,9 +60,11 @@ int main(int argc, char* argv[])
     int rc;
 
 #if _WIN32
-    GNW95_mutex = CreateMutexA(0, TRUE, "GNW95MUTEX");
-    if (GetLastError() != ERROR_SUCCESS) {
-        return 0;
+    if (getenv("F2_CLIENT_CONNECT") == nullptr) {
+        GNW95_mutex = CreateMutexA(0, TRUE, "GNW95MUTEX");
+        if (GetLastError() != ERROR_SUCCESS) {
+            return 0;
+        }
     }
 #ifdef SDL_HINT_WINDOWS_DPI_AWARENESS
     SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "permonitorv2");

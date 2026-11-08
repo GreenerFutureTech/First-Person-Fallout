@@ -313,7 +313,9 @@ bool _windowShowNamed(const char* name) { (void)name; serverStubHeadlessOnce("_w
 bool _windowStartRegion(int initialCapacity) { serverStubAbort("_windowStartRegion"); }
 void _windowStopMovie() { serverStubAbort("_windowStopMovie"); }
 int _windowWidth() { serverStubAbort("_windowWidth"); }
-int ambientSoundEffectEventProcess(Object* a1, void* a2) { serverStubAbort("ambientSoundEffectEventProcess"); }
+// Benign: queued ambient map SFX are client audio only. The queue owns and frees
+// the event data after this callback returns, so the server has no work to do.
+int ambientSoundEffectEventProcess(Object* a1, void* a2) { (void)a1; (void)a2; return 0; }
 // Benign no-ops: the automap is pure CLIENT presentation (the explored-map overlay).
 // automapSaveCurrent persists the current map's automap into the save buffer on a MAP
 // TRANSITION (map.cc:1361, result ignored); automapSetDisplayMap marks a map revealed on

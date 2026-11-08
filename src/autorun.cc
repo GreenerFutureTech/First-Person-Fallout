@@ -1,5 +1,7 @@
 #include "autorun.h"
 
+#include <stdlib.h>
+
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -15,6 +17,10 @@ namespace fallout {
 bool autorunMutexCreate()
 {
 #ifdef _WIN32
+    if (getenv("F2_CLIENT_CONNECT") != nullptr) {
+        return true;
+    }
+
     gInterplayGenericAutorunMutex = CreateMutexA(nullptr, FALSE, "InterplayGenericAutorunMutex");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         CloseHandle(gInterplayGenericAutorunMutex);

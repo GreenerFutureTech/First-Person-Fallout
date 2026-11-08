@@ -1,5 +1,6 @@
 #include "window_manager.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include <algorithm>
@@ -114,7 +115,9 @@ static ButtonGroup gButtonGroups[BUTTON_GROUP_LIST_CAPACITY];
 int windowManagerInit(VideoSystemInitProc* videoSystemInitProc, VideoSystemExitProc* videoSystemExitProc, int flags)
 {
 #ifdef _WIN32
-    CloseHandle(GNW95_mutex);
+    if (GNW95_mutex != nullptr && GNW95_mutex != INVALID_HANDLE_VALUE) {
+        CloseHandle(GNW95_mutex);
+    }
     GNW95_mutex = INVALID_HANDLE_VALUE;
 #endif
 
@@ -1384,7 +1387,8 @@ void programWindowSetTitle(const char* title)
 
 #ifdef _WIN32
     if (_GNW95_title_mutex == INVALID_HANDLE_VALUE) {
-        _GNW95_title_mutex = CreateMutexA(nullptr, TRUE, title);
+        const char* mutexName = getenv("F2_CLIENT_CONNECT") != nullptr ? nullptr : title;
+        _GNW95_title_mutex = CreateMutexA(nullptr, TRUE, mutexName);
         if (GetLastError() != ERROR_SUCCESS) {
             _GNW95_already_running = true;
             return;
