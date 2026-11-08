@@ -2148,15 +2148,15 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
     const double projectionScale = gTileWindowHeight / transformY;
     constexpr double kCritterFullSizeDistance = 0.75;
     constexpr double kCritterReducedSizeDistance = 1.5;
-    constexpr double kMinimumCritterScale = 0.9;
+    constexpr double kMinimumCritterScale = 1.0;
     const double critterScale = std::clamp(
         (kCritterReducedSizeDistance - transformY)
             / (kCritterReducedSizeDistance - kCritterFullSizeDistance),
         kMinimumCritterScale,
         1.0);
     constexpr double kCritterAdjustmentStartDistance = 2.0;
-    constexpr double kBipedOneTileScale = 0.65;
-    constexpr double kOtherCritterOneTileScale = 0.5;
+    constexpr double kBipedOneTileScale = 0.75;
+    constexpr double kOtherCritterOneTileScale = 0.6;
     const double oneTileCritterScale = objectType == OBJ_TYPE_CRITTER
             && critterGetBodyType(object) == BODY_TYPE_BIPED
         ? kBipedOneTileScale
@@ -2403,7 +2403,7 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
     const bool isDeadCritter = objectType == OBJ_TYPE_CRITTER && critterIsDead(object);
     const double objectHeightScale =
         objectType == OBJ_TYPE_CRITTER
-            ? (isDeadCritter ? 0.5 : 0.9)
+            ? (isDeadCritter ? 0.6 : 0.9)
             : isTree ? 2.0
             : isTallScenery ? 1.8
             : isTinyScenery ? 0.15
