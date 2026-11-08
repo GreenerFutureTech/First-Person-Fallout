@@ -3450,7 +3450,13 @@ void serverControlLine(int sessionId, const char* line)
             if (itemAdd(weaponOwner, weapon, 1) != 0) {
                 objectDrop(gDude, weapon);
             }
-            if (!loaded) {
+            if (loaded) {
+                const char* sfx = sfxBuildWeaponName(
+                    WEAPON_SOUND_EFFECT_READY, weapon, HIT_MODE_RIGHT_WEAPON_PRIMARY, nullptr);
+                if (sfx != nullptr) {
+                    presenter()->sfxPlayAt(sfx, gDude);
+                }
+            } else {
                 serverControlRefuse(sessionId, "That ammunition can't be loaded.");
             }
             fprintf(stderr, "f2_server: control invload weapon=%d ammo=%d packs=%d replace=%d loaded=%d\n",
