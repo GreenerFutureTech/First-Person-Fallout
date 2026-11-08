@@ -2406,7 +2406,11 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
             : isMediumScenery ? 1.3
             : fallbackWidthScale;
     const int projectedActorHeight = std::max(1, static_cast<int>(actorProjectionScale * objectHeightScale));
-    const int actorHeight = projectedActorHeight;
+    const int actorHeight = objectType == OBJ_TYPE_CRITTER
+        ? std::min(
+            std::max(1, static_cast<int>(gTileWindowHeight * 0.8)),
+            projectedActorHeight)
+        : projectedActorHeight;
     const int projectedActorBottom = renderContext->horizonY
         + static_cast<int>(projectionScale * 0.5);
     const int actorBottom = isRock
