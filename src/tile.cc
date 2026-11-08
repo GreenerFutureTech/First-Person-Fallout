@@ -2147,13 +2147,17 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
 
     const double projectionScale = gTileWindowHeight / transformY;
     constexpr double kCritterNearDistance = 0.75;
-    constexpr double kCritterFullSizeDistance = 1.5;
-    constexpr double kMinimumCritterScale = 0.5;
-    const double critterScale = std::clamp(
+    constexpr double kCritterFullSizeDistance = 2.5;
+    constexpr double kMinimumCritterScale = 0.8;
+    const double critterScaleProgress = std::clamp(
         (transformY - kCritterNearDistance)
             / (kCritterFullSizeDistance - kCritterNearDistance),
-        kMinimumCritterScale,
+        0.0,
         1.0);
+    const double easedCritterScaleProgress = critterScaleProgress * critterScaleProgress
+        * (3.0 - 2.0 * critterScaleProgress);
+    const double critterScale = kMinimumCritterScale
+        + (1.0 - kMinimumCritterScale) * easedCritterScaleProgress;
     const double actorProjectionScale = objectType == OBJ_TYPE_CRITTER
         ? projectionScale * critterScale
         : projectionScale;
