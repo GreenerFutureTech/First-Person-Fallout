@@ -50,6 +50,7 @@
 #include "pres_record.h"
 #include "art.h"
 #include "automap.h"
+#include "db.h"
 #include "character_editor.h"
 #include "character_selector.h"
 #include "color.h"
@@ -316,15 +317,48 @@ int _windowWidth() { serverStubAbort("_windowWidth"); }
 // Benign: queued ambient map SFX are client audio only. The queue owns and frees
 // the event data after this callback returns, so the server has no work to do.
 int ambientSoundEffectEventProcess(Object* a1, void* a2) { (void)a1; (void)a2; return 0; }
-// Benign no-ops: the automap is pure CLIENT presentation (the explored-map overlay).
-// automapSaveCurrent persists the current map's automap into the save buffer on a MAP
-// TRANSITION (map.cc:1361, result ignored); automapSetDisplayMap marks a map revealed on
-// the automap when reached via the worldmap (worldmap.cc:2243). The server never renders
-// or reads the automap, so both are no-ops — WITHOUT them a mid-run map transition aborts
-// the core-only server (the "load Temple and enter it" crash, 2026-07-18). automapShow
-// stays a LOUD abort: it opens the modal automap screen, which the server must never
-// reach (the viewer runs that locally) — hitting it would be a real bug, not this class.
-int automapSaveCurrent() { return 0; }
+// The server does not track explored automap pixels, but savegame handler 3
+// requires a valid AUTOMAP.DB to keep saves loadable by the regular client.
+int automapSaveCurrent()
+{
+    char path[COMPAT_MAX_PATH];
+    snprintf(path, sizeof(path), "%s\\MAPS\\%s",
+        settings.system.master_patches_path.c_str(), AUTOMAP_DB);
+
+    File* stream = fileOpen(path, "rb");
+    if (stream != nullptr) {
+        fileClose(stream);
+        return 0;
+    }
+
+    stream = fileOpen(path, "wb");
+    if (stream == nullptr) {
+        fprintf(stderr, "f2_server: could not create empty automap database '%s'\n", path);
+        return -1;
+    }
+
+    bool ok = fileWriteUInt8(stream, 1) != -1
+        && fileWriteInt32(stream, 1 + 4 + AUTOMAP_MAP_COUNT * ELEVATION_COUNT * 4) != -1;
+    for (int mapIndex = 0; ok && mapIndex < AUTOMAP_MAP_COUNT; mapIndex++) {
+        for (int elevation = 0; ok && elevation < ELEVATION_COUNT; elevation++) {
+            int offset = mapIndex < MAP_FIRST ? -1 : 0;
+            ok = fileWriteInt32(stream, offset) != -1;
+        }
+    }
+    if (fileClose(stream) != 0) {
+        ok = false;
+    }
+    if (!ok) {
+        compat_remove(path);
+        fprintf(stderr, "f2_server: failed writing empty automap database '%s'\n", path);
+        return -1;
+    }
+
+    return 0;
+}
+
+// automapSetDisplayMap marks a map revealed on the client automap. The server
+// never renders or reads the explored-map overlay.
 void automapSetDisplayMap(Map map, bool available) { (void)map; (void)available; }
 int automapGetWindow() { return -1; }
 void automapShow(bool isInGame, bool isUsingScanner) { serverStubAbort("automapShow"); }
@@ -729,6 +763,7 @@ void gpuBillboardSubmit(const unsigned char* pixels, int width, int height, cons
 bool gBlockMouseUpEvent = false;
 int gInterfaceBarWindow = -1;
 bool _ctrl_pressed() { return false; }
+bool mouseDeviceUsesRelativeMode() { return false; }
 bool mouseDeviceSetRelativeModeForced(bool enabled) { (void)enabled; return false; }
 void touch_set_touchscreen_mode(const bool value) { (void)value; }
 void touch_set_pan_mode(const bool value) { (void)value; }

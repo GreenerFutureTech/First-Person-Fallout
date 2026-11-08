@@ -51,9 +51,9 @@ namespace fallout {
 // nn in 01..10, and the header carries a 30-char description — which is exactly
 // the "numbered slot with an optional mnemonic label" the operator wants, so
 // nothing new is invented here.
-static constexpr int kSlotCount = kManualSaveSlotCount;
+static constexpr int kSlotCount = kServerManualSaveSlotCount;
 
-// SLOT11.. — the AUTOSAVE ROTATION WINDOW (indices 10..10+kAutosaveKeep-1).
+// SLOT11..15 — the AUTOSAVE ROTATION WINDOW (indices 10..10+kAutosaveKeep-1).
 // Deliberately past everything the vanilla client's save/load screens can reach,
 // so the periodic autosave can never clobber a real save. The OPERATOR still sees
 // them: parseSlot and the `saves` listing run to kAdminSlotCount, so `load 13`
@@ -77,8 +77,8 @@ static constexpr int kSlotCount = kManualSaveSlotCount;
 // The cost is that the newest autosave is not always slot 11, which is exactly why
 // the slot is named in the announcement and in the server log.
 static constexpr int kAutosaveSlot = kServerAutosaveFirstSlot;
-static constexpr int kAutosaveKeep = kSaveSlotSpace - kAutosaveSlot;
-static constexpr int kAdminSlotCount = kSaveSlotSpace;
+static constexpr int kAutosaveKeep = kServerAutosaveSlotCount - kAutosaveSlot;
+static constexpr int kAdminSlotCount = kServerAutosaveSlotCount;
 
 static ServerAdminRequest gPendingRequest;
 
@@ -243,7 +243,9 @@ void serverAutosaveTick()
     }
 
     static std::chrono::steady_clock::time_point lastSave = std::chrono::steady_clock::now();
+    static std::chrono::steady_clock::time_point lastAttempt;
     static int lastGeneration = -1;
+    static bool haveAttempted = false;
 
     int generation = mapGetLoadGeneration();
     if (lastGeneration == -1) {
@@ -254,6 +256,9 @@ void serverAutosaveTick()
     bool intervalDue = now - lastSave >= std::chrono::seconds(intervalSecs);
     bool mapChanged = generation != lastGeneration;
     if (!intervalDue && !mapChanged) {
+        return;
+    }
+    if (haveAttempted && now - lastAttempt < std::chrono::seconds(intervalSecs)) {
         return;
     }
 
@@ -285,11 +290,15 @@ void serverAutosaveTick()
     savegameSetSlot(slot);
     savegameEraseSlot();
 
+    lastAttempt = now;
+    haveAttempted = true;
     bool ok = adminWriteSave(slot, "autosave");
     fprintf(stderr, "f2_server: autosave -> slot %d (window %d-%d) %s%s\n",
         slot + 1, kAutosaveSlot + 1, kAutosaveSlot + kAutosaveKeep,
         ok ? "ok" : "FAILED", mapChanged ? " (map change)" : "");
     if (ok) {
+        lastSave = now;
+        lastGeneration = generation;
         // Every player sees the checkpoint land — same system channel as the
         // join/leave announcements. ►► IT NAMES THE SLOT because the window
         // rotates: "auto-saved" alone would leave both the players and the
@@ -299,8 +308,6 @@ void serverAutosaveTick()
         snprintf(msg, sizeof(msg), "Game auto-saved to slot %d.", slot + 1);
         presenter()->consoleMessageStyled(0, kMsgChannelSystem, msg);
     }
-    lastSave = now;
-    lastGeneration = generation;
 }
 
 // ---- Stress-test spawning (`spawn` / `stress` / `despawnall`) ----
@@ -1664,11 +1671,10 @@ bool serverAdminLine(const char* line,
         }
 
         if (!adminWriteSave(slot, label)) {
-            snprintf(msg, sizeof(msg), "save: FAILED writing slot %d (error %d)",
-                slot + 1, savegameGetErrorCode());
+            snprintf(msg, sizeof(msg), "save: FAILED writing slot %d; see server log for the failing save stage",
+                slot + 1);
             reply(msg);
-            fprintf(stderr, "f2_server: admin save slot %d FAILED (error %d)\n",
-                slot + 1, savegameGetErrorCode());
+            fprintf(stderr, "f2_server: admin save slot %d FAILED\n", slot + 1);
             return true;
         }
 

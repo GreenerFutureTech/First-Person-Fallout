@@ -6,6 +6,8 @@ param(
 
     [string] $GameDirectory,
 
+    [string] $ServerDataDirectory,
+
     [switch] $WhatIf
 )
 
@@ -101,10 +103,39 @@ if ([string]::IsNullOrWhiteSpace($GameDirectory)) {
         -ValidationMessage 'That folder does not exist.'
 }
 
+if ([string]::IsNullOrWhiteSpace($ServerDataDirectory)) {
+    $ServerDataDirectory = [string]$savedSettings['ServerDataDirectory']
+    if ([string]::IsNullOrWhiteSpace($ServerDataDirectory)) {
+        $ServerDataDirectory = Join-Path (Join-Path $env:APPDATA 'FirstPersonFallout') 'CoopServerData'
+    }
+}
+
 $GameDirectory = (Resolve-Path -LiteralPath $GameDirectory).Path
 foreach ($requiredFile in @('master.dat', 'patch000.dat')) {
     if (-not (Test-Path -LiteralPath (Join-Path $GameDirectory $requiredFile) -PathType Leaf)) {
         throw "The game-data folder '$GameDirectory' is missing '$requiredFile'."
+    }
+}
+
+$ServerDataDirectory = [System.IO.Path]::GetFullPath($ServerDataDirectory)
+$gameDataPath = [System.IO.Path]::GetFullPath((Join-Path $GameDirectory 'data')).TrimEnd('\')
+if ([string]::Equals($ServerDataDirectory.TrimEnd('\'), $gameDataPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw 'ServerDataDirectory must not be the game installation data folder; server saves need their own directory.'
+}
+
+$serverDataMarker = Join-Path $ServerDataDirectory '.f2-server-data'
+$serverDataMarkerContent = 'FirstPersonFallout dedicated server data'
+if (Test-Path -LiteralPath $ServerDataDirectory -PathType Container) {
+    if ([System.IO.File]::GetAttributes($ServerDataDirectory).HasFlag([System.IO.FileAttributes]::ReparsePoint)) {
+        throw "Server data directory must not be a junction or symbolic link: '$ServerDataDirectory'."
+    }
+
+    if (Test-Path -LiteralPath $serverDataMarker -PathType Leaf) {
+        if ((Get-Content -LiteralPath $serverDataMarker -Raw).Trim() -ne $serverDataMarkerContent) {
+            throw "Unexpected server-data marker contents in '$serverDataMarker'."
+        }
+    } elseif (@(Get-ChildItem -LiteralPath $ServerDataDirectory -Force).Count -gt 0) {
+        throw "Server data directory '$ServerDataDirectory' already contains unmarked data. Choose an empty dedicated directory; existing saves will not be moved or deleted."
     }
 }
 
@@ -131,6 +162,10 @@ if ($startMode -eq 'Map') {
         -DefaultValue $slotDefault `
         -IsValid { param($value) $number = 0; [int]::TryParse($value, [ref]$number) -and $number -ge 1 -and $number -le 15 } `
         -ValidationMessage 'Enter a slot number from 1 to 15.'
+    $slotSavePath = Join-Path (Join-Path $ServerDataDirectory 'SAVEGAME') ("SLOT{0:D2}\SAVE.DAT" -f [int]$loadSlot)
+    if (-not (Test-Path -LiteralPath $slotSavePath -PathType Leaf)) {
+        throw "Server save slot $loadSlot was not found in '$ServerDataDirectory'. Saves in the Fallout 2 installation are left untouched and are not loaded by the standalone server."
+    }
 }
 
 Write-Host ''
@@ -188,6 +223,7 @@ if ($requireToken) {
 
 $settingsToSave = [ordered]@{
     GameDirectory = $GameDirectory
+    ServerDataDirectory = $ServerDataDirectory
     StartMode = $startMode
     MapName = $mapName
     LoadSlot = if ($loadSlot) { [int]$loadSlot } else { $null }
@@ -210,6 +246,7 @@ $settingsToSave | ConvertTo-Json | Set-Content -LiteralPath $settingsPath -Encod
 Write-Host ''
 Write-Host "Server: $serverPath"
 Write-Host "Game data: $GameDirectory"
+Write-Host "Dedicated server data: $ServerDataDirectory"
 Write-Host "Start mode: $startMode"
 if ($startMode -eq 'Map') { Write-Host "Map: $mapName" }
 if ($startMode -eq 'Load') { Write-Host "Save slot: $loadSlot" }
@@ -219,6 +256,13 @@ Write-Host ''
 if ($WhatIf) {
     Write-Host 'WhatIf: settings were saved; server was not launched.'
     return
+}
+
+if (-not (Test-Path -LiteralPath $ServerDataDirectory -PathType Container)) {
+    New-Item -ItemType Directory -Path $ServerDataDirectory -Force | Out-Null
+}
+if (-not (Test-Path -LiteralPath $serverDataMarker -PathType Leaf)) {
+    Set-Content -LiteralPath $serverDataMarker -Value $serverDataMarkerContent -Encoding ASCII
 }
 
 $environmentNames = @(
@@ -255,7 +299,8 @@ try {
 
     Push-Location $GameDirectory
     try {
-        & $serverPath
+        $patchesOverride = "[system]master_patches=$ServerDataDirectory"
+        & $serverPath $patchesOverride
         if ($LASTEXITCODE -ne 0) {
             Write-Warning "Server exited with code $LASTEXITCODE."
         }

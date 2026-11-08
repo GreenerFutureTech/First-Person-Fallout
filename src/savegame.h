@@ -10,11 +10,10 @@ namespace fallout {
 #define LOAD_SAVE_DESCRIPTION_LENGTH 30
 #define LOAD_SAVE_HANDLER_COUNT 27
 
-// Slot INDEX SPACE — how many slots the engine can address, NOT how many the
-// player sees. 0..9 (directories SLOT01..SLOT10) are the ten the vanilla load and
-// save screens enumerate; 10.. are the dedicated server's AUTOSAVE ROTATION
-// window (server_admin.cc kAutosaveSlot / kAutosaveKeep), deliberately past the
-// end of that enumeration so an unattended save can never clobber a real one.
+// The client save screen supports 1000 slots. The dedicated server exposes only
+// the first 10 as manual saves, then uses slots 11..15 for autosave rotation.
+// Keep the client count separate from the server's manual-save limit so changing
+// the on-disk slot layout does not break the save screen's paging contract.
 //
 // This used to be a bare `11` — one autosave slot, overwritten in place forever.
 // Every map change fires an autosave, so entering a random encounter replaced the
@@ -22,7 +21,9 @@ namespace fallout {
 // older to fall back to. The window is the fix; growing this constant is how you
 // widen it (nothing derives a loop bound from the array, it is indexed by slot).
 constexpr int kManualSaveSlotCount = 1000;
-constexpr int kServerAutosaveFirstSlot = kManualSaveSlotCount;
+constexpr int kServerManualSaveSlotCount = 10;
+constexpr int kServerAutosaveFirstSlot = kServerManualSaveSlotCount;
+constexpr int kServerAutosaveSlotCount = kServerAutosaveFirstSlot + 5;
 constexpr int kSaveSlotSpace = kManualSaveSlotCount + 5;
 
 typedef struct LoadSaveSlotData {

@@ -1807,6 +1807,31 @@ static int mainClientViewer(const char* connectSpec)
             gameToggleFirstPersonPreview();
             keyCode = -1;
         }
+        if (tileFirstPersonPreviewIsEnabled()) {
+            if (keyCode == KEY_F9) {
+                tileFirstPersonPreviewToggleTopology();
+                keyCode = -1;
+            } else if (keyCode == -1 && (mouseGetEvent() & MOUSE_EVENT_WHEEL) != 0) {
+                int wheelX;
+                int wheelY;
+                mouseGetWheel(&wheelX, &wheelY);
+                (void)wheelX;
+                if (tileFirstPersonPreviewZoomTopology(wheelY)) {
+                    keyCode = -1;
+                }
+            } else {
+                int topologyZoomDirection = 0;
+                if (keyCode == KEY_PLUS || keyCode == KEY_EQUAL) {
+                    topologyZoomDirection = 1;
+                } else if (keyCode == KEY_MINUS || keyCode == KEY_UNDERSCORE) {
+                    topologyZoomDirection = -1;
+                }
+                if (topologyZoomDirection != 0
+                    && tileFirstPersonPreviewZoomTopology(topologyZoomDirection)) {
+                    keyCode = -1;
+                }
+            }
+        }
         bool firstPersonCursorCaptured = tileFirstPersonPreviewIsCursorCaptured();
         if (conn.inCombat() && previousFirstPersonCursorCaptured != firstPersonCursorCaptured) {
             conn.recomputeCombatOutlines();

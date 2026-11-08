@@ -841,6 +841,50 @@ static std::pair<int, int> barterComputeTablesValue(Object* dude, Object* npc, b
 
 int inventoryGetWindow();
 
+class InventoryFirstPersonCursorScope {
+public:
+    InventoryFirstPersonCursorScope()
+        : _firstPersonPreviewWasEnabled(tileFirstPersonPreviewIsEnabled())
+        , _relativeModeWasEnabled(_firstPersonPreviewWasEnabled && mouseDeviceUsesRelativeMode())
+    {
+        if (!_firstPersonPreviewWasEnabled) {
+            return;
+        }
+
+        if (_relativeModeWasEnabled) {
+            if (mouseDeviceSetRelativeModeForced(false)) {
+                tileFirstPersonPreviewSetCursorCaptured(false);
+            } else {
+                debugPrint("Failed to release mouse for inventory\n");
+            }
+        }
+        mouseShowCursor();
+    }
+
+    ~InventoryFirstPersonCursorScope()
+    {
+        if (!_firstPersonPreviewWasEnabled || !tileFirstPersonPreviewIsEnabled()) {
+            return;
+        }
+
+        if (_relativeModeWasEnabled) {
+            if (mouseDeviceSetRelativeModeForced(true)) {
+                tileFirstPersonPreviewSetCursorCaptured(true);
+                mouseHideCursor();
+            } else {
+                debugPrint("Failed to recapture mouse after inventory\n");
+            }
+        } else {
+            tileFirstPersonPreviewSetCursorCaptured(false);
+            mouseShowCursor();
+        }
+    }
+
+private:
+    bool _firstPersonPreviewWasEnabled;
+    bool _relativeModeWasEnabled;
+};
+
 void inventoryDisplayStats();
 
 void inventoryRedraw(int redrawSide);
@@ -924,6 +968,7 @@ void inventoryOpen()
     inventoryRenderSummary();
     _display_inventory(_stack_offset[_curr_stack], -1, INVENTORY_WINDOW_TYPE_NORMAL);
     inventorySetCursor(INVENTORY_WINDOW_CURSOR_HAND);
+    InventoryFirstPersonCursorScope firstPersonCursorScope;
     ScopedGameMode gm(GameMode::kInventory);
 
     for (;;) {

@@ -91,6 +91,8 @@ static unsigned char gGpuCursorTransparentColor = 0;
 static unsigned int gGpuCursorPaletteHash = 0;
 static SDL_Rect gGpuCursorRect {};
 static bool gGpuHasCursor = false;
+static SDL_Texture* gGpuIndexedOverlayTexture = nullptr;
+static SDL_Rect gGpuIndexedOverlayRect {};
 static std::unordered_map<const unsigned char*, GpuBillboardTexture> gGpuBillboardTextures;
 static unsigned char gGpuPalette[256 * 3];
 static uint64_t gGpuPaletteRevision = 0;
@@ -373,6 +375,80 @@ void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
         clip,
         depth,
     });
+}
+
+bool gpuOverlaySetIndexed(const unsigned char* pixels, int width, int height, int pitch, int x, int y)
+{
+    if (pixels == nullptr || width <= 0 || height <= 0 || pitch < width
+        || gSdlRenderer == nullptr) {
+        return false;
+    }
+
+    int left = width;
+    int top = height;
+    int right = -1;
+    int bottom = -1;
+    for (int row = 0; row < height; row++) {
+        for (int column = 0; column < width; column++) {
+            if (pixels[row * pitch + column] != 0) {
+                left = std::min(left, column);
+                top = std::min(top, row);
+                right = std::max(right, column);
+                bottom = std::max(bottom, row);
+            }
+        }
+    }
+
+    if (right < left || bottom < top) {
+        gpuOverlayClear();
+        return true;
+    }
+
+    const int overlayWidth = right - left + 1;
+    const int overlayHeight = bottom - top + 1;
+    SDL_Texture* texture = SDL_CreateTexture(gSdlRenderer,
+        SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, overlayWidth, overlayHeight);
+    if (texture == nullptr) {
+        return false;
+    }
+
+    std::vector<uint32_t> rgba(static_cast<size_t>(overlayWidth) * overlayHeight);
+    const unsigned char* palette = directDrawGetPalette();
+    for (int row = 0; row < overlayHeight; row++) {
+        for (int column = 0; column < overlayWidth; column++) {
+            const unsigned char colorIndex = pixels[(top + row) * pitch + left + column];
+            const size_t paletteOffset = static_cast<size_t>(colorIndex) * 3;
+            rgba[static_cast<size_t>(row) * overlayWidth + column] = colorIndex == 0
+                ? 0
+                : 0xFF000000u
+                    | (static_cast<uint32_t>(palette[paletteOffset]) << 18)
+                    | (static_cast<uint32_t>(palette[paletteOffset + 1]) << 10)
+                    | (static_cast<uint32_t>(palette[paletteOffset + 2]) << 2);
+        }
+    }
+
+    if (SDL_UpdateTexture(texture, nullptr, rgba.data(), overlayWidth * sizeof(uint32_t)) != 0) {
+        SDL_DestroyTexture(texture);
+        return false;
+    }
+    SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+    SDL_SetTextureScaleMode(texture, SDL_ScaleModeNearest);
+#endif
+
+    gpuOverlayClear();
+    gGpuIndexedOverlayTexture = texture;
+    gGpuIndexedOverlayRect = { x + left, y + top, overlayWidth, overlayHeight };
+    return true;
+}
+
+void gpuOverlayClear()
+{
+    if (gGpuIndexedOverlayTexture != nullptr) {
+        SDL_DestroyTexture(gGpuIndexedOverlayTexture);
+        gGpuIndexedOverlayTexture = nullptr;
+    }
+    gGpuIndexedOverlayRect = {};
 }
 
 // 0x4CAD40 init_mode_320_400
@@ -769,6 +845,7 @@ static bool createRenderer(int width, int height)
 static void destroyRenderer()
 {
     gGpuBillboards.clear();
+    gpuOverlayClear();
     if (gGpuCursorTexture != nullptr) {
         SDL_DestroyTexture(gGpuCursorTexture);
         gGpuCursorTexture = nullptr;
@@ -916,6 +993,9 @@ void renderPresent()
         for (const SDL_Rect& overlayRect : gGpuOverlayRects) {
             SDL_RenderCopy(gSdlRenderer, gSdlTexture, &overlayRect, &overlayRect);
         }
+    }
+    if (firstPersonPreviewEnabled && gGpuIndexedOverlayTexture != nullptr) {
+        SDL_RenderCopy(gSdlRenderer, gGpuIndexedOverlayTexture, nullptr, &gGpuIndexedOverlayRect);
     }
     if (gGpuHasCursor && gGpuCursorTexture != nullptr) {
         SDL_RenderCopy(gSdlRenderer, gGpuCursorTexture, nullptr, &gGpuCursorRect);

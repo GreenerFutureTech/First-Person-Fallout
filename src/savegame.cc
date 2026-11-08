@@ -265,6 +265,8 @@ int lsgPerformSaveGame()
     _flptr = fileOpen(_gmpath, "wb");
     if (_flptr == nullptr) {
         debugPrint("\nLOADSAVE: ** Error opening save game for writing! **\n");
+        fprintf(stderr, "LOADSAVE: save slot %d FAILED opening '%s' for writing\n",
+            _slot_cursor + 1, _gmpath);
         _RestoreSave();
         snprintf(_gmpath, sizeof(_gmpath), "%s\\%s%.2d\\", "SAVEGAME", "SLOT", _slot_cursor + 1);
         MapDirErase(_gmpath, "BAK");
@@ -276,6 +278,7 @@ int lsgPerformSaveGame()
     long pos = fileTell(_flptr);
     if (lsgSaveHeaderInSlot(_flptr, _slot_cursor) == -1) {
         debugPrint("\nLOADSAVE: ** Error writing save game header! **\n");
+        fprintf(stderr, "LOADSAVE: save slot %d FAILED writing its header\n", _slot_cursor + 1);
         debugPrint("LOADSAVE: Save file header size written: %ld bytes.\n", fileTell(_flptr) - pos);
         fileClose(_flptr);
         _RestoreSave();
@@ -291,6 +294,8 @@ int lsgPerformSaveGame()
         SaveGameHandler* handler = _master_save_list[index];
         if (handler(_flptr) == -1) {
             debugPrint("\nLOADSAVE: ** Error writing save function #%d data! **\n", index);
+            fprintf(stderr, "LOADSAVE: save slot %d FAILED in save handler #%d at byte %ld\n",
+                _slot_cursor + 1, index, pos);
             fileClose(_flptr);
             _RestoreSave();
             snprintf(_gmpath, sizeof(_gmpath), "%s\\%s%.2d\\", "SAVEGAME", "SLOT", _slot_cursor + 1);
@@ -311,6 +316,8 @@ int lsgPerformSaveGame()
     // stock build still loads this as a host-only game (owner ruling 2026-07-21).
     if (playerActorAppendixSave(_flptr) == -1) {
         debugPrint("\nLOADSAVE: ** Error writing co-op actor appendix! **\n");
+        fprintf(stderr, "LOADSAVE: save slot %d FAILED in the co-op actor appendix at byte %ld\n",
+            _slot_cursor + 1, fileTell(_flptr));
         fileClose(_flptr);
         _RestoreSave();
         snprintf(_gmpath, sizeof(_gmpath), "%s\\%s%.2d\\", "SAVEGAME", "SLOT", _slot_cursor + 1);
@@ -331,6 +338,7 @@ int lsgPerformSaveGame()
         bool saved = sfallSaveGameData(_flptr);
         fileClose(_flptr);
         if (!saved) {
+            fprintf(stderr, "LOADSAVE: save slot %d FAILED writing sfallgv.sav\n", _slot_cursor + 1);
             return -1;
         }
     }
@@ -339,6 +347,7 @@ int lsgPerformSaveGame()
     snprintf(ceSavePath, sizeof(ceSavePath), "%s\\SAVEGAME\\SLOT%.2d\\ce.sav", _patches, _slot_cursor + 1);
     if (!ceSaveGameData(ceSavePath)) {
         debugPrint("LOADSAVE (CE): ** Error saving %s **\n", ceSavePath);
+        fprintf(stderr, "LOADSAVE: save slot %d FAILED writing '%s'\n", _slot_cursor + 1, ceSavePath);
         _RestoreSave();
         backgroundSoundResume();
         return -1;

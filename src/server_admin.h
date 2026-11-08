@@ -58,7 +58,7 @@ bool serverAdminTakeRequest(ServerAdminRequest& out);
 // the lobby can greet a connecting operator with it unprompted.
 void serverAdminWriteSlotListing(const std::function<void(const char* text)>& reply);
 
-// Periodic unattended save into the dedicated autosave slot (SLOT11).
+// Periodic unattended save into the dedicated autosave window (SLOT11..15).
 // F2_AUTOSAVE_SECS sets the cadence (default 120; 0 disables); an extra save
 // fires on the first safe beat after each map change. Call once per MAIN-PHASE
 // beat only — never from a modal pump. Refuses (and stays latched) while the

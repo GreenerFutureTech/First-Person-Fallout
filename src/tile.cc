@@ -1046,17 +1046,15 @@ static void tileRenderFirstPersonPreview()
     gFirstPersonPreviewDoorHitTargets.clear();
 
     const int horizonY = tileFirstPersonPreviewGetHorizonY();
+    const bool isIndoorMap = tileFirstPersonMapIsIndoors(gMapHeader.index);
     const bool useCaveWallTexture = gMapHeader.index == MAP_ARROYO_TEMPLE
         || tileFirstPersonMapUsesCaveSkybox(gMapHeader.index);
-    const FirstPersonSkyType skyType = useCaveWallTexture
+    const FirstPersonSkyType skyType = isIndoorMap || useCaveWallTexture
         ? FirstPersonSkyType::Cave
         : FirstPersonSkyType::Desert;
-    if (skyType == FirstPersonSkyType::Cave
-        || !tileFirstPersonMapIsIndoors(gMapHeader.index)) {
-        firstPersonSkyRender(gTileWindowBuffer, gTileWindowWidth, gTileWindowHeight,
-            gTileWindowPitch, horizonY, tileFirstPersonPreviewGetYaw(), kFieldOfViewScale,
-            ambientIntensityIndex, skyType);
-    }
+    firstPersonSkyRender(gTileWindowBuffer, gTileWindowWidth, gTileWindowHeight,
+        gTileWindowPitch, horizonY, tileFirstPersonPreviewGetYaw(), kFieldOfViewScale,
+        ambientIntensityIndex, skyType);
     bufferFill(gTileWindowBuffer + horizonY * gTileWindowPitch,
         gTileWindowWidth,
         gTileWindowHeight - horizonY,
@@ -2011,7 +2009,8 @@ static void tileFirstPersonGrayboxMarkObject(Object* object, void* context)
         && proto->scenery.type == SCENERY_TYPE_DOOR;
     const bool doorOpen = isDoor
         && ((object->data.scenery.door.openFlags & DOOR_FLAG_OPEN) != 0
-            || (object->flags & OBJECT_OPEN_DOOR) != OBJECT_NONE);
+            || (object->flags & OBJECT_OPEN_DOOR) != OBJECT_NONE
+            || object->frame != 0);
     if (!halfHeightWall
         && !doorOpen
         && (object->flags & (OBJECT_NO_BLOCK | OBJECT_LIGHT_THRU)) != OBJECT_NONE) {

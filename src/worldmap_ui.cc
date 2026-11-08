@@ -250,14 +250,25 @@ static int wmWorldMapFunc(int a1)
     // worldmap session discards. Reading it here cannot race the wire.
     bool streamingEntered = gWorldmapStreaming;
 
+    debugPrint("worldmap_ui: modal start streaming=%d pos=%d,%d area=%d\n",
+        streamingEntered ? 1 : 0, wmGenData.worldPosX, wmGenData.worldPosY, wmGenData.currentAreaId);
     wmFadeOut();
+    debugPrint("worldmap_ui: fade-out complete\n");
 
     if (wmInterfaceInit() == -1) {
         wmInterfaceExit();
+        wmFadeReset();
+        debugPrint("worldmap_ui: interface init failed\n");
         return -1;
     }
+    debugPrint("worldmap_ui: interface init complete\n");
+
+    debugPrint("worldmap_ui: restoring palette\n");
+    wmFadeIn();
+    debugPrint("worldmap_ui: palette restored\n");
 
     touch_set_touchscreen_mode(false);
+    debugPrint("worldmap_ui: setup complete; entering modal loop\n");
 
     wmMatchWorldPosToArea(wmGenData.worldPosX, wmGenData.worldPosY, &(wmGenData.currentAreaId));
 
@@ -653,6 +664,7 @@ static void wmInterfaceScrollTabsUpdate()
 // 0x4C2324
 static int wmInterfaceInit()
 {
+    debugPrint("worldmap_ui: interface init start\n");
     wmLastRndTime = getTicks();
 
     // SFALL: Fix default worldmap font.
@@ -662,11 +674,13 @@ static int wmInterfaceInit()
     fontSetCurrent(101);
 
     wmTransitionSaveMap();
+    debugPrint("worldmap_ui: map transition saved\n");
 
     const char* backgroundSoundFileName = gameSoundGetMusicOverride(
         wmGenData.isInCar ? "worldmap_car_music" : "worldmap_music",
         wmGenData.isInCar ? "20car" : "23world");
     _gsound_background_play_level_music(backgroundSoundFileName, GSOUND_LIMIT_AFTER);
+    debugPrint("worldmap_ui: background music started\n");
 
     // CE: Hide entire interface, not just indicator bar, and disable tile
     // engine.
@@ -687,6 +701,7 @@ static int wmInterfaceInit()
 
     // CE: Stop all animations.
     animationStop();
+    debugPrint("worldmap_ui: map view cleared\n");
 
     int worldmapWindowX = (screenGetWidth() - WM_WINDOW_WIDTH) / 2;
     int worldmapWindowY = (screenGetHeight() - WM_WINDOW_HEIGHT) / 2;
@@ -694,6 +709,7 @@ static int wmInterfaceInit()
     if (wmBkWin == -1) {
         return -1;
     }
+    debugPrint("worldmap_ui: modal window created\n");
 
     if (!_backgroundFrmImage.lock(InterfaceFrameId::WorldMapDialogBox)) {
         return -1;
@@ -709,6 +725,7 @@ static int wmInterfaceInit()
     if (wmOverlayOffscreenBuf == nullptr) {
         return -1;
     }
+    debugPrint("worldmap_ui: overlay buffer allocated\n");
 
     blitBufferToBuffer(_backgroundFrmImage.getData(),
         _backgroundFrmImage.getWidth(),
@@ -785,6 +802,7 @@ static int wmInterfaceInit()
     if (!wmGenData.numbersFrmImage.lock(InterfaceFrameId::HitPointsNumbers)) {
         return -1;
     }
+    debugPrint("worldmap_ui: static interface art loaded\n");
 
     // create town/world switch button
     int switchBtn = buttonCreate(wmBkWin,
@@ -901,21 +919,27 @@ static int wmInterfaceInit()
         wmGenData.carImageFrmWidth = artGetWidth(wmGenData.carImageFrm);
         wmGenData.carImageFrmHeight = artGetHeight(wmGenData.carImageFrm);
     }
+    debugPrint("worldmap_ui: interface controls created\n");
 
     tickersAdd(wmMouseBkProc);
 
+    debugPrint("worldmap_ui: building destination tabs areas=%d\n", wmMaxAreaNum);
     if (wmMakeTabsLabelList(&wmLabelList, &wmLabelCount) == -1) {
         return -1;
     }
+    debugPrint("worldmap_ui: destination tabs ready count=%d\n", wmLabelCount);
 
     wmInterfaceWasInitialized = 1;
 
+    debugPrint("worldmap_ui: initial map render start offset=%d,%d\n", wmWorldOffsetX, wmWorldOffsetY);
     if (wmInterfaceRefresh() == -1) {
         return -1;
     }
+    debugPrint("worldmap_ui: initial map render complete\n");
 
     windowRefresh(wmBkWin);
     wmTransitionSuspendScripts();
+    debugPrint("worldmap_ui: interface init done\n");
 
     return 0;
 }

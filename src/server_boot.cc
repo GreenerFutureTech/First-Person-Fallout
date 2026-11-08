@@ -475,6 +475,12 @@ int serverBootSubsystems(int argc, char** argv)
 
 int serverBootNewWorld(const char* mapName)
 {
+    // mapLoadByName prefers MAPS\<name>.SAV over the requested .MAP. Clear the
+    // prior world's working map saves so a fresh-map boot cannot silently restore
+    // a previous session after its SAVEGAME slots were cleared.
+    savegameRefreshPatchesPath();
+    lsgInit();
+
     // Create the authoritative dude exactly as the character selector's "Take"
     // does (mainHeadlessProbe uses the same premade). This must precede the map
     // load: serverLoadMap references gDude.

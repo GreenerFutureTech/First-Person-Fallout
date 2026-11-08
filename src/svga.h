@@ -72,6 +72,8 @@ void gpuBillboardSetCursor(const unsigned char* pixels, int width, int height,
     int pitch, unsigned char transparentColor, int x, int y);
 void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
     const SDL_Rect& destination, const SDL_Rect& clip, double depth);
+bool gpuOverlaySetIndexed(const unsigned char* pixels, int width, int height, int pitch, int x, int y);
+void gpuOverlayClear();
 
 } // namespace fallout
 

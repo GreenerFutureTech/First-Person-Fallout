@@ -76,10 +76,28 @@ wire and admin ports; pacing and autosave; player slots; server identity;
 keepalive; and optional token enforcement. The launcher defaults to the Release
 build. Settings are saved in
 `%APPDATA%\FirstPersonFallout\coop-server.json` and prefilled next time; press
-Enter to keep each displayed value. Use `-Configuration`, `-BuildDirectory`,
-or `-GameDirectory` to override the defaults, and `-WhatIf` to save and review
-the configuration without starting the server. The admin/command port is
-unrestricted and should only be exposed on trusted networks.
+Enter to keep each displayed value. Server saves are isolated under
+`%APPDATA%\FirstPersonFallout\CoopServerData\SAVEGAME`, separate from the
+selected Fallout 2 installation's `data\SAVEGAME`. Existing saves in the game
+folder are left untouched and are not automatically imported. Use
+`-Configuration`, `-BuildDirectory`, `-GameDirectory`, or `-ServerDataDirectory`
+to override the defaults, and `-WhatIf` to save and review the configuration
+without starting the server. The admin/command port is unrestricted and should
+only be exposed on trusted networks.
+
+To clear only the isolated standalone-server saves, stop the server first and
+run:
+
+```powershell
+.\clear-server-saves.ps1 -ConfirmServerStopped -WhatIf
+.\clear-server-saves.ps1 -ConfirmServerStopped
+```
+
+The script requires the dedicated server data marker created by the launcher
+and clears its `SAVEGAME` slots plus saved-map checkpoints under `MAPS`. Saved
+map checkpoints can otherwise take precedence over a requested `.MAP` when
+starting a new world. The script does not touch the Fallout 2 installation's
+regular saves or the server's other data.
 
 | binary | what it is |
 |--------|------------|

@@ -360,6 +360,7 @@ static void gameFirstPersonPreviewShowActionMenu(Object* targetObj, int mouseX, 
         screenGetWidth(), screenGetHeight(),
         COLOR_FIRST, WINDOW_HIDDEN | WINDOW_MOVE_ON_TOP | WINDOW_TRANSPARENT);
     if (menuWindow == -1) {
+        debugPrint("Failed to create first-person action menu window\n");
         if (isoWasEnabled) isoEnable();
         if (relativeModeWasEnabled) mouseDeviceSetRelativeModeForced(true);
         gFirstPersonPreviewMouseReleased = mouseWasReleased;
@@ -373,9 +374,14 @@ static void gameFirstPersonPreviewShowActionMenu(Object* targetObj, int mouseX, 
             gameMouseCopyActionMenuBuffer(menuBuffer, windowGetWidth(menuWindow),
                 windowGetWidth(menuWindow), windowGetHeight(menuWindow),
                 mouseX, mouseY);
+            if (!gpuOverlaySetIndexed(menuBuffer, windowGetWidth(menuWindow),
+                    windowGetHeight(menuWindow), windowGetWidth(menuWindow), 0, 0)) {
+                debugPrint("Failed to render first-person action menu overlay: %s\n", SDL_GetError());
+            }
             windowShow(menuWindow);
         }
     }
+    renderPresent();
 
     int selectedIndex = 0;
     mouseDeviceSetLogicalPosition(mouseX, mouseY);
@@ -399,7 +405,10 @@ static void gameFirstPersonPreviewShowActionMenu(Object* targetObj, int mouseX, 
                     gameMouseCopyActionMenuBuffer(menuBuffer, windowGetWidth(menuWindow),
                         windowGetWidth(menuWindow), windowGetHeight(menuWindow),
                         updatedMouseX, updatedMouseY);
-                    windowRefresh(menuWindow);
+                    if (!gpuOverlaySetIndexed(menuBuffer, windowGetWidth(menuWindow),
+                            windowGetHeight(menuWindow), windowGetWidth(menuWindow), 0, 0)) {
+                        debugPrint("Failed to update first-person action menu overlay: %s\n", SDL_GetError());
+                    }
                 }
             }
             mouseY = updatedMouseY;
@@ -408,6 +417,7 @@ static void gameFirstPersonPreviewShowActionMenu(Object* targetObj, int mouseX, 
         sharedFpsLimiter.throttle();
     }
 
+    gpuOverlayClear();
     windowDestroy(menuWindow);
     if (isoWasEnabled) {
         isoEnable();
@@ -713,6 +723,11 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
         } else {
             if (eventCode == INPUT_EVENT_FIRST_PERSON_LEFT_CLICK) {
                 gFirstPersonPreviewLeftClickStartTime = getTicks();
+                if (gFirstPersonPreviewMouseReleased) {
+                    // This event represents a center-ray click; cursor-active
+                    // clicks are handled below using their actual screen position.
+                    return 0;
+                }
                 const int centerX = screenGetWidth() / 2;
                 const int centerY = screenGetHeight() / 2;
                 Object* critter = tileFirstPersonPreviewPickCritterAt(centerX, centerY);
