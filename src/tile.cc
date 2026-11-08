@@ -2148,14 +2148,27 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
     const double projectionScale = gTileWindowHeight / transformY;
     constexpr double kCritterFullSizeDistance = 0.75;
     constexpr double kCritterReducedSizeDistance = 1.5;
-    constexpr double kMinimumCritterScale = 0.75;
+    constexpr double kMinimumCritterScale = 0.9;
     const double critterScale = std::clamp(
         (kCritterReducedSizeDistance - transformY)
             / (kCritterReducedSizeDistance - kCritterFullSizeDistance),
         kMinimumCritterScale,
         1.0);
+    constexpr double kCritterAdjustmentStartDistance = 2.0;
+    constexpr double kBipedOneTileScale = 0.65;
+    constexpr double kOtherCritterOneTileScale = 0.5;
+    const double oneTileCritterScale = objectType == OBJ_TYPE_CRITTER
+            && critterGetBodyType(object) == BODY_TYPE_BIPED
+        ? kBipedOneTileScale
+        : kOtherCritterOneTileScale;
+    const double closeCritterScaleProgress = std::clamp(
+        kCritterAdjustmentStartDistance - transformY,
+        0.0,
+        1.0);
+    const double closeCritterScaleAdjustment = 1.0
+        - (1.0 - oneTileCritterScale) * closeCritterScaleProgress;
     const double actorProjectionScale = objectType == OBJ_TYPE_CRITTER
-        ? projectionScale * critterScale
+        ? projectionScale * critterScale * closeCritterScaleAdjustment
         : projectionScale;
     bool isTree = false;
     bool isWideScenery = false;
