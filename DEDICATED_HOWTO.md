@@ -284,6 +284,27 @@ the ordinary single-player game.
 The client sends its OS in the handshake, so joins are announced as
 "X joined the game (Linux/Windows/…)".
 
+### Live connection diagnostics
+
+For detailed protocol tracing, set `F2_NET_TRACE=1` before launching both scripts.
+The client launcher writes a flushed trace to
+`%APPDATA%\FirstPersonFallout\coop-client-net-<timestamp>.log`; the server prints
+trace lines in its console. The trace includes connection/preamble status, each
+received frame and event, and complete client command lines. Login tokens are
+redacted. To also capture the server's complete outbound wire bytes, set
+`F2_SERVER_NET_TEE` to a file path before starting the server; that capture can
+grow quickly and contains game-state data.
+
+```powershell
+# Server PC
+$env:F2_NET_TRACE = '1'
+.\run-coop-server.ps1
+
+# Other PC, in the co-op client folder
+$env:F2_NET_TRACE = '1'
+powershell.exe -ExecutionPolicy Bypass -File .\run-coop-client.ps1
+```
+
 ### In-game keys worth knowing
 | key | effect |
 |-----|--------|

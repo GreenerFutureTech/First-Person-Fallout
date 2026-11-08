@@ -47,6 +47,28 @@ bool outboxPaceEnabled()
     return enabled;
 }
 
+bool netTraceEnabled()
+{
+    static bool enabled = getenv("F2_NET_TRACE") != nullptr;
+    return enabled;
+}
+
+std::string traceCommand(const std::string& line)
+{
+    std::string command(line);
+    if (command.compare(0, 6, "login ") == 0) {
+        size_t nameEnd = command.find(' ', 6);
+        if (nameEnd != std::string::npos) {
+            size_t tokenStart = command.find_first_not_of(' ', nameEnd);
+            if (tokenStart != std::string::npos) {
+                command.resize(tokenStart);
+                command += "<redacted-token>";
+            }
+        }
+    }
+    return command;
+}
+
 } // namespace
 
 namespace fallout {
@@ -177,6 +199,10 @@ bool SocketByteSink::acceptClients(int minClients)
             netCloseSocket(fd);
             continue;
         }
+        if (netTraceEnabled()) {
+            fprintf(stderr, "f2_server: NETTRACE TX preamble session=%d magic=F2NS version=%u bytes=%d\n",
+                sessionId, kWireVersion, kWirePreambleLen);
+        }
 
         _clients.push_back(Client { fd, std::string(), sessionId });
         _clients.back().lastReleaseAtMs = nowMs(); // seed the release cursor (§8.6)
@@ -226,6 +252,10 @@ int SocketByteSink::acceptPending()
             netCloseSocket(fd);
             continue;
         }
+        if (netTraceEnabled()) {
+            fprintf(stderr, "f2_server: NETTRACE TX preamble session=%d magic=F2NS version=%u bytes=%d\n",
+                sessionId, kWireVersion, kWirePreambleLen);
+        }
 
         _clients.push_back(Client { fd, std::string(), sessionId });
         _clients.back().lastReleaseAtMs = nowMs(); // seed the release cursor (§8.6)
@@ -272,6 +302,12 @@ void SocketByteSink::write(const void* data, unsigned int size)
 void SocketByteSink::writeFrame(const unsigned char* header, unsigned int headerLen,
     const unsigned char* payload, unsigned int payloadLen, const WireFrameMeta& meta)
 {
+    if (netTraceEnabled()) {
+        fprintf(stderr,
+            "f2_server: NETTRACE TX frame seq=%u simTs=%u payload=%u events=%u entryBase=%u clients=%zu total=%u\n",
+            meta.seq, meta.simTs, payloadLen, meta.eventCount, meta.entryBase,
+            _clients.size(), headerLen + payloadLen);
+    }
     // One encoded frame → one SHARED buffer, referenced by every client's queue (one
     // copy, N pointers). The tee gets the canonical bytes in EMISSION order (the
     // single stream every client receives a contiguous copy of, §8.6).
@@ -362,12 +398,20 @@ void SocketByteSink::pollInbound(const std::function<void(int sessionId, const c
         for (;;) {
             long n = netRecvNoWait(client.fd, buf, sizeof(buf));
             if (n > 0) {
+                if (netTraceEnabled()) {
+                    fprintf(stderr, "f2_server: NETTRACE RX session=%d bytes=%ld\n",
+                        client.sessionId, n);
+                }
                 client.inbuf.append(buf, static_cast<size_t>(n));
                 // A large read may hold several lines; keep draining until the
                 // socket has nothing more pending (would-block below).
                 continue;
             }
             if (n == 0) {
+                if (netTraceEnabled()) {
+                    fprintf(stderr, "f2_server: NETTRACE RX orderly-close session=%d\n",
+                        client.sessionId);
+                }
                 closed = true; // orderly peer shutdown
                 break;
             }
@@ -378,6 +422,10 @@ void SocketByteSink::pollInbound(const std::function<void(int sessionId, const c
             }
             if (netErrorWouldBlock(err)) {
                 break; // nothing more pending this beat
+            }
+            if (netTraceEnabled()) {
+                fprintf(stderr, "f2_server: NETTRACE RX socket-error session=%d error=%s code=%d\n",
+                    client.sessionId, netErrorString(err), err);
             }
             closed = true; // genuine error
             break;
@@ -408,6 +456,10 @@ void SocketByteSink::pollInbound(const std::function<void(int sessionId, const c
         // without bound. Past the cap, drop it (the residual is not a valid v1
         // command anyway).
         if (client.inbuf.size() > kMaxInbuf) {
+            if (netTraceEnabled()) {
+                fprintf(stderr, "f2_server: NETTRACE RX overlong-command session=%d buffered=%zu limit=%zu\n",
+                    client.sessionId, client.inbuf.size(), kMaxInbuf);
+            }
             closed = true;
         }
 
@@ -415,10 +467,19 @@ void SocketByteSink::pollInbound(const std::function<void(int sessionId, const c
         // set, but a copy is cheap and keeps no _clients reference live across it.
         int sessionId = client.sessionId;
         for (const std::string& line : lines) {
+            if (netTraceEnabled()) {
+                std::string safeLine = traceCommand(line);
+                fprintf(stderr, "f2_server: NETTRACE RX command session=%d bytes=%zu line=%s\n",
+                    sessionId, line.size() + 1, safeLine.c_str());
+            }
             onLine(sessionId, line.c_str());
         }
 
         if (closed) {
+            if (netTraceEnabled() && !client.inbuf.empty()) {
+                fprintf(stderr, "f2_server: NETTRACE RX incomplete session=%d buffered=%zu\n",
+                    client.sessionId, client.inbuf.size());
+            }
             dropClient(i, "closed/overlong");
             continue; // do not advance i
         }

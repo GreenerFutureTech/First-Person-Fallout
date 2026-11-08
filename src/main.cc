@@ -100,6 +100,10 @@ static unsigned int gViewerPendingLootSince = 0;
 
 static const unsigned int kViewerLootApproachTimeoutMs = 16000;
 
+static unsigned int gViewerFirstPersonLeftClickStartTime = 0;
+
+static bool gViewerFirstPersonActionMenuShown = false;
+
 static int mainHeadlessProbe();
 
 static void viewerArmPendingLoot(ClientConnection& conn, int netId);
@@ -1319,6 +1323,51 @@ static void viewerHandleFirstPersonClick(ClientConnection& conn, int screenX, in
     }
 }
 
+static Object* viewerPickFirstPersonActionTargetAt(int screenX, int screenY)
+{
+    Object* target = tileFirstPersonPreviewPickCritterAt(screenX, screenY);
+    if (target == nullptr) {
+        target = tileFirstPersonPreviewPickObjectAt(screenX, screenY);
+    }
+    if (target == nullptr) {
+        target = tileFirstPersonPreviewPickDoorAt(screenX, screenY);
+    }
+    return target;
+}
+
+static void viewerShowFirstPersonActionMenu(
+    ClientConnection& conn,
+    Object* target,
+    int screenX,
+    int screenY)
+{
+    if (target == nullptr || target->netId <= 0) {
+        return;
+    }
+
+    int actionMenuItems[GAME_MOUSE_ACTION_MENU_ITEM_COUNT];
+    const int count = gameMouseBuildActionMenu(target, actionMenuItems);
+    const bool relativeModeWasEnabled = mouseDeviceUsesRelativeMode();
+    if (relativeModeWasEnabled && !mouseDeviceSetRelativeModeForced(false)) {
+        debugPrint("F11 action menu: failed to release relative mouse mode: %s\n", SDL_GetError());
+        return;
+    }
+
+    mouseShowCursor();
+    mouseDeviceSetLogicalPosition(screenX, screenY);
+    _mouse_set_position(screenX, screenY);
+    const int selectedItem = gameMouseRunActionMenu(screenX, screenY, actionMenuItems, count, true);
+    viewerSendActionMenuVerb(conn, selectedItem, target);
+
+    if (relativeModeWasEnabled) {
+        if (mouseDeviceSetRelativeModeForced(true)) {
+            mouseHideCursor();
+        } else {
+            debugPrint("F11 action menu: failed to restore relative mouse mode: %s\n", SDL_GetError());
+        }
+    }
+}
+
 static int viewerSkillModeForKey(int keyCode)
 {
     switch (keyCode) {
@@ -1779,29 +1828,63 @@ static int mainClientViewer(const char* connectSpec)
         int keyCode = inputGetInput();
         gameHandleFirstPersonPreviewInput(keyCode);
         if (tileFirstPersonPreviewIsEnabled() && !conn.inCombat()) {
-            bool firstPersonClick = keyCode == INPUT_EVENT_FIRST_PERSON_LEFT_CLICK;
+            const int mouseEvent = mouseGetEvent();
+            const bool firstPersonClick = keyCode == INPUT_EVENT_FIRST_PERSON_LEFT_CLICK;
+            const bool leftButtonDownEvent = firstPersonClick
+                || (keyCode == -2
+                    && (mouseEvent & MOUSE_EVENT_LEFT_BUTTON_DOWN) != 0
+                    && (mouseEvent & MOUSE_EVENT_LEFT_BUTTON_REPEAT) == 0);
+            const bool leftButtonDown =
+                (SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_LMASK) != 0;
             int clickX = 0;
             int clickY = 0;
-            if (firstPersonClick) {
+            if (tileFirstPersonPreviewIsCursorCaptured()) {
                 Rect isoWindowRect;
                 if (windowGetRect(gIsoWindow, &isoWindowRect) == 0) {
                     clickX = isoWindowRect.left + windowGetWidth(gIsoWindow) / 2;
                     clickY = isoWindowRect.top + windowGetHeight(gIsoWindow) / 2;
-                } else {
-                    firstPersonClick = false;
                 }
-            } else if (keyCode == -2 && (mouseGetEvent() & MOUSE_EVENT_LEFT_BUTTON_UP) != 0) {
-                if (!tileFirstPersonPreviewIsCursorCaptured()) {
-                    mouseGetPosition(&clickX, &clickY);
-                    firstPersonClick = true;
-                } else {
-                    keyCode = -1;
+            } else {
+                mouseGetPosition(&clickX, &clickY);
+            }
+
+            if (leftButtonDownEvent && gViewerFirstPersonLeftClickStartTime == 0) {
+                gViewerFirstPersonLeftClickStartTime = getTicks();
+                gViewerFirstPersonActionMenuShown = false;
+            }
+
+            if (gViewerFirstPersonLeftClickStartTime != 0
+                && leftButtonDown
+                && !gViewerFirstPersonActionMenuShown
+                && getTicksSince(gViewerFirstPersonLeftClickStartTime) >= BUTTON_REPEAT_TIME) {
+                Rect isoWindowRect;
+                if (windowGetRect(gIsoWindow, &isoWindowRect) == 0
+                    && clickX >= isoWindowRect.left && clickX <= isoWindowRect.right
+                    && clickY >= isoWindowRect.top && clickY <= isoWindowRect.bottom) {
+                    Object* target = viewerPickFirstPersonActionTargetAt(clickX, clickY);
+                    if (target != nullptr) {
+                        gViewerFirstPersonActionMenuShown = true;
+                        viewerShowFirstPersonActionMenu(conn, target, clickX, clickY);
+                        gViewerFirstPersonActionMenuShown = false;
+                        gViewerFirstPersonLeftClickStartTime = 0;
+                        keyCode = -1;
+                    }
                 }
             }
-            if (firstPersonClick) {
-                viewerHandleFirstPersonClick(conn, clickX, clickY);
+
+            if (gViewerFirstPersonLeftClickStartTime != 0
+                && !leftButtonDown
+                && (keyCode == -1 || keyCode == -2)) {
+                if (!gViewerFirstPersonActionMenuShown) {
+                    viewerHandleFirstPersonClick(conn, clickX, clickY);
+                }
+                gViewerFirstPersonActionMenuShown = false;
+                gViewerFirstPersonLeftClickStartTime = 0;
                 keyCode = -1;
             }
+        } else {
+            gViewerFirstPersonActionMenuShown = false;
+            gViewerFirstPersonLeftClickStartTime = 0;
         }
         if (keyCode == KEY_F11) {
             gameToggleFirstPersonPreview();

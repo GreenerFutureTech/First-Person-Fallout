@@ -278,7 +278,8 @@ $environmentNames = @(
     'F2_PLAYER_NAME',
     'F2_PLAYER_CREATE',
     'F2_PLAYER_TOKEN',
-    'F2_WINDOWED'
+    'F2_WINDOWED',
+    'F2_NET_TRACE_FILE'
 )
 $previousEnvironment = @{}
 foreach ($name in $environmentNames) {
@@ -302,6 +303,17 @@ try {
         $env:F2_WINDOWED = '1'
     } else {
         Remove-Item Env:F2_WINDOWED -ErrorAction SilentlyContinue
+    }
+    if ($env:F2_NET_TRACE -eq '1') {
+        $traceDirectory = Join-Path $env:APPDATA 'FirstPersonFallout'
+        if (-not (Test-Path -LiteralPath $traceDirectory -PathType Container)) {
+            New-Item -ItemType Directory -Path $traceDirectory -Force | Out-Null
+        }
+        $tracePath = Join-Path $traceDirectory ("coop-client-net-{0}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+        $env:F2_NET_TRACE_FILE = $tracePath
+        Write-Host "Network trace: $tracePath"
+    } else {
+        Remove-Item Env:F2_NET_TRACE_FILE -ErrorAction SilentlyContinue
     }
 
     Push-Location $GameDirectory

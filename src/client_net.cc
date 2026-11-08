@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cstdarg>
 #include <deque>
 #include <string>
 #include <unordered_map>
@@ -293,6 +294,52 @@ void clientOutlineClearAll()
 // Little-endian byte reader with bounds checks. Every accessor returns 0 past the
 // end and trips `overflow`, so a truncated stream fails loud instead of reading
 // garbage.
+FILE* netTraceFile()
+{
+    static FILE* file = nullptr;
+    static bool initialized = false;
+    if (!initialized) {
+        initialized = true;
+        const char* path = getenv("F2_NET_TRACE_FILE");
+        if (path != nullptr && path[0] != '\0') {
+            file = fopen(path, "wb");
+            if (file == nullptr) {
+                fprintf(stderr, "client_net: cannot open trace file '%s'\n", path);
+            }
+        }
+    }
+    return file;
+}
+
+void netTrace(const char* format, ...)
+{
+    FILE* file = netTraceFile();
+    if (file == nullptr) {
+        return;
+    }
+    va_list args;
+    va_start(args, format);
+    vfprintf(file, format, args);
+    va_end(args);
+    fflush(file);
+}
+
+std::string traceCommand(const char* line)
+{
+    std::string command(line);
+    if (command.compare(0, 6, "login ") == 0) {
+        size_t nameEnd = command.find(' ', 6);
+        if (nameEnd != std::string::npos) {
+            size_t tokenStart = command.find_first_not_of(' ', nameEnd);
+            if (tokenStart != std::string::npos) {
+                command.resize(tokenStart);
+                command += " <redacted-token>";
+            }
+        }
+    }
+    return command;
+}
+
 class Reader {
 public:
     Reader(const unsigned char* data, size_t size)
@@ -4618,6 +4665,7 @@ public:
             }
             if (_buf[_pos] != 'F' || _buf[_pos + 1] != '2' || _buf[_pos + 2] != 'N' || _buf[_pos + 3] != 'S') {
                 debugPrint("client_net: bad magic\n");
+                netTrace("RX protocol-error bad-magic bytes=%zu\n", _buf.size() - _pos);
                 return false;
             }
             unsigned short version = (unsigned short)(_buf[_pos + 4] | (_buf[_pos + 5] << 8));
@@ -4627,10 +4675,13 @@ public:
                 // rather than misparse every frame after this point.
                 debugPrint("client_net: wire version %u != %u (server and viewer must ship together)\n",
                     version, kWireVersion);
+                netTrace("RX protocol-error wire-version got=%u expected=%u\n", version, kWireVersion);
                 return false;
             }
             _mySessionId = (int)readU32(_buf.data() + _pos + 6);
             _decoder.setSessionId(_mySessionId);
+            netTrace("RX preamble magic=F2NS version=%u session=%d bytes=%d\n",
+                version, _mySessionId, kWirePreambleLen);
             _pos += kWirePreambleLen;
             _magicDone = true;
         }
@@ -4655,11 +4706,14 @@ public:
             // turn the bounds check below into an out-of-bounds read.
             if (payloadLen > (64u << 20)) {
                 debugPrint("client_net: absurd frame payloadLen=%u (seq=%u)\n", payloadLen, seq);
+                netTrace("RX protocol-error absurd-payload seq=%u payload=%u\n", seq, payloadLen);
                 return false;
             }
             if (_buf.size() - _pos < (size_t)18 + payloadLen) {
                 break; // frame body not fully arrived yet
             }
+            netTrace("RX frame seq=%u simTs=%u payload=%u events=%u entryBase=%u total=%u\n",
+                seq, readU32(h + 4), payloadLen, eventCount, entryBase, 18u + payloadLen);
             if (!_seqSeeded) {
                 // A mid-stream joiner's first frame carries whatever the global
                 // stream counter has reached (per-client framing was rejected —
@@ -4672,6 +4726,7 @@ public:
                 // §1: a frame-seq gap = a whole missed frame = resync territory.
                 // On a reliable TCP stream this must never happen; fail loud.
                 debugPrint("client_net: frame seq gap expected=%u got=%u\n", _expectSeq, seq);
+                netTrace("RX protocol-error sequence-gap expected=%u got=%u\n", _expectSeq, seq);
                 return false;
             }
             _expectSeq++;
@@ -4685,10 +4740,16 @@ public:
                 unsigned short len = frame.u16();
                 if (frame.overflow() || len > frame.remaining()) {
                     debugPrint("client_net: truncated event in frame %u\n", seq);
+                    netTrace("RX protocol-error truncated-event frame=%u index=%u len=%u remaining=%zu\n",
+                        seq, e, len, frame.remaining());
                     return false;
                 }
                 Reader ev(frame.here(), len);
+                netTrace("RX event frame=%u index=%u type=%u len=%u entry=%u\n",
+                    seq, e, type, len, entryBase + e);
                 _decoder.event(type, ev, entryBase + e);
+                netTrace("RX event applied frame=%u index=%u type=%u overflow=%d\n",
+                    seq, e, type, ev.overflow() ? 1 : 0);
                 frame.skip(len); // advance past the event regardless of what ev read
             }
 
@@ -4726,6 +4787,7 @@ public:
     void setCombatModalOpen(bool open) { _decoder.setCombatModalOpen(open); }
     bool combatModalOpen() const { return _decoder.combatModalOpen(); }
     int frames() const { return _frames; }
+    size_t pendingBytes() const { return _buf.size() - _pos; }
     int tripwireOk() const { return _decoder.tripwireOk(); }
     int tripwireBad() const { return _decoder.tripwireBad(); }
 
@@ -4752,6 +4814,7 @@ private:
 // platform_net.h — the live viewer works on Windows as well as POSIX.
 NetSocket clientSocketConnect(const char* host, int port)
 {
+    netTrace("CONNECT begin host=%s port=%d\n", host, port);
     // Transport init: suppresses SIGPIPE on POSIX (a dead peer must never kill us,
     // same discipline as server_net) and runs WSAStartup on Windows.
     if (!netPlatformInit()) {
@@ -4771,18 +4834,22 @@ NetSocket clientSocketConnect(const char* host, int port)
     int gai = getaddrinfo(host, portStr, &hints, &res);
     if (gai != 0 || res == nullptr) {
         debugPrint("client_net: resolve '%s' failed: %s\n", host, gai_strerror(gai));
+        netTrace("CONNECT resolve-failed host=%s error=%s\n", host, gai_strerror(gai));
         return kNetInvalidSocket;
     }
 
     NetSocket fd = kNetInvalidSocket;
+    int connectError = 0;
     for (struct addrinfo* ai = res; ai != nullptr; ai = ai->ai_next) {
         fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (!netSocketValid(fd)) {
+            connectError = netLastError();
             continue;
         }
         if (::connect(fd, ai->ai_addr, (int)ai->ai_addrlen) == 0) {
             break;
         }
+        connectError = netLastError();
         netCloseSocket(fd);
         fd = kNetInvalidSocket;
     }
@@ -4790,10 +4857,13 @@ NetSocket clientSocketConnect(const char* host, int port)
 
     if (!netSocketValid(fd)) {
         debugPrint("client_net: connect to %s:%d failed: %s\n", host, port,
-            netErrorString(netLastError()));
+            netErrorString(connectError));
+        netTrace("CONNECT failed host=%s port=%d error=%s code=%d\n",
+            host, port, netErrorString(connectError), connectError);
         return kNetInvalidSocket;
     }
 
+    netTrace("CONNECT tcp-established host=%s port=%d\n", host, port);
     // The wire is many small frames; disable Nagle for latency over throughput.
     netSetNoDelay(fd);
     // Non-blocking is a socket MODE here, not a per-recv MSG_DONTWAIT flag: Windows
@@ -4887,6 +4957,7 @@ bool ClientConnection::pump()
         // immediately with WOULDBLOCK when drained — the portable MSG_DONTWAIT.
         long n = netRecv(_impl->fd, buf, sizeof(buf));
         if (n > 0) {
+            netTrace("RX socket bytes=%ld\n", n);
             _impl->stream->feed(buf, (size_t)n);
             pumped += (size_t)n;
             if (pumped >= kPumpByteCap) {
@@ -4896,6 +4967,8 @@ bool ClientConnection::pump()
         }
         if (n == 0) {
             debugPrint("client_net: server closed the connection\n");
+            netTrace("RX socket closed-by-server pending-bytes=%zu\n",
+                _impl->stream->pendingBytes());
             return false;
         }
         int err = netLastError();
@@ -4906,6 +4979,7 @@ bool ClientConnection::pump()
             break; // nothing more pending this pump
         }
         debugPrint("client_net: recv error: %s\n", netErrorString(err));
+        netTrace("RX socket error=%s code=%d\n", netErrorString(err), err);
         return false;
     }
     return _impl->stream->drain();
@@ -4921,6 +4995,8 @@ bool ClientConnection::sendLine(const char* line)
     // tears the viewer down (matches pump()'s failure contract).
     std::string buf(line);
     buf.push_back('\n');
+    std::string trace = traceCommand(line);
+    netTrace("TX command bytes=%zu line=%s\n", buf.size(), trace.c_str());
     const char* p = buf.data();
     size_t remaining = buf.size();
     while (remaining != 0) {
@@ -4934,6 +5010,7 @@ bool ClientConnection::sendLine(const char* line)
                 continue; // socket write buffer full; the v1 control line is tiny
             }
             debugPrint("client_net: sendLine failed: %s\n", netErrorString(err));
+            netTrace("TX command failed error=%s code=%d\n", netErrorString(err), err);
             netCloseSocket(_impl->fd);
             _impl->fd = kNetInvalidSocket;
             return false;
@@ -4941,6 +5018,7 @@ bool ClientConnection::sendLine(const char* line)
         p += n;
         remaining -= (size_t)n;
     }
+    netTrace("TX command sent bytes=%zu\n", buf.size());
     return true;
 }
 
@@ -5055,6 +5133,7 @@ bool ClientConnection::connected() const
 void ClientConnection::close()
 {
     if (netSocketValid(_impl->fd)) {
+        netTrace("CONNECTION local-close\n");
         netCloseSocket(_impl->fd);
         _impl->fd = kNetInvalidSocket;
     }

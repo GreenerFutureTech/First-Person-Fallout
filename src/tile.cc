@@ -3886,16 +3886,24 @@ static Object* tileFirstPersonPreviewPickCritterAtPosition(int x, int y)
 
     Object* pickedObject = nullptr;
     double pickedDepth = std::numeric_limits<double>::infinity();
+    Object* fallbackObject = nullptr;
+    double fallbackDepth = std::numeric_limits<double>::infinity();
     for (const TileFirstPersonActorHitTarget& target : gFirstPersonPreviewActorHitTargets) {
         if (FrmId(target.object).objectType() != OBJ_TYPE_CRITTER) {
             continue;
         }
-        if (target.depth >= pickedDepth
-            || x < target.left
+        if (x < target.left
             || x >= target.left + target.width
             || y < target.top
             || y >= target.top + target.height
             || target.depth >= gFirstPersonPreviewWallDepths[x]) {
+            continue;
+        }
+        if (target.depth < fallbackDepth) {
+            fallbackObject = target.object;
+            fallbackDepth = target.depth;
+        }
+        if (target.depth >= pickedDepth) {
             continue;
         }
 
@@ -3919,7 +3927,7 @@ static Object* tileFirstPersonPreviewPickCritterAtPosition(int x, int y)
         pickedDepth = target.depth;
     }
 
-    return pickedObject;
+    return pickedObject != nullptr ? pickedObject : fallbackObject;
 }
 
 Object* tileFirstPersonPreviewPickCritter()
@@ -4030,14 +4038,18 @@ Object* tileFirstPersonPreviewPickDoorAt(int screenX, int screenY)
     const int x = screenX - isoWindowRect.left;
     const int y = screenY - isoWindowRect.top;
     const int horizonY = tileFirstPersonPreviewGetHorizonY();
-    if (x < 0 || x >= gTileWindowWidth || y < horizonY || y >= gTileWindowHeight) {
+    if (x < 0 || x >= gTileWindowWidth || y < 0 || y >= gTileWindowHeight) {
         return nullptr;
     }
 
     Object* pickedDoor = nullptr;
+    int pickedXDistance = std::numeric_limits<int>::max();
     double pickedDepth = std::numeric_limits<double>::infinity();
     for (const TileFirstPersonDoorHitTarget& target : gFirstPersonPreviewDoorHitTargets) {
-        if (target.screenX != x || target.depth >= pickedDepth) {
+        const int xDistance = target.screenX > x ? target.screenX - x : x - target.screenX;
+        if (xDistance > 4
+            || xDistance > pickedXDistance
+            || (xDistance == pickedXDistance && target.depth >= pickedDepth)) {
             continue;
         }
         const int fullWallHeight = std::min(gTileWindowHeight,
@@ -4048,6 +4060,7 @@ Object* tileFirstPersonPreviewPickDoorAt(int screenX, int screenY)
             continue;
         }
         pickedDoor = target.object;
+        pickedXDistance = xDistance;
         pickedDepth = target.depth;
     }
     return pickedDoor;
