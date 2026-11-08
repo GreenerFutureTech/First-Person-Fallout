@@ -3750,7 +3750,13 @@ int inventoryOpenLooting(Object* looter, Object* target)
                 int maxCarryWeight = critterGetStat(_inven_dude, STAT_CARRY_WEIGHT);
                 int currentWeight = objectGetInventoryWeight(_inven_dude);
                 int newInventoryWeight = objectGetInventoryWeight(target);
-                if (newInventoryWeight <= maxCarryWeight - currentWeight) {
+                if (clientViewerActive() && !_gIsSteal) {
+                    if (target->netId > 0) {
+                        clientViewerLootTakeAll(target->netId);
+                    } else {
+                        debugPrint("inventory: viewer cannot take all from unbound loot target\n");
+                    }
+                } else if (newInventoryWeight <= maxCarryWeight - currentWeight) {
                     itemMoveAll(target, _inven_dude);
                     _display_target_inventory(_target_stack_offset[_target_curr_stack], -1, _target_pud, INVENTORY_WINDOW_TYPE_LOOT);
                     _display_inventory(_stack_offset[_curr_stack], -1, INVENTORY_WINDOW_TYPE_LOOT);
@@ -4409,7 +4415,15 @@ static InventoryMoveResult _move_inventory(Object* item, int slotIndex, Object* 
                 }
 
                 if (!skipMove && result != INVENTORY_MOVE_RESULT_CAUGHT_STEALING) {
-                    if (itemMove(_inven_dude, targetObj, item, quantityToMove) != -1) {
+                    if (clientViewerActive() && !_gIsSteal) {
+                        if (targetObj->netId > 0) {
+                            clientViewerLootPut(targetObj->netId, item->pid, quantityToMove);
+                            result = INVENTORY_MOVE_RESULT_SUCCESS;
+                        } else {
+                            debugPrint("inventory: viewer cannot put item into unbound loot target (pid %d)\n",
+                                item->pid);
+                        }
+                    } else if (itemMove(_inven_dude, targetObj, item, quantityToMove) != -1) {
                         result = INVENTORY_MOVE_RESULT_SUCCESS;
                     } else {
                         inventoryDisplayMessage(26); // There is no space left for that item.
@@ -4438,7 +4452,15 @@ static InventoryMoveResult _move_inventory(Object* item, int slotIndex, Object* 
                 }
 
                 if (!skipMove && result != INVENTORY_MOVE_RESULT_CAUGHT_STEALING) {
-                    if (itemMove(targetObj, _inven_dude, item, quantityToMove) == 0) {
+                    if (clientViewerActive() && !_gIsSteal) {
+                        if (targetObj->netId > 0) {
+                            clientViewerLootTake(targetObj->netId, item->pid, quantityToMove);
+                            result = INVENTORY_MOVE_RESULT_SUCCESS;
+                        } else {
+                            debugPrint("inventory: viewer cannot take item from unbound loot target (pid %d)\n",
+                                item->pid);
+                        }
+                    } else if (itemMove(targetObj, _inven_dude, item, quantityToMove) == 0) {
                         if ((item->flags & OBJECT_IN_RIGHT_HAND) != OBJECT_NONE) {
                             targetObj->fid = FrmId(targetObj, WeaponAnimation::None, targetObj->rotation + 1).fid();
                         }

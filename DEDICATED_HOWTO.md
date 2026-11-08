@@ -89,14 +89,23 @@ To clear only the isolated standalone-server saves, stop the server first and
 run:
 
 ```powershell
+.\show-server-saves.ps1
 .\clear-server-saves.ps1 -ConfirmServerStopped -WhatIf
 .\clear-server-saves.ps1 -ConfirmServerStopped
 ```
 
-The script requires the dedicated server data marker created by the launcher
-and clears its `SAVEGAME` slots plus saved-map checkpoints under `MAPS`. Saved
-map checkpoints can otherwise take precedence over a requested `.MAP` when
-starting a new world. The script does not touch the Fallout 2 installation's
+`show-server-saves.ps1` is read-only. It lists all 15 slots (1-10 manual,
+11-15 autosaves), marks each as used, empty, incomplete, or skipped if it is a
+link, and reports the save file's last-modified timestamp and size. It also
+lists saved-map checkpoints under `MAPS`. By default it uses the server data
+directory from the saved launcher settings; pass `-ServerDataDirectory` to
+inspect a different one. Timestamps are local filesystem times, not in-game
+save times.
+
+The clear script requires the dedicated server data marker created by the
+launcher and clears its `SAVEGAME` slots plus saved-map checkpoints under
+`MAPS`. Saved map checkpoints can otherwise take precedence over a requested
+`.MAP` when starting a new world. It does not touch the Fallout 2 installation's
 regular saves or the server's other data.
 
 | binary | what it is |
