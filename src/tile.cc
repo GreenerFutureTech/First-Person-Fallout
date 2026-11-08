@@ -2146,18 +2146,14 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
     }
 
     const double projectionScale = gTileWindowHeight / transformY;
-    constexpr double kCritterNearDistance = 0.75;
-    constexpr double kCritterFullSizeDistance = 2.5;
-    constexpr double kMinimumCritterScale = 0.8;
-    const double critterScaleProgress = std::clamp(
-        (transformY - kCritterNearDistance)
-            / (kCritterFullSizeDistance - kCritterNearDistance),
-        0.0,
+    constexpr double kCritterFullSizeDistance = 0.75;
+    constexpr double kCritterReducedSizeDistance = 1.5;
+    constexpr double kMinimumCritterScale = 0.75;
+    const double critterScale = std::clamp(
+        (kCritterReducedSizeDistance - transformY)
+            / (kCritterReducedSizeDistance - kCritterFullSizeDistance),
+        kMinimumCritterScale,
         1.0);
-    const double easedCritterScaleProgress = critterScaleProgress * critterScaleProgress
-        * (3.0 - 2.0 * critterScaleProgress);
-    const double critterScale = kMinimumCritterScale
-        + (1.0 - kMinimumCritterScale) * easedCritterScaleProgress;
     const double actorProjectionScale = objectType == OBJ_TYPE_CRITTER
         ? projectionScale * critterScale
         : projectionScale;
@@ -2406,11 +2402,7 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
             : isMediumScenery ? 1.3
             : fallbackWidthScale;
     const int projectedActorHeight = std::max(1, static_cast<int>(actorProjectionScale * objectHeightScale));
-    const int actorHeight = objectType == OBJ_TYPE_CRITTER
-        ? std::min(
-            std::max(1, static_cast<int>(gTileWindowHeight * 0.8)),
-            projectedActorHeight)
-        : projectedActorHeight;
+    const int actorHeight = projectedActorHeight;
     const int projectedActorBottom = renderContext->horizonY
         + static_cast<int>(projectionScale * 0.5);
     const int actorBottom = isRock

@@ -1,6 +1,6 @@
 param(
     [ValidateSet('Debug', 'Release', 'RelWithDebInfo', 'MinSizeRel')]
-    [string] $Configuration = 'Debug',
+    [string] $Configuration = 'Release',
 
     [string] $BuildDirectory = 'build',
 

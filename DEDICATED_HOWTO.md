@@ -56,8 +56,9 @@ encrypted for the current Windows user, and its prompt remains hidden (press
 Enter to reuse it). The launcher remembers server/account combinations in
 `%APPDATA%\FirstPersonFallout\used-coop-accounts.json`; the first-time question
 still appears, but defaults to No for any combination already launched from
-this script, not just the most recent one. To use a non-default build output or
-game folder, pass `-Configuration`, `-BuildDirectory`, or `-GameDirectory`.
+this script, not just the most recent one. The launcher defaults to the Release
+build. To use a different configuration, build output, or game folder, pass
+`-Configuration`, `-BuildDirectory`, or `-GameDirectory`.
 Add `-WhatIf` to review and save the selected settings without launching the
 game or recording the account as used.
 
@@ -69,7 +70,8 @@ To configure and start the dedicated server interactively on Windows, run:
 
 The server launcher prompts for a new map, save slot, or operator-selected lobby;
 wire and admin ports; pacing and autosave; player slots; server identity;
-keepalive; and optional token enforcement. Settings are saved in
+keepalive; and optional token enforcement. The launcher defaults to the Release
+build. Settings are saved in
 `%APPDATA%\FirstPersonFallout\coop-server.json` and prefilled next time; press
 Enter to keep each displayed value. Use `-Configuration`, `-BuildDirectory`,
 or `-GameDirectory` to override the defaults, and `-WhatIf` to save and review
