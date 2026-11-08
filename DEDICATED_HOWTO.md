@@ -68,7 +68,8 @@ To configure and start the dedicated server interactively on Windows, run:
 .\run-coop-server.ps1
 ```
 
-The server launcher prompts for a new map, save slot, or operator-selected lobby;
+The server launcher prompts for a save slot, operator-selected lobby, or new map (lobby is the
+default so restarting does not accidentally start a fresh world);
 wire and admin ports; pacing and autosave; player slots; server identity;
 keepalive; and optional token enforcement. The launcher defaults to the Release
 build. Settings are saved in
@@ -107,7 +108,7 @@ env F2_SERVER_MAP=artemple.map \
 
 A map, two ports, and a real-time pace. **Every feature is already on** — combat
 presentation, recorded animation, smooth walking, live dialogue and barter, worldmap travel,
-cutscenes. Add `F2_AUTOSAVE_SECS=300` if you want periodic autosaves (they rotate
+cutscenes. Add `F2_AUTOSAVE_SECS=120` if you want periodic autosaves (they rotate
 through slots 11-15, oldest overwritten first; the announcement names the slot).
 
 The feature variables still exist, but only as **kill switches** for debugging — set one to
@@ -211,7 +212,7 @@ enabled. `=0` disables. Any other value also enables, so `=1` is harmless and ex
 | `F2_SERVER_PACE_MS` | `0` (full speed) | ms wall-clock per beat; `100` ≈ real time. Use `100` for play, lower to fast-forward |
 | `F2_SERVER_TICKS` | `0` = **unlimited** | serve forever. A positive value is a safety cap for runs that must terminate |
 | `F2_SERVER_KEEPALIVE` | on if `CMD` set | persistent server: don't quit when the last player leaves; idle **frozen** and accept reconnects. `=0` restores exit-on-empty |
-| `F2_AUTOSAVE_SECS` | `300` | autosave interval → **rotating window, slots 11-15**; `0` = off. Also fires on every **map change**, and an interval save that comes due at an unsafe moment lands on the first safe beat. Fills empty slots first, then overwrites the OLDEST (by in-game clock). Broadcasts "Game auto-saved to slot N." — ►► the window exists because a single slot got overwritten in place: walking into a random encounter checkpointed a mid-fight transient map over the only save you had, with nothing older to fall back to. |
+| `F2_AUTOSAVE_SECS` | `120` | autosave interval → **rotating window, slots 11-15**; `0` = off. Also fires on every **map change**, and an interval save that comes due at an unsafe moment lands on the first safe beat. Fills empty slots first, then overwrites the OLDEST (by in-game clock). Broadcasts "Game auto-saved to slot N." — ►► the window exists because a single slot got overwritten in place: walking into a random encounter checkpointed a mid-fight transient map over the only save you had, with nothing older to fall back to. |
 | `F2_SERVER_TURN_IDLE_MS` | `60000` | combat: sim-ms a human gets once their turn is on screen |
 | `F2_SERVER_TURN_WAIT` | off | force the resumable-combat turn barrier to wait |
 | `F2_SERVER_ACTION_GATE` | **on** | per-player action pacing (an action is gated for as long as the animation it produced runs). `=0` disables — the only kill switch here that defaults ON |

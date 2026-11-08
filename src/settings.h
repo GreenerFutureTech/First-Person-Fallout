@@ -256,7 +256,7 @@ struct SoundSettings {
 
 struct DebugSettings {
     std::string mode = "environment";
-    bool show_fps = false;
+    bool show_fps = true;
     bool show_tile_num = false;
     bool show_script_messages = false;
     bool show_load_info = false;

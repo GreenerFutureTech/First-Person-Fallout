@@ -108,7 +108,7 @@ foreach ($requiredFile in @('master.dat', 'patch000.dat')) {
     }
 }
 
-$modeDefault = if ($savedSettings['StartMode'] -in @('Map', 'Load', 'Lobby')) { [string]$savedSettings['StartMode'] } else { 'Map' }
+$modeDefault = if ($savedSettings['StartMode'] -in @('Load', 'Lobby')) { [string]$savedSettings['StartMode'] } else { 'Lobby' }
 $startMode = Read-RequiredValue `
     -Prompt 'Start mode (Map = new world, Load = saved game, Lobby = choose later)' `
     -DefaultValue $modeDefault `
@@ -155,7 +155,7 @@ $paceMs = Read-RequiredValue `
     -DefaultValue $paceDefault `
     -IsValid { param($value) $number = 0; [int]::TryParse($value, [ref]$number) -and $number -ge 0 -and $number -le 60000 } `
     -ValidationMessage 'Enter a value from 0 to 60000.'
-$autosaveDefault = if ($savedSettings['AutosaveSeconds'] -ne $null) { [string]$savedSettings['AutosaveSeconds'] } else { '300' }
+$autosaveDefault = if ($savedSettings['AutosaveSeconds'] -ne $null -and [string]$savedSettings['AutosaveSeconds'] -ne '300') { [string]$savedSettings['AutosaveSeconds'] } else { '120' }
 $autosaveSeconds = Read-RequiredValue `
     -Prompt 'Autosave interval in seconds (0 disables autosaves)' `
     -DefaultValue $autosaveDefault `

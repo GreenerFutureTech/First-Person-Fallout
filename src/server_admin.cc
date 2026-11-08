@@ -236,7 +236,7 @@ void serverAutosaveTick()
 {
     static const int intervalSecs = []() {
         const char* env = getenv("F2_AUTOSAVE_SECS");
-        return env != nullptr ? atoi(env) : 300;
+        return env != nullptr ? atoi(env) : 120;
     }();
     if (intervalSecs <= 0) {
         return; // F2_AUTOSAVE_SECS=0 turns the feature off

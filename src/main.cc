@@ -1282,6 +1282,43 @@ static void viewerSendPrimaryVerb(ClientConnection& conn, Object* target)
     }
 }
 
+static void viewerHandleFirstPersonClick(ClientConnection& conn, int screenX, int screenY)
+{
+    Object* critter = tileFirstPersonPreviewPickCritterAt(screenX, screenY);
+    if (critter != nullptr) {
+        if (critterIsDead(critter)) {
+            if (critter->netId > 0) {
+                viewerArmPendingLoot(conn, critter->netId);
+            }
+            return;
+        }
+        if (_obj_action_can_talk_to(critter)) {
+            if (critter->netId > 0) {
+                char cmd[48];
+                snprintf(cmd, sizeof(cmd), "talk %d", critter->netId);
+                conn.sendLine(cmd);
+            }
+            return;
+        }
+    }
+
+    Object* object = tileFirstPersonPreviewPickObjectAt(screenX, screenY);
+    if (object != nullptr && object->netId > 0) {
+        const ObjectType objectType = FrmId(object).objectType();
+        if (objectType == OBJ_TYPE_ITEM || _obj_action_can_use(object)) {
+            viewerSendPrimaryVerb(conn, object);
+            return;
+        }
+    }
+
+    Object* door = tileFirstPersonPreviewPickDoorAt(screenX, screenY);
+    if (door != nullptr && door->netId > 0) {
+        char cmd[48];
+        snprintf(cmd, sizeof(cmd), "use %d", door->netId);
+        conn.sendLine(cmd);
+    }
+}
+
 static int viewerSkillModeForKey(int keyCode)
 {
     switch (keyCode) {
@@ -1741,6 +1778,31 @@ static int mainClientViewer(const char* connectSpec)
         // viewer can never mutate the sim; the standard mouse pump still runs harmlessly.
         int keyCode = inputGetInput();
         gameHandleFirstPersonPreviewInput(keyCode);
+        if (tileFirstPersonPreviewIsEnabled() && !conn.inCombat()) {
+            bool firstPersonClick = keyCode == INPUT_EVENT_FIRST_PERSON_LEFT_CLICK;
+            int clickX = 0;
+            int clickY = 0;
+            if (firstPersonClick) {
+                Rect isoWindowRect;
+                if (windowGetRect(gIsoWindow, &isoWindowRect) == 0) {
+                    clickX = isoWindowRect.left + windowGetWidth(gIsoWindow) / 2;
+                    clickY = isoWindowRect.top + windowGetHeight(gIsoWindow) / 2;
+                } else {
+                    firstPersonClick = false;
+                }
+            } else if (keyCode == -2 && (mouseGetEvent() & MOUSE_EVENT_LEFT_BUTTON_UP) != 0) {
+                if (!tileFirstPersonPreviewIsCursorCaptured()) {
+                    mouseGetPosition(&clickX, &clickY);
+                    firstPersonClick = true;
+                } else {
+                    keyCode = -1;
+                }
+            }
+            if (firstPersonClick) {
+                viewerHandleFirstPersonClick(conn, clickX, clickY);
+                keyCode = -1;
+            }
+        }
         if (keyCode == KEY_F11) {
             gameToggleFirstPersonPreview();
             keyCode = -1;

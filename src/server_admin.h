@@ -59,7 +59,7 @@ bool serverAdminTakeRequest(ServerAdminRequest& out);
 void serverAdminWriteSlotListing(const std::function<void(const char* text)>& reply);
 
 // Periodic unattended save into the dedicated autosave slot (SLOT11).
-// F2_AUTOSAVE_SECS sets the cadence (default 300; 0 disables); an extra save
+// F2_AUTOSAVE_SECS sets the cadence (default 120; 0 disables); an extra save
 // fires on the first safe beat after each map change. Call once per MAIN-PHASE
 // beat only — never from a modal pump. Refuses (and stays latched) while the
 // world is unsettled: combat, a pending transition, dialog/barter/worldmap/

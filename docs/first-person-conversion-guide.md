@@ -287,7 +287,9 @@ retaining every historical UI update. Since the source texture contains the
 current final CPU framebuffer, the union safely preserves menu and cursor
 ordering while avoiding unbounded presentation work.
 
-When `debug.show_fps` is enabled, F11 reports rolling 60-frame timing averages
+The FPS counter is enabled by default and can be disabled with
+`[debug] show_fps=0`. When `debug.show_fps` is enabled, F11 also reports rolling
+60-frame timing averages
 for total render, floor projection, wall rendering, and actor submission. The
 timers are disabled when the existing FPS display setting is off, allowing the
 next GPU migration step to target the measured dominant stage.

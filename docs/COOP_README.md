@@ -167,7 +167,7 @@ without them combat, dialog and travel won't stream to viewers.
 | `F2_SERVER_PRES_RECORD` | off | presentation record/replay (discrete-action animation) |
 | `F2_DIALOG_STREAM` | off | live dialog + barter |
 | `F2_WORLDMAP_STREAM` | off | live worldmap travel |
-| `F2_AUTOSAVE_SECS` | `300` | autosave interval → slot 11; `0` = off |
+| `F2_AUTOSAVE_SECS` | `120` | autosave interval → slot 11; `0` = off |
 | `F2_SERVER_SEED` | — | RNG seed (reproducible worlds/encounters) |
 
 > ⚠ A server with **no `NET` and no `CMD` port** and unlimited ticks will spin a CPU core with
@@ -208,7 +208,16 @@ printf 'saves\n' | nc -q1 127.0.0.1 9201
 printf 'save 8 before-temple\n' | nc -q1 127.0.0.1 9201
 ```
 
-Autosaves are automatic to slot 11 on the `F2_AUTOSAVE_SECS` interval (300s by default; set
+On Windows, the repository includes a helper that sends the command and waits for
+the server's reply:
+
+```powershell
+.\save-coop.ps1 -Slot 1 -Label checkpoint
+```
+
+Use `-HostName` and `-Port` if the server is remote or uses a different admin port.
+
+Autosaves are automatic to slot 11 on the `F2_AUTOSAVE_SECS` interval (120s by default; set
 `F2_AUTOSAVE_SECS=0` to disable). Each autosave broadcasts "Game auto-saved." to viewers.
 
 **Load a slot** — two ways:

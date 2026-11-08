@@ -961,7 +961,7 @@ void _GNW95_process_message()
                     && !GameMode::isInGameMode(GameMode::kUseOn)
                     && !GameMode::isInGameMode(GameMode::kBarter)
                     && !GameMode::isInGameMode(GameMode::kCounter)) {
-                    if (e.button.button == SDL_BUTTON_LEFT) {
+                    if (e.button.button == SDL_BUTTON_LEFT && mouseDeviceUsesRelativeMode()) {
                         enqueueInputEvent(INPUT_EVENT_FIRST_PERSON_LEFT_CLICK);
                     } else if (e.button.button == SDL_BUTTON_RIGHT) {
                         enqueueInputEvent(INPUT_EVENT_FIRST_PERSON_RIGHT_CLICK);

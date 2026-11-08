@@ -62,7 +62,7 @@ working directory required by the engine. Server saves and transient map state
 therefore survive image replacement and container recreation in the host's
 `data/SAVEGAME` and `data/MAPS` directories. The image itself remains immutable.
 
-The default autosave interval is five minutes. Before a planned stop, request a
+The default autosave interval is two minutes. Before a planned stop, request a
 save over the admin channel and wait for the success reply, then stop the service:
 
 ```sh
