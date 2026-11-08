@@ -409,6 +409,7 @@ bool gpuOverlaySetIndexed(const unsigned char* pixels, int width, int height, in
     SDL_Texture* texture = SDL_CreateTexture(gSdlRenderer,
         SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, overlayWidth, overlayHeight);
     if (texture == nullptr) {
+        debugPrint("F11 action menu overlay: texture creation failed: %s\n", SDL_GetError());
         return false;
     }
 
@@ -428,6 +429,7 @@ bool gpuOverlaySetIndexed(const unsigned char* pixels, int width, int height, in
     }
 
     if (SDL_UpdateTexture(texture, nullptr, rgba.data(), overlayWidth * sizeof(uint32_t)) != 0) {
+        debugPrint("F11 action menu overlay: texture upload failed: %s\n", SDL_GetError());
         SDL_DestroyTexture(texture);
         return false;
     }
@@ -439,6 +441,8 @@ bool gpuOverlaySetIndexed(const unsigned char* pixels, int width, int height, in
     gpuOverlayClear();
     gGpuIndexedOverlayTexture = texture;
     gGpuIndexedOverlayRect = { x + left, y + top, overlayWidth, overlayHeight };
+    debugPrint("F11 action menu overlay: pixels=%dx%d at (%d,%d), source=%dx%d\n",
+        overlayWidth, overlayHeight, x + left, y + top, width, height);
     return true;
 }
 

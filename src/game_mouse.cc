@@ -20,6 +20,7 @@
 #include "content_config.h"
 #include "critter.h"
 #include "dinput.h"
+#include "debug.h"
 #include "draw.h"
 #include "game.h"
 #include "game_sound.h"
@@ -45,7 +46,7 @@ namespace fallout {
 
 int gameMouseBuildActionMenu(Object* target, int* actionMenuItems);
 
-int gameMouseRunActionMenu(int mouseX, int mouseY, int* actionMenuItems, int actionMenuItemsCount);
+int gameMouseRunActionMenu(int mouseX, int mouseY, int* actionMenuItems, int actionMenuItemsCount, bool waitForClick);
 
 
 enum ScrollableDirections : int {
@@ -2142,42 +2143,6 @@ GameMouseActionMenuItem gameMouseGetHighlightedActionMenuItem()
     return static_cast<GameMouseActionMenuItem>(gGameMouseActionMenuItems[gGameMouseActionMenuHighlightedItemIndex]);
 }
 
-int gameMouseCopyActionMenuBuffer(unsigned char* destination, int destinationPitch, int destinationWidth, int destinationHeight, int x, int y)
-{
-    if (destination == nullptr || gGameMouseActionMenuFrmData == nullptr
-        || destinationPitch <= 0 || destinationWidth <= 0 || destinationHeight <= 0) {
-        return -1;
-    }
-
-    // Match the interface action-menu object's hotspot: centered horizontally
-    // on the click and anchored at its bottom edge.
-    x -= gGameMouseActionMenuFrmWidth / 2;
-    y -= gGameMouseActionMenuFrmHeight - 1;
-
-    int width = std::min(gGameMouseActionMenuFrmWidth, destinationWidth - x);
-    int height = std::min(gGameMouseActionMenuFrmHeight, destinationHeight - y);
-    int sourceX = 0;
-    int sourceY = 0;
-    if (x < 0) {
-        sourceX = -x;
-        width -= sourceX;
-        x = 0;
-    }
-    if (y < 0) {
-        sourceY = -y;
-        height -= sourceY;
-        y = 0;
-    }
-    if (width <= 0 || height <= 0) {
-        return 0;
-    }
-
-    blitBufferToBufferTrans(gGameMouseActionMenuFrmData + gGameMouseActionMenuFrmWidth * sourceY + sourceX,
-        width, height, gGameMouseActionMenuFrmWidth,
-        destination + destinationPitch * y + x, destinationPitch);
-    return 0;
-}
-
 // 0x44D774 gmouse_3d_build_to_hit_frame
 int gameMouseRenderAccuracy(const char* string, Color color)
 {
@@ -2832,31 +2797,75 @@ int gameMouseBuildActionMenu(Object* target, int* actionMenuItems)
     return actionMenuItemsCount;
 }
 
-int gameMouseRunActionMenu(int mouseX, int mouseY, int* actionMenuItems, int actionMenuItemsCount)
+int gameMouseRunActionMenu(int mouseX, int mouseY, int* actionMenuItems, int actionMenuItemsCount, bool waitForClick)
 {
-    if (actionMenuItemsCount <= 0 || actionMenuItemsCount > GAME_MOUSE_ACTION_MENU_ITEM_COUNT) return -1;
+    debugPrint("F11 action menu: start position=(%d,%d) items=%d waitForClick=%d isoDisabled=%d\n",
+        mouseX, mouseY, actionMenuItemsCount, waitForClick, isoIsDisabled());
+    if (actionMenuItemsCount <= 0 || actionMenuItemsCount > GAME_MOUSE_ACTION_MENU_ITEM_COUNT) {
+        debugPrint("F11 action menu: invalid item count %d\n", actionMenuItemsCount);
+        return -1;
+    }
     GameMouseActionMenuItem typedItems[GAME_MOUSE_ACTION_MENU_ITEM_COUNT];
     for (int i = 0; i < actionMenuItemsCount; ++i) typedItems[i] = static_cast<GameMouseActionMenuItem>(actionMenuItems[i]);
     if (gameMouseRenderActionMenuItems(mouseX, mouseY, typedItems, actionMenuItemsCount, _scr_size.right - _scr_size.left + 1, _scr_size.bottom - _scr_size.top - 99) != 0) {
+        debugPrint("F11 action menu: failed to build menu art\n");
         return -1;
     }
 
     Rect cursorRect;
     InterfaceFrmId fid = InterfaceFrameId::ActionMenu;
-    // NOTE: Uninline.
-    if (gameMouse3dSetFlatFrmId(fid, &cursorRect) != 0 || _gmouse_3d_move_to(mouseX, mouseY, gElevation, &cursorRect) != 0) {
+    if (gameMouse3dSetFlatFrmId(fid, &cursorRect) != 0) {
+        debugPrint("F11 action menu: failed to set action-menu cursor frame\n");
+        return -1;
+    }
+    if (_gmouse_3d_move_to(mouseX, mouseY, gElevation, &cursorRect) != 0) {
+        debugPrint("F11 action menu: failed to position menu cursor at (%d,%d)\n", mouseX, mouseY);
         return -1;
     }
 
-    tileWindowRefreshRect(&cursorRect, gElevation);
-    isoDisable();
+    const bool firstPersonPreviewEnabled = tileFirstPersonPreviewIsEnabled();
+    if (firstPersonPreviewEnabled) {
+        if (!gpuOverlaySetIndexed(gGameMouseActionMenuFrmData,
+                gGameMouseActionMenuFrmWidth,
+                gGameMouseActionMenuFrmHeight,
+                gGameMouseActionMenuFrmWidth,
+                cursorRect.left,
+                cursorRect.top)) {
+            debugPrint("F11 action menu: failed to upload menu overlay\n");
+        }
+    } else {
+        tileWindowRefreshRect(&cursorRect, gElevation);
+    }
+    debugPrint("F11 action menu: cursor rect=(%d,%d)-(%d,%d) isoDisabled=%d\n",
+        cursorRect.left, cursorRect.top, cursorRect.right, cursorRect.bottom, isoIsDisabled());
+    const bool isoWasEnabled = !isoIsDisabled();
+    if (isoWasEnabled) {
+        isoDisable();
+    }
 
     int newMouseY = mouseY;
     int actionIndex = 0;
-    while ((mouseGetEvent() & MOUSE_EVENT_LEFT_BUTTON_UP) == 0) {
+    bool selectionStarted = !waitForClick;
+    bool firstPresentation = true;
+    while (true) {
         sharedFpsLimiter.mark();
 
-        inputGetInput();
+        const int eventCode = inputGetInput();
+        if (waitForClick) {
+            if (eventCode == KEY_ESCAPE) {
+                actionIndex = actionMenuItemsCount - 1;
+                gameMouseHighlightActionMenuItemAtIndex(actionIndex);
+                break;
+            }
+            const Uint32 mouseButtons = SDL_GetMouseState(nullptr, nullptr);
+            if ((mouseButtons & SDL_BUTTON_LMASK) != 0) {
+                selectionStarted = true;
+            } else if (selectionStarted) {
+                break;
+            }
+        } else if ((mouseGetEvent() & MOUSE_EVENT_LEFT_BUTTON_UP) != 0) {
+            break;
+        }
 
         if (_game_user_wants_to_quit != 0) {
             actionMenuItems[actionIndex] = 0;
@@ -2886,16 +2895,36 @@ int gameMouseRunActionMenu(int mouseX, int mouseY, int* actionMenuItems, int act
             }
 
             if (gameMouseHighlightActionMenuItemAtIndex(actionIndex) == 0) {
-                tileWindowRefreshRect(&cursorRect, gElevation);
+                if (firstPersonPreviewEnabled) {
+                    if (!gpuOverlaySetIndexed(gGameMouseActionMenuFrmData,
+                            gGameMouseActionMenuFrmWidth,
+                            gGameMouseActionMenuFrmHeight,
+                            gGameMouseActionMenuFrmWidth,
+                            cursorRect.left,
+                            cursorRect.top)) {
+                        debugPrint("F11 action menu: failed to update menu overlay\n");
+                    }
+                } else {
+                    tileWindowRefreshRect(&cursorRect, gElevation);
+                }
             }
             newMouseY = updatedMouseY;
         }
 
         renderPresent();
+        if (firstPresentation) {
+            debugPrint("F11 action menu: first menu frame presented\n");
+            firstPresentation = false;
+        }
         sharedFpsLimiter.throttle();
     }
 
-    isoEnable();
+    if (isoWasEnabled) {
+        isoEnable();
+    }
+    if (firstPersonPreviewEnabled) {
+        gpuOverlayClear();
+    }
 
     _gmouse_3d_hover_test = false;
     gGameMouseLastX = mouseX;

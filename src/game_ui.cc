@@ -102,7 +102,7 @@ namespace fallout {
 
 static bool gameFirstPersonPreviewSetMouseReleased(bool enabled);
 
-static void gameFirstPersonPreviewShowActionMenu(Object* targetObj, int mouseX, int mouseY);
+static void gameFirstPersonPreviewShowActionMenu(Object* targetObj, int mouseX, int mouseY, bool waitForClick = false);
 
 static void gameFirstPersonPreviewStartLoot(Object* critter);
 
@@ -297,11 +297,15 @@ static Object* gameFirstPersonPreviewPickActionObjectAt(int screenX, int screenY
     return tileFirstPersonPreviewPickDoorAt(screenX, screenY);
 }
 
-static void gameFirstPersonPreviewShowActionMenu(Object* targetObj, int mouseX, int mouseY)
+static void gameFirstPersonPreviewShowActionMenu(Object* targetObj, int mouseX, int mouseY, bool waitForClick)
 {
     if (targetObj == nullptr || targetObj == gDude) {
+        debugPrint("F11 action menu: rejected target=%p\n", static_cast<void*>(targetObj));
         return;
     }
+    debugPrint("F11 action menu: target type=%d pid=%d position=(%d,%d) source=%s\n",
+        static_cast<int>(FrmId(targetObj).objectType()), targetObj->pid, mouseX, mouseY,
+        waitForClick ? "hotkey" : "long-click");
 
     GameMouseActionMenuItem menuItems[GAME_MOUSE_ACTION_MENU_ITEM_COUNT - 1];
     int menuItemCount = 0;
@@ -336,97 +340,33 @@ static void gameFirstPersonPreviewShowActionMenu(Object* targetObj, int mouseX, 
     }
     menuItems[menuItemCount++] = GAME_MOUSE_ACTION_MENU_ITEM_CANCEL;
 
-    Rect isoWindowRect;
-    if (windowGetRect(gIsoWindow, &isoWindowRect) != 0
-        || gameMouseRenderActionMenuItems(mouseX, mouseY,
-               menuItems, menuItemCount,
-               _scr_size.right - _scr_size.left + 1,
-               _scr_size.bottom - _scr_size.top - 99) != 0) {
-        return;
-    }
-
     const bool mouseWasReleased = gFirstPersonPreviewMouseReleased;
     const bool relativeModeWasEnabled = mouseDeviceUsesRelativeMode();
     if (relativeModeWasEnabled) {
         mouseDeviceSetRelativeModeForced(false);
     }
     mouseShowCursor();
-    const bool isoWasEnabled = !isoIsDisabled();
-    if (isoWasEnabled) {
-        isoDisable();
-    }
     tileFirstPersonPreviewRefresh();
-    const int menuWindow = windowCreate(0, 0,
-        screenGetWidth(), screenGetHeight(),
-        COLOR_FIRST, WINDOW_HIDDEN | WINDOW_MOVE_ON_TOP | WINDOW_TRANSPARENT);
-    if (menuWindow == -1) {
-        debugPrint("Failed to create first-person action menu window\n");
-        if (isoWasEnabled) isoEnable();
-        if (relativeModeWasEnabled) mouseDeviceSetRelativeModeForced(true);
+    mouseDeviceSetLogicalPosition(mouseX, mouseY);
+    _mouse_set_position(mouseX, mouseY);
+    int menuItemValues[GAME_MOUSE_ACTION_MENU_ITEM_COUNT - 1];
+    for (int index = 0; index < menuItemCount; index++) {
+        menuItemValues[index] = menuItems[index];
+    }
+
+    const int selectedActionValue = gameMouseRunActionMenu(
+        mouseX, mouseY, menuItemValues, menuItemCount, waitForClick);
+    debugPrint("F11 action menu: runner returned action=%d\n", selectedActionValue);
+    if (selectedActionValue < 0 || selectedActionValue >= GAME_MOUSE_ACTION_MENU_ITEM_COUNT) {
+        if (relativeModeWasEnabled) {
+            mouseDeviceSetRelativeModeForced(true);
+        }
         gFirstPersonPreviewMouseReleased = mouseWasReleased;
         if (mouseWasReleased) mouseShowCursor(); else mouseHideCursor();
         return;
     }
-    if (menuWindow != -1) {
-        unsigned char* menuBuffer = windowGetBuffer(menuWindow);
-        if (menuBuffer != nullptr) {
-            memset(menuBuffer, 0, windowGetWidth(menuWindow) * windowGetHeight(menuWindow));
-            gameMouseCopyActionMenuBuffer(menuBuffer, windowGetWidth(menuWindow),
-                windowGetWidth(menuWindow), windowGetHeight(menuWindow),
-                mouseX, mouseY);
-            if (!gpuOverlaySetIndexed(menuBuffer, windowGetWidth(menuWindow),
-                    windowGetHeight(menuWindow), windowGetWidth(menuWindow), 0, 0)) {
-                debugPrint("Failed to render first-person action menu overlay: %s\n", SDL_GetError());
-            }
-            windowShow(menuWindow);
-        }
-    }
-    renderPresent();
 
-    int selectedIndex = 0;
-    mouseDeviceSetLogicalPosition(mouseX, mouseY);
-    _mouse_set_position(mouseX, mouseY);
-    while ((mouseGetEvent() & MOUSE_EVENT_LEFT_BUTTON_UP) == 0) {
-        sharedFpsLimiter.mark();
-        inputGetInput();
-
-        int updatedMouseX;
-        int updatedMouseY;
-        mouseGetPosition(&updatedMouseX, &updatedMouseY);
-        if (abs(updatedMouseY - mouseY) > 10) {
-            int nextIndex = selectedIndex + (mouseY >= updatedMouseY ? -1 : 1);
-            if (nextIndex < 0) nextIndex = 0;
-            if (nextIndex >= menuItemCount) nextIndex = menuItemCount - 1;
-            if (gameMouseHighlightActionMenuItemAtIndex(nextIndex) == 0) {
-                selectedIndex = nextIndex;
-                if (menuWindow != -1 && windowGetBuffer(menuWindow) != nullptr) {
-                    unsigned char* menuBuffer = windowGetBuffer(menuWindow);
-                    memset(menuBuffer, 0, windowGetWidth(menuWindow) * windowGetHeight(menuWindow));
-                    gameMouseCopyActionMenuBuffer(menuBuffer, windowGetWidth(menuWindow),
-                        windowGetWidth(menuWindow), windowGetHeight(menuWindow),
-                        updatedMouseX, updatedMouseY);
-                    if (!gpuOverlaySetIndexed(menuBuffer, windowGetWidth(menuWindow),
-                            windowGetHeight(menuWindow), windowGetWidth(menuWindow), 0, 0)) {
-                        debugPrint("Failed to update first-person action menu overlay: %s\n", SDL_GetError());
-                    }
-                }
-            }
-            mouseY = updatedMouseY;
-        }
-        renderPresent();
-        sharedFpsLimiter.throttle();
-    }
-
-    gpuOverlayClear();
-    windowDestroy(menuWindow);
-    if (isoWasEnabled) {
-        isoEnable();
-    }
-    tileFirstPersonPreviewRefresh();
-    mouseDeviceSetLogicalPosition(mouseX, mouseY);
-    _mouse_set_position(mouseX, mouseY);
-
-    const GameMouseActionMenuItem selectedAction = gameMouseGetHighlightedActionMenuItem();
+    const GameMouseActionMenuItem selectedAction = static_cast<GameMouseActionMenuItem>(selectedActionValue);
     bool lootStarted = false;
 
     switch (selectedAction) {
@@ -640,6 +580,42 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
     }
 
     if (tileFirstPersonPreviewIsEnabled()
+        && !isInCombatMode
+        && !isInCombat()
+        && (eventCode == KEY_LOWERCASE_J || eventCode == KEY_UPPERCASE_J)) {
+        int mouseX;
+        int mouseY;
+        if (gFirstPersonPreviewMouseReleased) {
+            mouseGetPosition(&mouseX, &mouseY);
+        } else {
+            mouseX = screenGetWidth() / 2;
+            mouseY = screenGetHeight() / 2;
+        }
+
+        debugPrint("F11 action menu: J hotkey cursorReleased=%d position=(%d,%d)\n",
+            gFirstPersonPreviewMouseReleased, mouseX, mouseY);
+        Rect isoWindowRect;
+        if (windowGetRect(gIsoWindow, &isoWindowRect) == 0
+            && mouseX >= isoWindowRect.left
+            && mouseX <= isoWindowRect.right
+            && mouseY >= isoWindowRect.top
+            && mouseY <= isoWindowRect.bottom) {
+            Object* target = tileFirstPersonPreviewPickCritterAt(mouseX, mouseY);
+            if (target == nullptr) {
+                target = gameFirstPersonPreviewPickActionObjectAt(mouseX, mouseY);
+            }
+            if (target != nullptr) {
+                gFirstPersonPreviewActionMenuShown = true;
+                gameFirstPersonPreviewShowActionMenu(target, mouseX, mouseY, true);
+                gFirstPersonPreviewActionMenuShown = false;
+                gFirstPersonPreviewLeftClickStartTime = 0;
+                return 0;
+            }
+        }
+        debugPrint("F11 action menu: J hotkey found no target in iso window\n");
+    }
+
+    if (tileFirstPersonPreviewIsEnabled()
         && (eventCode == -1 || eventCode == -2 || eventCode == INPUT_EVENT_FIRST_PERSON_LEFT_CLICK)) {
         const int mouseState = mouseGetEvent();
         if (eventCode == -2
@@ -722,6 +698,8 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
             }
         } else {
             if (eventCode == INPUT_EVENT_FIRST_PERSON_LEFT_CLICK) {
+                debugPrint("F11 action menu: left-click event cursorReleased=%d\n",
+                    gFirstPersonPreviewMouseReleased);
                 gFirstPersonPreviewLeftClickStartTime = getTicks();
                 if (gFirstPersonPreviewMouseReleased) {
                     // This event represents a center-ray click; cursor-active
@@ -786,11 +764,13 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                                 Object* critter = tileFirstPersonPreviewPickCritterAt(mouseX, mouseY);
                                 if (critter != nullptr) {
                                     gFirstPersonPreviewActionMenuShown = true;
+                                    debugPrint("F11 action menu: long-click selected critter at (%d,%d)\n", mouseX, mouseY);
                                     gameFirstPersonPreviewShowActionMenu(critter, mouseX, mouseY);
                                 } else {
                                     Object* object = gameFirstPersonPreviewPickActionObjectAt(mouseX, mouseY);
                                     if (object != nullptr) {
                                         gFirstPersonPreviewActionMenuShown = true;
+                                        debugPrint("F11 action menu: long-click selected object at (%d,%d)\n", mouseX, mouseY);
                                         gameFirstPersonPreviewShowActionMenu(object, mouseX, mouseY);
                                     }
                                 }
@@ -800,6 +780,9 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                             || (eventCode == -1 && !leftButtonDown)) {
                             if (!gFirstPersonPreviewActionMenuShown
                                 && gFirstPersonPreviewLeftClickStartTime != 0) {
+                                debugPrint("F11 action menu: click released without menu at (%d,%d), held=%u ms\n",
+                                    mouseX, mouseY,
+                                    getTicksSince(gFirstPersonPreviewLeftClickStartTime));
                                 Object* critter = tileFirstPersonPreviewPickCritterAt(mouseX, mouseY);
                                 if (critter != nullptr) {
                                     gameFirstPersonPreviewLogObject(critter);
@@ -853,6 +836,7 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                         Object* critter = tileFirstPersonPreviewPickCritter();
                         if (critter != nullptr) {
                             gFirstPersonPreviewActionMenuShown = true;
+                            debugPrint("F11 action menu: long-click selected center critter\n");
                             gameFirstPersonPreviewShowActionMenu(critter,
                                 screenGetWidth() / 2, screenGetHeight() / 2);
                         } else {
@@ -863,6 +847,7 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                                 Object* object = gameFirstPersonPreviewPickActionObjectAt(centerX, centerY);
                                 if (object != nullptr) {
                                     gFirstPersonPreviewActionMenuShown = true;
+                                    debugPrint("F11 action menu: long-click selected center object\n");
                                     gameFirstPersonPreviewShowActionMenu(object, centerX, centerY);
                                 }
                             }

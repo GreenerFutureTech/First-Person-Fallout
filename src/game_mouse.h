@@ -119,7 +119,6 @@ int _gmouse_3d_pick_frame_hot(int* x, int* y);
 int gameMouseRenderActionMenuItems(int x, int y, const GameMouseActionMenuItem* menuItems, int menuItemsCount, int width, int height);
 int gameMouseHighlightActionMenuItemAtIndex(int menuItemIndex);
 GameMouseActionMenuItem gameMouseGetHighlightedActionMenuItem();
-int gameMouseCopyActionMenuBuffer(unsigned char* destination, int destinationPitch, int destinationWidth, int destinationHeight, int x, int y);
 // The vanilla ARROW-mode action menu, factored out of _gmouse_handle_event so the
 // legacy input path and the network wire viewer share ONE menu-contents source
 // (INTERACTION_UX_DESIGN.md §3.2). Build fills `actionMenuItems` (room for 6) with
@@ -130,7 +129,7 @@ int gameMouseCopyActionMenuBuffer(unsigned char* destination, int destinationPit
 // viewer: map to a wire verb). `actionMenuItems` is force-cancelled on a quit
 // request mid-hold, so it is non-const.
 int gameMouseBuildActionMenu(Object* target, int* actionMenuItems);
-int gameMouseRunActionMenu(int x, int y, int* actionMenuItems, int actionMenuItemsCount);
+int gameMouseRunActionMenu(int x, int y, int* actionMenuItems, int actionMenuItemsCount, bool waitForClick = false);
 void gameMouseLoadItemHighlight();
 void _gmouse_remove_item_outline(Object* object);
 
