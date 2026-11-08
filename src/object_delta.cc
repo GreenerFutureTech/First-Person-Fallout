@@ -10,6 +10,7 @@
 #include "debug.h"
 #include "game.h"
 #include "inventory.h"
+#include "item.h"
 #include "light.h" // lightGetAmbientIntensity — global ambient-light worldDelta
 #include "map.h"
 #include "object.h"
@@ -19,6 +20,7 @@
 #include "scripts.h"
 #include "server_loop.h"
 #include "server_players.h"
+#include "wire_defs.h"
 
 namespace fallout {
 
@@ -38,7 +40,7 @@ struct ObjectShadow {
     int poison;
     int ap;
     int results;
-    // Order-independent fingerprint of the top-level inventory (pid + quantity +
+    // Order-independent fingerprint of the inventory tree (pid + quantity +
     // per-item flags + per-item intra-item union fields). Detects add/remove/
     // stack-quantity/equip changes AND intra-item changes (weapon ammoQuantity/
     // ammoTypePid, ammo/misc charges) — see objectInventoryHash. Inventory items
@@ -59,7 +61,7 @@ static unsigned int objectHashMix(unsigned int h)
     return h;
 }
 
-// Commutative (order-independent) fingerprint of an owner's top-level inventory.
+// Commutative (order-independent) fingerprint of an owner's inventory tree.
 // Each item's (pid, quantity, flags, intra-item fields) is avalanched through
 // objectHashMix BEFORE the '+' combine: keeping order-independence but breaking
 // linearity in quantity, so a sum-preserving mutation (e.g. moving k units between
@@ -75,10 +77,9 @@ static unsigned int objectHashMix(unsigned int h)
 // false delta). This catches the case membership-hashing alone misses: a wielded
 // weapon FIRING (ammoQuantity decrements) or an item's charges depleting WITHOUT any
 // add/remove — so it rides the existing OBJECT_DELTA_INVENTORY bit. Reading
-// data.item is valid because an inventory only holds OBJ_TYPE_ITEM objects. Still
-// TOP-LEVEL only: an item nested inside a carried container is not walked (a deeper
-// deferral, consistent with the one-level snapshot oracle).
-static unsigned int objectInventoryHash(Object* obj)
+// data.item is valid because an inventory only holds OBJ_TYPE_ITEM objects. Carried
+// containers are walked recursively so nested mutations raise the owner's delta too.
+static unsigned int objectInventoryHashAt(const Object* obj, int depth)
 {
     const Inventory* inventory = &(obj->data.inventory);
     unsigned int hash = (unsigned int)inventory->length;
@@ -98,9 +99,18 @@ static unsigned int objectInventoryHash(Object* obj)
             itemHash += (unsigned int)item->data.item.weapon.ammoQuantity * 2166136261u
                 + (unsigned int)item->data.item.weapon.ammoTypePid * 16777619u;
         }
+        if (itemGetType(const_cast<Object*>(item)) == ITEM_TYPE_CONTAINER
+            && depth < kMaxWireInventoryDepth) {
+            itemHash += objectInventoryHashAt(item, depth + 1) * 3266489917u;
+        }
         hash += objectHashMix(itemHash); // '+' so item order does not matter
     }
     return hash;
+}
+
+static unsigned int objectInventoryHash(Object* obj)
+{
+    return objectInventoryHashAt(obj, 0);
 }
 
 // Keyed by Object* (NOT obj->id, which is not unique for map-placed objects —

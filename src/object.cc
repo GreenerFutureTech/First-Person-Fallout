@@ -4961,7 +4961,9 @@ static void objectAssignInventoryNetIds(Object* owner)
     for (int i = 0; i < inv->length; ++i) {
         Object* item = inv->items[i].item;
         item->netId = objectNextNetId();
-        objectAssignInventoryNetIds(item);
+        if (itemGetType(item) == ITEM_TYPE_CONTAINER) {
+            objectAssignInventoryNetIds(item);
+        }
     }
 }
 
@@ -4971,7 +4973,9 @@ static void objectZeroInventoryNetIds(Object* owner)
     for (int i = 0; i < inv->length; ++i) {
         Object* item = inv->items[i].item;
         item->netId = 0;
-        objectZeroInventoryNetIds(item);
+        if (itemGetType(item) == ITEM_TYPE_CONTAINER) {
+            objectZeroInventoryNetIds(item);
+        }
     }
 }
 

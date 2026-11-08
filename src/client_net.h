@@ -239,6 +239,8 @@ void clientViewerArmExplosive(int pid, int seconds);
 void clientViewerLootTake(int containerNetId, int pid, int quantity);
 void clientViewerLootPut(int containerNetId, int pid, int quantity);
 void clientViewerLootTakeAll(int containerNetId);
+void clientViewerPutInContainer(Object* container, Object* item, int quantity);
+void clientViewerLoadAmmo(Object* weapon, Object* ammo, int quantity, bool replaceAmmo);
 void clientViewerSetLootTarget(int netId);
 bool clientViewerConsumeLootTargetInvDirty();
 

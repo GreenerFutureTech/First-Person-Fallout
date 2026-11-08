@@ -607,15 +607,13 @@ correctness). Each case validates against `state_dump`, which reads live sim sta
 INDEPENDENTLY of the presenter seam. Profiles matching run_golden_replay.sh's is a
 welcome cross-check, not the claim.
 
-### KNOWN GAP (banked, wire-visible, invisible to every gate)
+### Carried-container inventory synchronization
 `OBJECT_DELTA_INVENTORY` is a CHANGE-DETECTION bit, not a payload: the shadow keeps
-only a 32-bit fingerprint (`objectInventoryHash`), so the bit means "re-send the
-list" and NetworkPresenter re-serializes the whole top-level inventory. But the
-fingerprint is **TOP-LEVEL ONLY** — an item nested in a carried container is never
-walked, so a container's contents can change with NO delta bit raised. Consistent with
-the snapshot oracle (state_dump is partial the same way) → no join-vs-stream
-divergence and not a new hole, but no gate can see it: both serializations share the
-blind spot. Closing it needs a RECURSIVE fingerprint, not a serializer change.
+the inventory fingerprint, so the bit means "re-send the inventory" and
+NetworkPresenter serializes the inventory tree. Carried containers are traversed
+recursively (bounded by `kMaxWireInventoryDepth`); changes to nested contents now
+raise the owner's delta, and the viewer reconciles those contents as well. The same
+wire version must be used by the client and dedicated server.
 
 ## 8. C2S — upstream control (STEP 6, the first controllable client)
 

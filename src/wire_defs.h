@@ -34,7 +34,12 @@ namespace fallout {
 // and the state-hash ack (§4 P2b) both key on. On the wire (not merely a client-local
 // counter) so a MID-STREAM joiner agrees with the server on entry ids from its first
 // frame. Frames stay dense; entryBase is dense over EVENTS across frames.
-constexpr unsigned short kWireVersion = 4;
+//
+// Version 5 recursively includes each carried item's nested inventory in inventory
+// deltas, so carried containers can be updated authoritatively during play.
+constexpr unsigned short kWireVersion = 5;
+
+constexpr int kMaxWireInventoryDepth = 16;
 
 // "F2NS", as bytes, in stream order.
 constexpr char kWireMagic[4] = { 'F', '2', 'N', 'S' };

@@ -26,6 +26,7 @@ int objectDrop(Object* invenObj, Object* itemObj);
 int objectDestroy(Object* obj);
 UseItemResultCode objectUseItemInternal(Object* critter, Object* item);
 UseItemResultCode objectUseItem(Object* userObj, Object* item);
+UseItemResultCode objectUseItemArmExplosive(Object* item, int seconds);
 UseItemResultCode objectUseItemOnInternal(Object* critter, Object* targetObj, Object* item);
 UseItemResultCode objectUseItemOn(Object* user, Object* targetObj, Object* item);
 int checkSceneryUseActionPointCost(Object* obj, Object* _);

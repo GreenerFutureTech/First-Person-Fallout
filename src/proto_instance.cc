@@ -1209,9 +1209,8 @@ static int _protinstTestDroppedExplosive(Object* explosiveItem)
 }
 
 // 0x49C124
-UseItemResultCode objectUseItem(Object* userObj, Object* item)
+static UseItemResultCode objectUseItemFinish(Object* item, UseItemResultCode rc)
 {
-    UseItemResultCode rc = objectUseItemInternal(userObj, item);
     if (rc == USE_ITEM_RESULT_REMOVE || rc == USE_ITEM_RESULT_DROP) {
         Object* root = objectGetOwner(item);
         if (root != nullptr) {
@@ -1251,6 +1250,17 @@ UseItemResultCode objectUseItem(Object* userObj, Object* item)
     scriptsExecMapUpdateProc();
 
     return rc;
+}
+
+UseItemResultCode objectUseItem(Object* userObj, Object* item)
+{
+    return objectUseItemFinish(item, objectUseItemInternal(userObj, item));
+}
+
+UseItemResultCode objectUseItemArmExplosive(Object* item, int seconds)
+{
+    _obj_arm_explosive(item, seconds);
+    return objectUseItemFinish(item, USE_ITEM_RESULT_DROP);
 }
 
 // 0x49C240

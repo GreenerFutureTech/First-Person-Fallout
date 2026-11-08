@@ -1134,6 +1134,12 @@ private:
     void forgetObjectRefs(Object* obj)
     {
         if (obj == nullptr) return;
+        if (itemGetType(obj) == ITEM_TYPE_CONTAINER) {
+            Inventory* inventory = &obj->data.inventory;
+            for (int i = 0; i < inventory->length; i++) {
+                forgetObjectRefs(inventory->items[i].item);
+            }
+        }
         presForgetObject(obj); // glide + combat replay must not outlive the object
         for (auto it = _net.begin(); it != _net.end();) {
             if (it->second == obj) {
@@ -1810,7 +1816,9 @@ private:
             if (item->netId != 0) {
                 _net[item->netId] = item;
             }
-            indexInventoryNetIds(item);
+            if (itemGetType(item) == ITEM_TYPE_CONTAINER) {
+                indexInventoryNetIds(item);
+            }
         }
     }
 
@@ -1823,25 +1831,30 @@ private:
     // inventory->world transition, where being right beats being quick.
     void unlinkFromAnyInventory(Object* item)
     {
-        auto tryOwner = [&](Object* owner) -> bool {
+        auto tryOwner = [&](auto&& self, Object* owner) -> bool {
             if (owner == nullptr || owner == item) {
                 return false;
             }
             Inventory* inv = &(owner->data.inventory);
             for (int i = 0; i < inv->length; i++) {
-                if (inv->items[i].item == item) {
+                Object* child = inv->items[i].item;
+                if (child == item) {
                     itemRemove(owner, item, inv->items[i].quantity);
+                    return true;
+                }
+                if (child != nullptr && itemGetType(child) == ITEM_TYPE_CONTAINER
+                    && self(self, child)) {
                     return true;
                 }
             }
             return false;
         };
 
-        if (tryOwner(gDude)) {
+        if (tryOwner(tryOwner, gDude)) {
             return;
         }
         for (Object* o = objectFindFirst(); o != nullptr; o = objectFindNext()) {
-            if (tryOwner(o)) {
+            if (tryOwner(tryOwner, o)) {
                 return;
             }
         }
@@ -2298,9 +2311,10 @@ private:
         if (mask & OBJECT_DELTA_POISON) { poison = r.i32(); hasPoison = true; }
         if (mask & OBJECT_DELTA_AP) { ap = r.i32(); hasAp = true; }
         if (mask & OBJECT_DELTA_COMBAT_RESULTS) { results = r.i32(); hasResults = true; }
-        // INVENTORY: the trailing bytes are the owner's full top-level list (per item:
-        // netId, pid, quantity, flags, ammoQuantity, ammoTypePid — see
-        // presenter_network putInventory). Read it now so the reader stays aligned;
+        // INVENTORY: the trailing bytes are the owner's inventory tree (per item:
+        // netId, pid, quantity, flags, ammoQuantity, ammoTypePid, then nested
+        // contents for containers — see presenter_network putInventory). Read it now
+        // so the reader stays aligned;
         // applied to the mirror below. As of wire v3 the per-item ammo count rides
         // along, so a weapon fired dry / reloaded replicates its real ammo LIVE
         // (applyWireItemAmmo below); before v3 the rebuild reset it to the proto
@@ -2308,21 +2322,33 @@ private:
         struct WireItem {
             int netId; int pid; int quantity; unsigned int flags;
             int ammoQuantity; int ammoTypePid;
+            std::vector<WireItem> contents;
         };
         std::vector<WireItem> invItems;
         bool hasInventory = (mask & OBJECT_DELTA_INVENTORY) != 0;
         if (hasInventory) {
-            int count = r.u16();
-            for (int i = 0; i < count; i++) {
-                WireItem wi;
-                wi.netId = r.i32();
-                wi.pid = r.i32();
-                wi.quantity = r.i32();
-                wi.flags = (unsigned int)r.i32();
-                wi.ammoQuantity = r.i32();
-                wi.ammoTypePid = r.i32();
-                invItems.push_back(wi);
-            }
+            auto readInventory = [&](auto&& self, std::vector<WireItem>& items, int depth) -> void {
+                int count = r.u16();
+                if (count < 0 || count > 4096) {
+                    debugPrint("client_net: inventory delta has invalid item count %d\n", count);
+                    return;
+                }
+                items.reserve(count);
+                for (int i = 0; i < count; i++) {
+                    WireItem wi {};
+                    wi.netId = r.i32();
+                    wi.pid = r.i32();
+                    wi.quantity = r.i32();
+                    wi.flags = (unsigned int)r.i32();
+                    wi.ammoQuantity = r.i32();
+                    wi.ammoTypePid = r.i32();
+                    if (depth < kMaxWireInventoryDepth) {
+                        self(self, wi.contents, depth + 1);
+                    }
+                    items.push_back(std::move(wi));
+                }
+            };
+            readInventory(readInventory, invItems, 0);
         }
         // FRAME then LIGHT (bits 9,10), after the variable-length inventory — matches the writer.
         int frame = 0;
@@ -2365,6 +2391,66 @@ private:
             }
             return;
         }
+        bool inventoryModalOpen = (GameMode::getCurrentGameMode() & kViewerModalMask) != 0;
+        auto reconcileNestedInventory = [&](auto&& self, Object* owner,
+                                             const std::vector<WireItem>& wireItems,
+                                             int depth) -> void {
+            if (owner == nullptr || depth >= kMaxWireInventoryDepth
+                || itemGetType(owner) != ITEM_TYPE_CONTAINER) {
+                return;
+            }
+            Inventory* inventory = &owner->data.inventory;
+            int originalLength = inventory->length;
+            std::vector<char> claimed(originalLength, 0);
+            for (const WireItem& wi : wireItems) {
+                if (wi.pid < 0) continue;
+                int slot = matchInventorySlot(inventory, originalLength, claimed, wi.netId, wi.pid);
+                Object* item = nullptr;
+                int quantity = wi.quantity > 0 ? wi.quantity : 1;
+                if (slot >= 0) {
+                    claimed[slot] = 1;
+                    item = inventory->items[slot].item;
+                    inventory->items[slot].quantity = quantity;
+                    applyWireItemPid(item, wi.pid);
+                    item->flags = (item->flags & ~(OBJECT_IN_ANY_HAND | OBJECT_WORN))
+                        | static_cast<ObjectFlags>(wi.flags & (OBJECT_IN_ANY_HAND | OBJECT_WORN));
+                    applyWireItemAmmo(item, wi.ammoQuantity, wi.ammoTypePid);
+                    adoptItemNetId(item, wi.netId);
+                } else {
+                    if (objectCreateWithProtoId(&item, ProtoId(wi.pid)) != 0 || item == nullptr) {
+                        continue;
+                    }
+                    _obj_disconnect(item, nullptr);
+                    item->flags |= static_cast<ObjectFlags>(wi.flags & (OBJECT_IN_ANY_HAND | OBJECT_WORN));
+                    applyWireItemAmmo(item, wi.ammoQuantity, wi.ammoTypePid);
+                    adoptItemNetId(item, wi.netId);
+                    if (itemAdd(owner, item, quantity) != 0) {
+                        forgetObjectRefs(item);
+                        objectDestroy(item, nullptr);
+                        continue;
+                    }
+                }
+                self(self, item, wi.contents, depth + 1);
+            }
+
+            std::vector<Object*> removed;
+            std::vector<int> removedQuantities;
+            for (int i = 0; i < originalLength; i++) {
+                if (!claimed[i] && inventory->items[i].item != nullptr) {
+                    removed.push_back(inventory->items[i].item);
+                    removedQuantities.push_back(inventory->items[i].quantity);
+                }
+            }
+            for (size_t i = 0; i < removed.size(); i++) {
+                itemRemove(owner, removed[i], removedQuantities[i]);
+                forgetObjectRefs(removed[i]);
+                if (inventoryModalOpen || _inCombat) {
+                    gDudeDeferredItemFrees.push_back(removed[i]);
+                } else {
+                    objectDestroy(removed[i], nullptr);
+                }
+            }
+        };
         int prevAp = obj->data.critter.combat.ap; // for the dude AP-flash guard below
         // S4 deferred-final-state (§3.c): while obj is an attack participant (reserved
         // at decode, or under active replay) HOLD its fid/flags AND rotation so the
@@ -2504,12 +2590,20 @@ private:
                     claimed[m] = 1;
                     inv->items[m].quantity = qty;
                     applyWireItemAmmo(inv->items[m].item, wi.ammoQuantity, wi.ammoTypePid);
+                    adoptItemNetId(inv->items[m].item, wi.netId);
+                    reconcileNestedInventory(reconcileNestedInventory, inv->items[m].item, wi.contents, 1);
                 } else {
                     Object* item = nullptr;
                     if (objectCreateWithProtoId(&item, ProtoId(wi.pid)) == 0 && item != nullptr) {
                         _obj_disconnect(item, nullptr); // inventory-only, not in the world
                         applyWireItemAmmo(item, wi.ammoQuantity, wi.ammoTypePid);
-                        itemAdd(obj, item, qty);
+                        adoptItemNetId(item, wi.netId);
+                        if (itemAdd(obj, item, qty) == 0) {
+                            reconcileNestedInventory(reconcileNestedInventory, item, wi.contents, 1);
+                        } else {
+                            forgetObjectRefs(item);
+                            objectDestroy(item, nullptr);
+                        }
                     }
                 }
             }
@@ -2585,9 +2679,8 @@ private:
             // authoritative (encoder includes gDude, object_delta.cc:130); reconcile the
             // mirror to it: update stack quantities, reconcile equip flags, ADD new items,
             // and REMOVE ones the server dropped/consumed. Initial inventory is already
-            // correct from the join blob (_obj_load_dude); ammo/charges now ride the wire
-            // per item (v3 — applyWireItemAmmo below), so a fired/reloaded weapon updates
-            // live; nested container contents are still not walked (recursive-fingerprint gap).
+            // correct from the join blob (_obj_load_dude); ammo/charges and nested
+            // carried-container contents now ride the wire.
             //
             // While the inventory SCREEN is open, _setup_inventory (equipmentDetach) has
             // pulled the dude's equipped items OUT of this mirror and parked them in the UI
@@ -2649,6 +2742,7 @@ private:
                     // an earlier delta has none until the next rebaseline, which would keep
                     // it unaddressable and force the pid fallback forever.
                     adoptItemNetId(inv->items[m].item, wi.netId);
+                    reconcileNestedInventory(reconcileNestedInventory, inv->items[m].item, wi.contents, 1);
                 } else {
                     Object* item = nullptr;
                     if (objectCreateWithProtoId(&item, ProtoId(wi.pid)) == 0 && item != nullptr) {
@@ -2656,7 +2750,12 @@ private:
                         item->flags |= static_cast<ObjectFlags>(equip);
                         applyWireItemAmmo(item, wi.ammoQuantity, wi.ammoTypePid);
                         adoptItemNetId(item, wi.netId);
-                        itemAdd(obj, item, qty);
+                        if (itemAdd(obj, item, qty) == 0) {
+                            reconcileNestedInventory(reconcileNestedInventory, item, wi.contents, 1);
+                        } else {
+                            forgetObjectRefs(item);
+                            objectDestroy(item, nullptr);
+                        }
                     }
                 }
             }
@@ -5580,6 +5679,29 @@ void clientViewerLootTakeAll(int containerNetId)
     }
     char cmd[32];
     snprintf(cmd, sizeof(cmd), "takeall %d", containerNetId);
+    gViewerConn->sendLine(cmd);
+}
+
+void clientViewerPutInContainer(Object* container, Object* item, int quantity)
+{
+    if (gViewerConn == nullptr || container == nullptr || item == nullptr
+        || container->netId == 0 || item->netId == 0 || quantity <= 0) {
+        return;
+    }
+    char cmd[64];
+    snprintf(cmd, sizeof(cmd), "invput %d %d %d", container->netId, item->netId, quantity);
+    gViewerConn->sendLine(cmd);
+}
+
+void clientViewerLoadAmmo(Object* weapon, Object* ammo, int quantity, bool replaceAmmo)
+{
+    if (gViewerConn == nullptr || weapon == nullptr || ammo == nullptr
+        || weapon->netId == 0 || ammo->netId == 0 || quantity <= 0) {
+        return;
+    }
+    char cmd[64];
+    snprintf(cmd, sizeof(cmd), "invload %d %d %d", weapon->netId, ammo->netId,
+        replaceAmmo ? -quantity : quantity);
     gViewerConn->sendLine(cmd);
 }
 

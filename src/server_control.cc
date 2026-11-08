@@ -56,6 +56,7 @@
 #include "perk.h" // PERK_CHOICE_PENDING_* — the Tag!/Mutate! follow-up
 #include "skill.h" // SKILL_* (skilldex allow-list) + skillGetValue for the edit trace
 #include "stat.h" // critterGetStat / STAT_GENDER — armor skin is gender-specific
+#include "settings.h"
 #include "tile.h" // tileIsValid / gHexGridSize
 #include "wire_defs.h" // kNoSessionId
 
@@ -1756,6 +1757,33 @@ static bool serverControlIsStealVerb(const char* verb)
         || strcmp(verb, "sdone") == 0;
 }
 
+static Object* serverFindInventoryItemByNetId(Object* owner, int netId, Object** itemOwner, int* quantity)
+{
+    if (owner == nullptr || netId <= 0) {
+        return nullptr;
+    }
+
+    Inventory* inventory = &owner->data.inventory;
+    for (int i = 0; i < inventory->length; i++) {
+        Object* item = inventory->items[i].item;
+        if (item == nullptr) {
+            continue;
+        }
+        if (item->netId == netId) {
+            if (itemOwner != nullptr) *itemOwner = owner;
+            if (quantity != nullptr) *quantity = inventory->items[i].quantity;
+            return item;
+        }
+        if (itemGetType(item) == ITEM_TYPE_CONTAINER) {
+            Object* found = serverFindInventoryItemByNetId(item, netId, itemOwner, quantity);
+            if (found != nullptr) {
+                return found;
+            }
+        }
+    }
+    return nullptr;
+}
+
 void serverControlLine(int sessionId, const char* line)
 {
     if (++gLineCounts[sessionId] > kMaxLinesPerBeat) {
@@ -3209,6 +3237,8 @@ void serverControlLine(int sessionId, const char* line)
         || strcmp(verb, "invunwield") == 0
         || strcmp(verb, "invdrop") == 0
         || strcmp(verb, "unload") == 0
+        || strcmp(verb, "invput") == 0
+        || strcmp(verb, "invload") == 0
         || strcmp(verb, "useitem") == 0
         || strcmp(verb, "useitem_armexplosive") == 0;
     if (isInvVerb) {
@@ -3310,6 +3340,124 @@ void serverControlLine(int sessionId, const char* line)
             return;
         }
 
+        if (strcmp(verb, "invput") == 0) {
+            Object* container = serverFindInventoryItemByNetId(gDude, arg, nullptr, nullptr);
+            int itemQuantity = 0;
+            Object* item = serverFindInventoryItemByNetId(gDude, arg2, nullptr, &itemQuantity);
+            int quantity = arg3;
+            auto containsItem = [&](auto&& self, Object* owner, Object* sought) -> bool {
+                if (owner == nullptr || sought == nullptr
+                    || itemGetType(owner) != ITEM_TYPE_CONTAINER) {
+                    return false;
+                }
+                Inventory* inventory = &owner->data.inventory;
+                for (int i = 0; i < inventory->length; i++) {
+                    Object* child = inventory->items[i].item;
+                    if (child == sought) return true;
+                    if (child != nullptr && itemGetType(child) == ITEM_TYPE_CONTAINER
+                        && self(self, child, sought)) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+            if (container == nullptr || item == nullptr || item == container
+                || itemGetType(container) != ITEM_TYPE_CONTAINER
+                || quantity <= 0 || quantity > itemQuantity
+                || containsItem(containsItem, item, container)) {
+                fprintf(stderr, "f2_server: control invput invalid container=%d item=%d qty=%d\n",
+                    arg, arg2, quantity);
+                serverControlRefuse(sessionId, "That item can't be put in there.");
+                return;
+            }
+            int rc = itemMove(gDude, container, item, quantity);
+            fprintf(stderr, "f2_server: control invput container=%d item=%d qty=%d rc=%d\n",
+                arg, arg2, quantity, rc);
+            if (rc != 0) {
+                serverControlRefuse(sessionId, "It won't fit in there.");
+            }
+            return;
+        }
+
+        if (strcmp(verb, "invload") == 0) {
+            Object* weaponOwner = nullptr;
+            Object* weapon = serverFindInventoryItemByNetId(gDude, arg, &weaponOwner, nullptr);
+            Object* ammoOwner = nullptr;
+            int ammoStackQuantity = 0;
+            Object* ammo = serverFindInventoryItemByNetId(gDude, arg2, &ammoOwner, &ammoStackQuantity);
+            int ammoPid = ammo != nullptr ? ammo->pid : -1;
+            bool replaceAmmo = arg3 < 0;
+            int quantity = arg3 > -100000 && arg3 < 100000
+                ? (replaceAmmo ? -arg3 : arg3)
+                : 0;
+            if (weapon == nullptr || ammo == nullptr || weapon == ammo
+                || itemGetType(weapon) != ITEM_TYPE_WEAPON
+                || itemGetType(ammo) != ITEM_TYPE_AMMO
+                || weaponOwner == nullptr
+                || ammoOwner == nullptr
+                || ProtoId(weapon) == ItemProtoTypeId::SolarScorcher
+                || quantity <= 0 || quantity > ammoStackQuantity
+                || (replaceAmmo && !settings.qol.fast_ammo_load)
+                || (!weaponCanBeReloadedWith(weapon, ammo)
+                    && (!replaceAmmo || !weaponCanBeUnloaded(weapon)
+                        || !weaponCanBeReloadedWithReplacingAmmo(weapon, ammo)))) {
+                fprintf(stderr, "f2_server: control invload invalid weapon=%d ammo=%d amount=%d\n",
+                    arg, arg2, arg3);
+                serverControlRefuse(sessionId, "That ammunition can't be loaded into this weapon.");
+                return;
+            }
+
+            if (itemRemoveQuietly(weaponOwner, weapon, 1) != 0) {
+                serverControlRefuse(sessionId, "You don't have that weapon.");
+                return;
+            }
+
+            if (replaceAmmo) {
+                Object* oldAmmo = nullptr;
+                while ((oldAmmo = weaponUnload(weapon)) != nullptr) {
+                    itemAdd(weaponOwner, oldAmmo, 1);
+                }
+            }
+
+            bool loaded = false;
+            for (int i = 0; i < quantity; i++) {
+                Object* sourceAmmo = nullptr;
+                Inventory* sourceInventory = &ammoOwner->data.inventory;
+                for (int j = 0; j < sourceInventory->length; j++) {
+                    Object* candidate = sourceInventory->items[j].item;
+                    if (candidate != nullptr && candidate->pid == ammoPid) {
+                        sourceAmmo = candidate;
+                        break;
+                    }
+                }
+                if (sourceAmmo == nullptr || !weaponCanBeReloadedWith(weapon, sourceAmmo)) {
+                    break;
+                }
+                int remainingRounds = weaponReload(weapon, sourceAmmo);
+                if (remainingRounds < 0) {
+                    break;
+                }
+                loaded = true;
+                if (remainingRounds == 0) {
+                    if (itemRemoveQuietly(ammoOwner, sourceAmmo, 1) == 0) {
+                        objectDestroy(sourceAmmo, nullptr);
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            if (itemAdd(weaponOwner, weapon, 1) != 0) {
+                objectDrop(gDude, weapon);
+            }
+            if (!loaded) {
+                serverControlRefuse(sessionId, "That ammunition can't be loaded.");
+            }
+            fprintf(stderr, "f2_server: control invload weapon=%d ammo=%d packs=%d replace=%d loaded=%d\n",
+                arg, arg2, quantity, replaceAmmo ? 1 : 0, loaded ? 1 : 0);
+            return;
+        }
+
         // invwield / invdrop address a specific carried object by netId; useitem still
         // takes a pid (any stack of a drug/stimpak will do — no identity involved).
         //
@@ -3406,9 +3554,9 @@ void serverControlLine(int sessionId, const char* line)
             // logic: explosiveActivate + Demolition/Traps roll + queueAddEvent), skipping
             // only the modal. The timed EVENT_TYPE_EXPLOSION later resolves through
             // actionExplode's serverLoopActive() branch (already decoupled), and a door /
-            // scenery destroyed by the blast streams out as EVENT_DESTROY. The armed
-            // charge is normally dropped next to the target via `invdrop` before it blows
-            // (so explosionProcess uses the ground tile, not the dude's).
+            // scenery destroyed by the blast streams out as EVENT_DESTROY. Vanilla USE
+            // drops an armed charge at the actor's current tile; keep that same behavior
+            // here so moving away actually moves the actor away from the blast.
             if (!explosiveIsExplosive(item)) {
                 fprintf(stderr, "f2_server: control useitem_armexplosive pid=%d not an explosive, ignored\n", pid);
                 serverControlRefuse(sessionId, "That isn't an explosive.");
@@ -3431,7 +3579,7 @@ void serverControlLine(int sessionId, const char* line)
                 seconds = 180;
             }
             seconds -= seconds % 10;
-            _obj_arm_explosive(item, seconds);
+            objectUseItemArmExplosive(item, seconds);
             fprintf(stderr, "f2_server: control useitem_armexplosive pid=%d seconds=%d\n", pid, seconds);
             return;
         }

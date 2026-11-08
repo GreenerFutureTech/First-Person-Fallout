@@ -21,7 +21,7 @@ addressing/forwarding layer. Buckets **A/B/C/D** below are that audit's taxonomy
 
 ## 1. Wire catalogue vs the presenter interface
 
-- Wire: `src/wire_defs.h:37` `kWireVersion = 4`; event ids **1–53** enumerated at
+- Wire: `src/wire_defs.h` `kWireVersion = 5`; event ids **1–53** enumerated at
   `src/presenter_network.cc:68-223`, mirrored by hand at `src/client_net.cc:128-173`.
 - Seam: **84 declared virtuals** in `src/presenter.h` (`presenter.h:108-701`). Three are not
   channels (`wantsSheetDeltas:292`, `wantsSnapshotBlob:354`, `beatEnd:378` = framing) → **81

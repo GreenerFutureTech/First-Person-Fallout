@@ -1044,6 +1044,8 @@ void clientViewerUnload(Object* item) { serverStubAbort("clientViewerUnload"); }
 void clientViewerLootPut(int containerNetId, int pid, int quantity) { serverStubAbort("clientViewerLootPut"); }
 void clientViewerLootTake(int containerNetId, int pid, int quantity) { serverStubAbort("clientViewerLootTake"); }
 void clientViewerLootTakeAll(int containerNetId) { serverStubAbort("clientViewerLootTakeAll"); }
+void clientViewerPutInContainer(Object* container, Object* item, int quantity) { serverStubAbort("clientViewerPutInContainer"); }
+void clientViewerLoadAmmo(Object* weapon, Object* ammo, int quantity, bool replaceAmmo) { serverStubAbort("clientViewerLoadAmmo"); }
 void clientViewerSetLootTarget(int netId) { serverStubAbort("clientViewerSetLootTarget"); }
 void clientViewerUnwield(int hand) { serverStubAbort("clientViewerUnwield"); }
 void clientViewerUseItem(int pid) { serverStubAbort("clientViewerUseItem"); }

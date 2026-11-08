@@ -13,6 +13,7 @@
 #include "combat.h" // _combat_free_move (TURN_START bonus-move field, §3.a)
 #include "combat_defs.h"
 #include "light.h" // lightGetAmbientIntensity — global ambient-light worldDelta
+#include "item.h"
 #include "scripts.h"
 #include "map.h" // mapGetLoadGeneration (WireFrameMeta.mapGeneration)
 #include "object.h"
@@ -1425,7 +1426,7 @@ private:
         }
     }
 
-    // The owner's TOP-LEVEL inventory, serialized in full.
+    // The owner's inventory tree, serialized in full.
     //
     // Why in full: OBJECT_DELTA_INVENTORY is a CHANGE-DETECTION bit, not a payload.
     // The shadow keeps only a 32-bit order-independent fingerprint
@@ -1433,16 +1434,12 @@ private:
     // never WHAT changed. NarratePresenter sidesteps this by printing just the item
     // count; the wire cannot. So the bit means "re-send the list".
     //
-    // ⚠ TOP-LEVEL ONLY, matching the fingerprint's own scope: an item nested inside a
-    // carried container is not walked, so a container's contents can change with NO
-    // delta bit raised. Consistent with the snapshot oracle (state_dump is partial
-    // the same way) → no join-vs-stream divergence, and NOT a new hole. But it IS
-    // wire-visible, and no gate can see it: both serializations share the blind spot.
-    // Closing it needs a recursive fingerprint, not a serializer change.
-    void putInventory(Object* owner)
+    // Nested carried-container contents follow each item with a bounded recursive
+    // inventory, matching objectInventoryHash in object_delta.cc.
+    void putInventory(const Object* owner, int depth = 0)
     {
         const Inventory* inventory = &(owner->data.inventory);
-        int length = inventory->length;
+        int length = depth < kMaxWireInventoryDepth ? inventory->length : 0;
         if (length < 0) {
             length = 0;
         }
@@ -1466,6 +1463,12 @@ private:
             // full. This is the live-delta half; the join blob already carries ammo.
             putI32(item != nullptr ? item->data.item.weapon.ammoQuantity : 0);
             putI32(item != nullptr ? item->data.item.weapon.ammoTypePid : 0);
+            if (item != nullptr && itemGetType(const_cast<Object*>(item)) == ITEM_TYPE_CONTAINER
+                && depth < kMaxWireInventoryDepth) {
+                putInventory(item, depth + 1);
+            } else {
+                putU16(0);
+            }
         }
     }
 

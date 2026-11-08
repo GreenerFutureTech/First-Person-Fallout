@@ -2171,20 +2171,59 @@ static void _inven_pickup(int buttonCode, int indexOffset)
             inventoryLayout.rightHandSlotX + INVENTORY_LARGE_SLOT_WIDTH, INVENTORY_RIGHT_HAND_SLOT_MAX_Y);
         bool inArmor = mouseHitTestInWindow(gInventoryWindow, inventoryLayout.armorSlotX, INVENTORY_ARMOR_SLOT_Y,
             inventoryLayout.armorSlotX + INVENTORY_LARGE_SLOT_WIDTH, INVENTORY_ARMOR_SLOT_MAX_Y);
-        if (pickUpFromSlot && (immediate || inList)) {
+        auto canLoadAmmo = [&](Object* weapon) {
+            return weapon != nullptr && itemGetType(weapon) == ITEM_TYPE_WEAPON
+                && itemGetType(item) == ITEM_TYPE_AMMO
+                && (weaponCanBeReloadedWith(weapon, item)
+                    || (settings.qol.fast_ammo_load
+                        && weaponCanBeUnloaded(weapon)
+                        && weaponCanBeReloadedWithReplacingAmmo(weapon, item)));
+        };
+        bool handledListDrop = false;
+        if (!immediate && inList) {
+            int x;
+            int y;
+            mouseGetPositionInWindow(gInventoryWindow, &x, &y);
+            int row = (y - inventoryLayout.scrollerY) / INVENTORY_SLOT_HEIGHT;
+            int column = (x - inventoryLayout.scrollerX) / INVENTORY_SLOT_WIDTH;
+            row = std::clamp(row, 0, INVENTORY_ROWS - 1);
+            column = std::clamp(column, 0, inventoryLayout.columns - 1);
+            int targetIndex = row * inventoryLayout.columns + column + indexOffset;
+            if (targetIndex < _pud->length) {
+                Object* targetItem = _pud->items[_pud->length - (targetIndex + 1)].item;
+                if (targetItem != item && itemGetType(targetItem) == ITEM_TYPE_CONTAINER) {
+                    _drop_into_container(targetItem, item, itemIndex, itemSlot, count);
+                    handledListDrop = true;
+                } else if (targetItem != item && canLoadAmmo(targetItem)) {
+                    _drop_ammo_into_weapon(targetItem, item, itemSlot, count, buttonCode);
+                    handledListDrop = true;
+                }
+            }
+        }
+        if (!handledListDrop && pickUpFromSlot && (immediate || inList)) {
             int hand = itemSlot == &gInventoryArmor ? HAND_COUNT : (itemSlot == &gInventoryLeftHandItem ? HAND_LEFT : HAND_RIGHT);
             clientViewerUnwield(hand);
-        } else if ((immediate || inArmor) && itemGetType(item) == ITEM_TYPE_ARMOR) {
+        } else if (!handledListDrop && (immediate || inArmor) && itemGetType(item) == ITEM_TYPE_ARMOR) {
             clientViewerWield(item, HAND_LEFT);
-        } else if (inLeft || inRight || (immediate && itemGetType(item) != ITEM_TYPE_AMMO)) {
+        } else if (!handledListDrop && !pickUpFromSlot && immediate && itemGetType(item) == ITEM_TYPE_AMMO) {
+            InventoryAmmoMoveResult ammoMoveResult = _drop_ammo_into_weapon(gInventoryLeftHandItem, item, itemSlot, count, buttonCode);
+            if (ammoMoveResult == INVENTORY_AMMO_MOVE_RESULT_FAILED) {
+                _drop_ammo_into_weapon(gInventoryRightHandItem, item, itemSlot, count, buttonCode);
+            }
+        } else if (!handledListDrop && (inLeft || inRight || (immediate && itemGetType(item) != ITEM_TYPE_AMMO))) {
             Hand hand = inRight ? HAND_RIGHT : HAND_LEFT;
             if (immediate) hand = gInventoryLeftHandItem == nullptr || gInventoryRightHandItem != nullptr ? HAND_LEFT : HAND_RIGHT;
             Object* equipped = hand == HAND_LEFT ? gInventoryLeftHandItem : gInventoryRightHandItem;
             bool containerStore = equipped != nullptr && equipped != item && itemGetType(equipped) == ITEM_TYPE_CONTAINER;
-            bool ammoLoad = equipped != nullptr && itemGetType(equipped) == ITEM_TYPE_WEAPON
-                && itemGetType(item) == ITEM_TYPE_AMMO && weaponCanBeReloadedWith(equipped, item);
-            if (!containerStore && !ammoLoad) clientViewerWield(item, hand);
-        } else if (_curr_stack == 0 && !mouseHitTestInWindow(gInventoryWindow, 0, 0, inventoryLayout.windowWidth, inventoryLayout.windowHeight)) {
+            bool ammoLoad = canLoadAmmo(equipped);
+            if (containerStore) {
+                _drop_into_container(equipped, item, itemIndex, itemSlot, count);
+            } else if (ammoLoad) {
+                _drop_ammo_into_weapon(equipped, item, itemSlot, count, buttonCode);
+            } else {
+                clientViewerWield(item, hand);
+            }
+        } else if (!handledListDrop && _curr_stack == 0 && !mouseHitTestInWindow(gInventoryWindow, 0, 0, inventoryLayout.windowWidth, inventoryLayout.windowHeight)) {
             int quantity = inventoryViewerDropQuantity(item, itemSlot, count);
             if (quantity != -1) clientViewerDrop(item, quantity);
         }
@@ -3309,6 +3348,9 @@ static void inventoryWindowOpenContextMenu(int keyCode, int inventoryWindowType)
             }
             break;
         case GAME_MOUSE_ACTION_MENU_ITEM_USE:
+            if (owner != gDude) {
+                break;
+            }
             if (explosiveIsExplosive(item)) {
                 int seconds = inventorySetTimer(item);
                 if (seconds != -1) clientViewerArmExplosive(item->pid, seconds);
@@ -3317,7 +3359,9 @@ static void inventoryWindowOpenContextMenu(int keyCode, int inventoryWindowType)
             }
             break;
         case GAME_MOUSE_ACTION_MENU_ITEM_UNLOAD:
-            clientViewerUnload(item);
+            if (owner == gDude) {
+                clientViewerUnload(item);
+            }
             break;
         default: break;
         }
@@ -5800,6 +5844,15 @@ static int _drop_into_container(Object* container, Object* item, int sourceIndex
         return -1;
     }
 
+    if (clientViewerActive()) {
+        if (container->netId == 0 || item->netId == 0) {
+            debugPrint("inventory: viewer cannot store an unbound item/container\n");
+            return -1;
+        }
+        clientViewerPutInContainer(container, item, quantityToMove);
+        return 0;
+    }
+
     if (sourceIndex != -1) {
         if (itemRemoveWithReason(_inven_dude, item, quantityToMove, RemoveInventoryObjectHookReason::DropIntoContainer) == -1) {
             return -1;
@@ -5870,6 +5923,15 @@ static InventoryAmmoMoveResult _drop_ammo_into_weapon(Object* weapon, Object* am
 
     if (quantityToMove == -1) {
         return INVENTORY_AMMO_MOVE_RESULT_FAILED;
+    }
+
+    if (clientViewerActive()) {
+        if (weapon->netId == 0 || ammo->netId == 0) {
+            debugPrint("inventory: viewer cannot load unbound weapon/ammo\n");
+            return INVENTORY_AMMO_MOVE_RESULT_FAILED;
+        }
+        clientViewerLoadAmmo(weapon, ammo, quantityToMove, replaceAmmo);
+        return INVENTORY_AMMO_MOVE_RESULT_SUCCESS;
     }
 
     Object* sourceItem = ammo;
