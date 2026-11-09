@@ -27,6 +27,7 @@
 #include "critter.h"
 #include "debug.h"
 #include "draw.h"
+#include "first_person_scenery.h"
 #include "first_person_sky.h"
 #include "game_mouse.h"
 #include "input.h"
@@ -107,6 +108,10 @@ struct TileFirstPersonActorHitTarget {
     int height;
     int frame;
     Rotation rotation;
+    // Fixed scenery is projected one column at a time, with its own depth.
+    int sourceColumn = -1;
+    int clipTop = 0;
+    int clipBottom = std::numeric_limits<int>::max();
 };
 
 struct TileFirstPersonDoorHitTarget {
@@ -2068,6 +2073,124 @@ static void tileFirstPersonGrayboxMarkObject(Object* object, void* context)
     }
 }
 
+static bool tileFirstPersonRenderLargeScenery(Object* object,
+    const TileFirstPersonActorRenderContext* context, double worldX, double worldY)
+{
+    // Backdrops can be NO_BLOCK and use separate invisible blocking hexes
+    // (including the starting map). Classify the artwork, not collision flags.
+    if ((object->flags & OBJECT_FLAT) != OBJECT_NONE) {
+        return false;
+    }
+    Proto* proto = nullptr;
+    if (protoGetProto(object, &proto) != 0 || proto->scenery.type != SCENERY_TYPE_GENERIC) {
+        return false;
+    }
+    const Rotation rotation = rotationIsValid(object->rotation) ? object->rotation : ROTATION_NE;
+    FrmImage image;
+    if (!image.lock(FrmId(object), object->frame, rotation)) {
+        return false;
+    }
+    const ConstBuffer2D frame = image.getBuffer();
+    if (frame.width < 160 || frame.height < 64) {
+        return false;
+    }
+    // Use art identity rather than a cache allocation address, which can be
+    // reused for a different FRM after eviction. Frame/rotation remain stable
+    // as the camera turns, but still follow scripted artwork changes.
+    const uint64_t key = (static_cast<uint64_t>(static_cast<unsigned int>(object->fid)) << 32)
+        | (static_cast<uint64_t>(static_cast<unsigned int>(object->frame)) << 3)
+        | static_cast<unsigned int>(rotation);
+    static std::unordered_map<uint64_t, FirstPersonSceneryProfile> profiles;
+    auto found = profiles.find(key);
+    if (found == profiles.end() || found->second.width != frame.width || found->second.height != frame.height) {
+        profiles[key] = firstPersonSceneryProfile(frame.data, frame.width, frame.height);
+        found = profiles.find(key);
+    }
+    const FirstPersonSceneryProfile& profile = found->second;
+    if (!profile.fixed) {
+        return false;
+    }
+    const FirstPersonScenerySlab slab = firstPersonScenerySlab(profile, worldX, worldY,
+        image.getXOffset() + object->x, image.getYOffset() + object->y);
+    const bool gpu = screenIsHardwareAccelerated();
+    BillboardClipBands bands;
+    const auto columns = firstPersonSceneryColumns(slab, context->cameraX, context->cameraY,
+        context->directionX, context->directionY, context->cameraPlaneX, context->cameraPlaneY,
+        gTileWindowWidth);
+    // Cast against the whole footprint, even when its anchor is behind the
+    // camera or offscreen. A shallow volume also has visible end faces.
+    for (int x = columns.first; x < columns.end; x++) {
+        const double cameraColumn = 2.0 * x / gTileWindowWidth - 1.0;
+        FirstPersonSceneryHit hit;
+        if (!firstPersonSceneryIntersect(slab, context->cameraX, context->cameraY,
+                context->directionX + context->cameraPlaneX * cameraColumn,
+                context->directionY + context->cameraPlaneY * cameraColumn, hit)) {
+            continue;
+        }
+        // End caps use an interior strip; the extreme silhouette column can
+        // be only a pixel tall and would make the entire end disappear.
+        const int sourceX = hit.endFace ? profile.endColumns[hit.u < 0.5 ? 0 : 1]
+            : std::min(profile.right - 1,
+                  profile.left + static_cast<int>(hit.u * (profile.right - profile.left)));
+        if (profile.bottoms[sourceX] == 0) {
+            continue;
+        }
+        const double scale = gTileWindowHeight / hit.depth;
+        const int artHeight = std::max(1, static_cast<int>(scale * frame.height / 80.0));
+        const int base = context->horizonY + static_cast<int>(scale * 0.5);
+        // Remove the baked-in isometric ground slope from each texture column.
+        const int top = base - static_cast<int>(
+            static_cast<double>(profile.bottoms[sourceX]) * artHeight / frame.height);
+        const int firstY = std::max(0, top);
+        const int lastY = std::min(gTileWindowHeight, base);
+        if (firstY >= lastY) {
+            continue;
+        }
+        bands.reset(firstY, lastY);
+        bands.addOccluder(context->horizonY, lastY);
+        if (context->doorCapDepths != nullptr) {
+            const auto& cap = (*context->doorCapDepths)[x];
+            bands.addOccluder(cap.top, cap.bottom);
+        }
+        const auto& edges = bands.boundaries();
+        for (size_t band = 0; band + 1 < edges.size(); band++) {
+            const int bandTop = edges[band];
+            const int bandBottom = edges[band + 1];
+            if (hit.depth >= tileFirstPersonGetWallDepthAt(x, bandTop, context->horizonY,
+                    context->wallDepths, context->wallSillDepths, context->doorCapDepths)) {
+                continue;
+            }
+            context->hitTargets->push_back({ object, hit.depth, x, top, 1, artHeight,
+                object->frame, rotation, sourceX, bandTop, bandBottom });
+            if (gpu) {
+                // A one-pixel clip selects the desired source column without
+                // making separate textures. SDL's existing depth sort interleaves
+                // these strips correctly with actors and other scenery.
+                const SDL_Rect destination = { x - sourceX, top, frame.width, artHeight };
+                const SDL_Rect clip = { x, bandTop, 1, bandBottom - bandTop };
+                gpuBillboardSubmit(frame.data, frame.width, frame.height, destination, clip, hit.depth);
+                continue;
+            }
+            for (int y = bandTop; y < bandBottom; y++) {
+                const int sourceY = std::clamp(static_cast<int>(
+                    static_cast<double>(y - top) * frame.height / artHeight), 0, frame.height - 1);
+                const unsigned char color = frame.data[sourceY * frame.width + sourceX];
+                if (color == 0) {
+                    continue;
+                }
+                const size_t index = static_cast<size_t>(y) * gTileWindowWidth + x;
+                if ((*context->actorDepthStamps)[index] != context->actorDepthStamp
+                    || hit.depth < (*context->actorDepths)[index]) {
+                    (*context->actorDepthStamps)[index] = context->actorDepthStamp;
+                    (*context->actorDepths)[index] = hit.depth;
+                    gTileWindowBuffer[y * gTileWindowPitch + x] = color;
+                }
+            }
+        }
+    }
+    return true;
+}
+
 static void tileFirstPersonRenderActor(Object* object, void* context)
 {
     const TileFirstPersonActorRenderContext* renderContext =
@@ -2097,6 +2220,11 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         return;
     }
 
+    if (objectType == OBJ_TYPE_SCENERY
+        && tileFirstPersonRenderLargeScenery(object, renderContext, objectX, objectY)) {
+        return;
+    }
+
     const double relativeX = objectX - renderContext->cameraX;
     const double relativeY = objectY - renderContext->cameraY;
     const double transformX = renderContext->inverseDeterminant
@@ -2110,28 +2238,6 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
 
     const int screenCenterX = static_cast<int>(
         (gTileWindowWidth / 2.0) * (1.0 + transformX / transformY));
-    const int projectedRadius = static_cast<int>(
-        std::ceil(gTileWindowHeight / transformY));
-    if (screenCenterX + projectedRadius < 0
-        || screenCenterX - projectedRadius >= gTileWindowWidth) {
-        return;
-    }
-    const int occlusionRadius = std::max(2, projectedRadius * 2 + 2);
-    const int occlusionLeft = std::max(0, screenCenterX - occlusionRadius);
-    const int occlusionRight = std::min(gTileWindowWidth, screenCenterX + occlusionRadius + 1);
-    bool potentiallyVisible = false;
-    for (int x = occlusionLeft; x < occlusionRight; x++) {
-        const double lowerDepth = std::min((*renderContext->wallDepths)[x],
-            (*renderContext->wallSillDepths)[x]);
-        if (transformY < (*renderContext->wallDepths)[x]
-            || transformY < lowerDepth) {
-            potentiallyVisible = true;
-            break;
-        }
-    }
-    if (!potentiallyVisible) {
-        return;
-    }
     Rotation facingRotation = ROTATION_NE;
     if (objectType == OBJ_TYPE_CRITTER) {
         facingRotation = rotationIsValid(object->rotation)
@@ -2427,31 +2533,6 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
     const int spriteBottom = actorBottom;
     const int spriteLeft = screenCenterX - spriteWidth / 2;
     const int spriteRight = spriteLeft + spriteWidth;
-    if (spriteRight <= 0 || spriteLeft >= gTileWindowWidth
-        || spriteBottom <= 0 || spriteTop >= gTileWindowHeight) {
-        return;
-    }
-    const int firstColumn = std::max(0, spriteLeft);
-    const int lastColumn = std::min(gTileWindowWidth, spriteRight);
-    const int upperTop = std::max(0, spriteTop);
-    const int upperBottom = std::min(renderContext->horizonY, spriteBottom);
-    const int lowerTop = std::max(renderContext->horizonY, spriteTop);
-    const int lowerBottom = std::min(gTileWindowHeight, spriteBottom);
-    bool upperVisible = upperTop >= upperBottom;
-    bool lowerVisible = lowerTop >= lowerBottom;
-    for (int x = firstColumn; x < lastColumn && (!upperVisible || !lowerVisible); x++) {
-        if (!upperVisible && transformY < (*renderContext->wallDepths)[x]) {
-            upperVisible = true;
-        }
-        if (!lowerVisible
-            && transformY < std::min((*renderContext->wallDepths)[x],
-                (*renderContext->wallSillDepths)[x])) {
-            lowerVisible = true;
-        }
-    }
-    if (!upperVisible && !lowerVisible) {
-        return;
-    }
     const bool drawCombatOutline = objectType == OBJ_TYPE_CRITTER
         && !critterIsDead(object)
         && gDude != nullptr
@@ -2544,6 +2625,12 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         const int opaqueTop = artTop + spriteBounds.top * artHeight / frame.height;
         const int opaqueBottom = artTop
             + (spriteBounds.bottom + 1) * artHeight / frame.height;
+        // Only actual artwork bounds are safe for culling. Wide sprites can
+        // extend far beyond the placeholder silhouette or one-tile radius.
+        if (opaqueRight <= 0 || opaqueLeft >= gTileWindowWidth
+            || opaqueBottom <= 0 || opaqueTop >= gTileWindowHeight) {
+            return;
+        }
         renderContext->hitTargets->push_back({
             object,
             transformY,
@@ -2867,6 +2954,10 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         return;
     }
 
+    if (spriteRight <= 0 || spriteLeft >= gTileWindowWidth
+        || spriteBottom <= 0 || spriteTop >= gTileWindowHeight) {
+        return;
+    }
     renderContext->hitTargets->push_back({
         object,
         transformY,
@@ -3977,21 +4068,22 @@ Object* tileFirstPersonPreviewPickObjectAt(int screenX, int screenY)
         if (objectType != OBJ_TYPE_SCENERY && objectType != OBJ_TYPE_ITEM) {
             continue;
         }
-        const int hitPadding = objectType == OBJ_TYPE_SCENERY
-            ? std::max(6, target.width / 2)
-            : std::max(4, target.width / 2);
-        const int verticalHitPadding = objectType == OBJ_TYPE_SCENERY
-            ? std::max(6, target.height / 4)
-            : std::max(4, target.height / 2);
+        const int hitPadding = target.sourceColumn >= 0 ? 0
+            : objectType == OBJ_TYPE_SCENERY ? std::max(6, target.width / 2)
+                                           : std::max(4, target.width / 2);
+        const int verticalHitPadding = target.sourceColumn >= 0 ? 0
+            : objectType == OBJ_TYPE_SCENERY ? std::max(6, target.height / 4)
+                                           : std::max(4, target.height / 2);
         if (target.depth >= pickedDepth
             || x < target.left - hitPadding
             || x >= target.left + target.width + hitPadding
             || y < target.top - verticalHitPadding
             || y >= target.top + target.height + verticalHitPadding
+            || y < target.clipTop || y >= target.clipBottom
             || target.depth >= gFirstPersonPreviewWallDepths[x]) {
             continue;
         }
-        if (target.depth < fallbackDepth) {
+        if (target.sourceColumn < 0 && target.depth < fallbackDepth) {
             fallbackObject = target.object;
             fallbackDepth = target.depth;
         }
@@ -4003,10 +4095,10 @@ Object* tileFirstPersonPreviewPickObjectAt(int screenX, int screenY)
                 continue;
             }
 
-            const int sourceX = std::clamp(
+            const int sourceX = target.sourceColumn >= 0 ? target.sourceColumn : std::clamp(
                 (x - target.left) * frame.width / target.width, 0, frame.width - 1);
-            const int sourceY = std::clamp(
-                (y - target.top) * frame.height / target.height, 0, frame.height - 1);
+            const int sourceY = std::clamp(static_cast<int>(
+                static_cast<double>(y - target.top) * frame.height / target.height), 0, frame.height - 1);
             if (frame.data[sourceY * frame.width + sourceX] == 0) {
                 continue;
             }

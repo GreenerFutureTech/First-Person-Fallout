@@ -2,6 +2,11 @@ cmake_minimum_required(VERSION 3.18)
 project(fallout_render_tests LANGUAGES CXX)
 
 enable_testing()
+add_executable(first_person_scenery_test first_person_scenery_test.cc)
+target_compile_features(first_person_scenery_test PRIVATE cxx_std_17)
+target_include_directories(first_person_scenery_test PRIVATE ../../src)
+add_test(NAME first_person_scenery COMMAND first_person_scenery_test)
+
 add_executable(indexed_texture_palette_test indexed_texture_palette_test.cc)
 target_compile_features(indexed_texture_palette_test PRIVATE cxx_std_17)
 target_include_directories(indexed_texture_palette_test PRIVATE ../../src)
