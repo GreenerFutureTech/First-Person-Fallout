@@ -1320,6 +1320,25 @@ static void viewerHandleFirstPersonClick(ClientConnection& conn, int screenX, in
         char cmd[48];
         snprintf(cmd, sizeof(cmd), "use %d", door->netId);
         conn.sendLine(cmd);
+        return;
+    }
+
+    if (!tileFirstPersonPreviewIsCursorCaptured()) {
+        Rect rect;
+        if (windowGetRect(gIsoWindow, &rect) != 0) {
+            return;
+        }
+        const int tile = tileFirstPersonPreviewPickGroundTileAt(
+            screenX - rect.left, screenY - rect.top);
+        if (tileIsValid(tile)) {
+            tileFirstPersonPreviewSetMoveMarkerTile(tile);
+            if (settings.system.interrupt_walk) {
+                reg_anim_clear(gDude);
+            }
+            char cmd[32];
+            snprintf(cmd, sizeof(cmd), "mv %d %d", tile, settings.preferences.running ? 1 : 0);
+            conn.sendLine(cmd);
+        }
     }
 }
 
@@ -1875,7 +1894,9 @@ static int mainClientViewer(const char* connectSpec)
             if (gViewerFirstPersonLeftClickStartTime != 0
                 && !leftButtonDown
                 && (keyCode == -1 || keyCode == -2)) {
-                if (!gViewerFirstPersonActionMenuShown) {
+                if (!gViewerFirstPersonActionMenuShown && !oocBusy
+                    && !clientDialogActive() && !clientSayActive()
+                    && windowGetAtPoint(clickX, clickY) == gIsoWindow) {
                     viewerHandleFirstPersonClick(conn, clickX, clickY);
                 }
                 gViewerFirstPersonActionMenuShown = false;
@@ -2462,11 +2483,21 @@ static int mainClientViewer(const char* connectSpec)
                     // logic (never _dude_move/_dude_run, which animate the local mirror).
                     // Objects (doors included) are used via ARROW mode now — the slice-1
                     // MOVE-mode door special case is retired; MOVE means move (vanilla).
-                    int tile = tileFromScreenXY(mx, my, gElevation);
+                    int tile = -1;
+                    if (tileFirstPersonPreviewIsEnabled()) {
+                        Rect rect;
+                        if (!tileFirstPersonPreviewIsCursorCaptured()
+                            && windowGetRect(gIsoWindow, &rect) == 0) {
+                            tile = tileFirstPersonPreviewPickGroundTileAt(mx - rect.left, my - rect.top);
+                        }
+                    } else {
+                        tile = tileFromScreenXY(mx, my, gElevation);
+                    }
                     if (tile >= 0) {
                         bool shift = gPressedPhysicalKeys[SDL_SCANCODE_LSHIFT]
                             || gPressedPhysicalKeys[SDL_SCANCODE_RSHIFT];
-                        bool run = shift != (settings.preferences.running != 0);
+                        bool run = (!tileFirstPersonPreviewIsEnabled() && shift)
+                            != (settings.preferences.running != 0);
                         char cmd[32];
                         if (inCombat) {
                             // In-combat MOVE (AP-limited) → cmove for the barrier. Gated

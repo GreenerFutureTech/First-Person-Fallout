@@ -190,7 +190,7 @@ static void tileFirstPersonRenderExitGridMarker(
     int tile,
     const TileFirstPersonExitGridRenderContext* context);
 static void tileFirstPersonDrawCrosshair(double directionX, double directionY);
-static void tileFirstPersonDrawMoveMarker(double directionX, double directionY);
+static void tileFirstPersonDrawMoveMarker(double directionX, double directionY, int tile, Color color);
 static void tileFirstPersonDrawDiagnosticLine(int x1, int y1, int x2, int y2, Color color);
 static bool tileFirstPersonGetWorldPosition(int tile, double* x, double* y);
 static Rotation tileFirstPersonGetRotationToward(int tile, double targetX, double targetY);
@@ -247,6 +247,7 @@ static double gFirstPersonPreviewYawTarget = 0.0;
 static unsigned int gFirstPersonPreviewYawStartTime = 0;
 static bool gFirstPersonPreviewYawTurning = false;
 static int gFirstPersonPreviewMoveMarkerTile = -1;
+static int gFirstPersonPreviewHoverTile = -1;
 static int gFirstPersonPreviewPendingMoveDirection = -1;
 static unsigned int gFirstPersonPreviewPendingMoveTime = 0;
 static bool gFirstPersonPreviewCameraInitialized = false;
@@ -1663,7 +1664,10 @@ static void tileRenderFirstPersonPreview()
     const unsigned int actorStart = profileFrame ? getTicks() : 0;
     objectVisitAll(tileFirstPersonRenderActor, &actorContext);
     const unsigned int actorEnd = profileFrame ? getTicks() : 0;
-    tileFirstPersonDrawMoveMarker(directionX, directionY);
+    tileFirstPersonDrawMoveMarker(directionX, directionY, gFirstPersonPreviewMoveMarkerTile, COLOR_RED);
+    if (!gFirstPersonPreviewCursorCaptured) {
+        tileFirstPersonDrawMoveMarker(directionX, directionY, gFirstPersonPreviewHoverTile, COLOR_LIGHT_GREEN_3);
+    }
     tileFirstPersonDrawCrosshair(directionX, directionY);
     tileRenderFirstPersonTopologyOverlay();
 
@@ -3187,6 +3191,7 @@ static void tileFirstPersonPreviewResetForModeRefresh()
 {
     gFirstPersonPreviewCameraInitialized = false;
     gFirstPersonPreviewMoveMarkerTile = -1;
+    gFirstPersonPreviewHoverTile = -1;
     gFirstPersonPreviewPendingMoveDirection = -1;
     gFirstPersonPreviewYawTurning = false;
     gFirstPersonPreviewYaw = 0;
@@ -3323,9 +3328,9 @@ static void tileFirstPersonDrawCrosshair(double directionX, double directionY)
     bufferDrawLine(gTileWindowBuffer, gTileWindowPitch, tipX, tipY, rightX, rightY, COLOR_LIGHT_GREEN_3);
 }
 
-static void tileFirstPersonDrawMoveMarker(double directionX, double directionY)
+static void tileFirstPersonDrawMoveMarker(double directionX, double directionY, int tile, Color color)
 {
-    if (!tileIsValid(gFirstPersonPreviewMoveMarkerTile)
+    if (!tileIsValid(tile)
         || gDude == nullptr || gDude->elevation != gElevation) {
         return;
     }
@@ -3335,8 +3340,8 @@ static void tileFirstPersonDrawMoveMarker(double directionX, double directionY)
     double cameraY;
     double targetX;
     double targetY;
-    if (!tileFirstPersonGetWorldPosition(gDude->tile, &cameraX, &cameraY)
-        || !tileFirstPersonGetWorldPosition(gFirstPersonPreviewMoveMarkerTile, &targetX, &targetY)) {
+    tileFirstPersonGetCameraPosition(gDude->tile, gDude->elevation, &cameraX, &cameraY);
+    if (!tileFirstPersonGetWorldPosition(tile, &targetX, &targetY)) {
         return;
     }
 
@@ -3373,10 +3378,10 @@ static void tileFirstPersonDrawMoveMarker(double directionX, double directionY)
     for (int t = 0; t < thickness; t++) {
         int r = radius - t;
 
-        tileFirstPersonDrawDiagnosticLine(centerX, centerY - r, centerX + r, centerY, COLOR_RED);
-        tileFirstPersonDrawDiagnosticLine(centerX + r, centerY, centerX, centerY + r, COLOR_RED);
-        tileFirstPersonDrawDiagnosticLine(centerX, centerY + r, centerX - r, centerY, COLOR_RED);
-        tileFirstPersonDrawDiagnosticLine(centerX - r, centerY, centerX, centerY - r, COLOR_RED);
+        tileFirstPersonDrawDiagnosticLine(centerX, centerY - r, centerX + r, centerY, color);
+        tileFirstPersonDrawDiagnosticLine(centerX + r, centerY, centerX, centerY + r, color);
+        tileFirstPersonDrawDiagnosticLine(centerX, centerY + r, centerX - r, centerY, color);
+        tileFirstPersonDrawDiagnosticLine(centerX - r, centerY, centerX, centerY - r, color);
     }
 }
 
@@ -4220,6 +4225,17 @@ void tileFirstPersonPreviewSetMoveMarkerTile(int tile)
     if (gFirstPersonPreviewMoveMarkerTile != tile) {
         gFirstPersonPreviewMoveMarkerTile = tile;
         tileFirstPersonPreviewRefresh();
+    }
+}
+
+void tileFirstPersonPreviewSetHoverTile(int tile)
+{
+    if (!gFirstPersonPreviewEnabled || !tileIsValid(tile)) {
+        tile = -1;
+    }
+    if (gFirstPersonPreviewHoverTile != tile) {
+        gFirstPersonPreviewHoverTile = tile;
+        tileFirstPersonPreviewRequestRefresh();
     }
 }
 

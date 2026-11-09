@@ -166,6 +166,22 @@ void gameHandleFirstPersonPreviewInput(int eventCode)
         }
     }
 
+    int hoverTile = -1;
+    if (!mouseDeviceUsesRelativeMode()) {
+        int mouseX;
+        int mouseY;
+        mouseGetPosition(&mouseX, &mouseY);
+        Rect rect;
+        if (windowGetAtPoint(mouseX, mouseY) == gIsoWindow
+            && windowGetRect(gIsoWindow, &rect) == 0
+            && tileFirstPersonPreviewPickCritterAt(mouseX, mouseY) == nullptr
+            && tileFirstPersonPreviewPickObjectAt(mouseX, mouseY) == nullptr
+            && tileFirstPersonPreviewPickDoorAt(mouseX, mouseY) == nullptr) {
+            hoverTile = tileFirstPersonPreviewPickGroundTileAt(mouseX - rect.left, mouseY - rect.top);
+        }
+    }
+    tileFirstPersonPreviewSetHoverTile(hoverTile);
+
     if (mouseDeviceUsesRelativeMode()) {
         int deltaX;
         int deltaY;
