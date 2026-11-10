@@ -133,11 +133,17 @@ struct TileFirstPersonDoorCapSpan {
     double depth = std::numeric_limits<double>::infinity();
 };
 
+struct TileFirstPersonTemplePanelLayout {
+    const Object* object;
+    double projectedIsoXOffset;
+};
+
 struct TileFirstPersonActorRenderContext {
     MapElevation elevation;
     double backwallY;
     double backwallIsoBaseY;
     bool hasTempleBackwall;
+    const std::vector<TileFirstPersonTemplePanelLayout>* templePanelLayouts;
     double cameraX;
     double cameraY;
     double directionX;
@@ -184,7 +190,8 @@ static void tileFirstPersonRenderActor(Object* object, void* context);
 static bool tileFirstPersonIsTempleBackwall(const Object* object);
 static void tileFirstPersonFindTempleBackwallBounds(Object* object, void* context);
 static double tileFirstPersonGetTempleBackwallY(MapElevation elevation, int entranceTile,
-    double* backwallIsoBaseY, bool* found);
+    double* backwallIsoBaseY, bool* found,
+    std::vector<TileFirstPersonTemplePanelLayout>* panelLayouts);
 static const std::vector<unsigned char>* tileFirstPersonGetActorOutlinePixels(
     const unsigned char* pixels,
     int width,
@@ -1652,13 +1659,16 @@ static void tileRenderFirstPersonPreview()
 
     bool hasTempleBackwall = false;
     double templeBackwallIsoBaseY = 0.0;
+    std::vector<TileFirstPersonTemplePanelLayout> templePanelLayouts;
     const double templeBackwallY = tileFirstPersonGetTempleBackwallY(
-        gElevation, gMapHeader.enteringTile, &templeBackwallIsoBaseY, &hasTempleBackwall);
+        gElevation, gMapHeader.enteringTile, &templeBackwallIsoBaseY,
+        &hasTempleBackwall, &templePanelLayouts);
     TileFirstPersonActorRenderContext actorContext = {
         gElevation,
         templeBackwallY,
         templeBackwallIsoBaseY,
         hasTempleBackwall,
+        &templePanelLayouts,
         cameraX,
         cameraY,
         directionX,
@@ -2091,6 +2101,22 @@ static void tileFirstPersonGrayboxMarkObject(Object* object, void* context)
     }
 }
 
+static const FirstPersonSceneryProfile& tileFirstPersonGetSceneryProfile(
+    const Object* object, Rotation rotation, const ConstBuffer2D& frame)
+{
+    const uint64_t key = (static_cast<uint64_t>(static_cast<unsigned int>(object->fid)) << 32)
+        | (static_cast<uint64_t>(static_cast<unsigned int>(object->frame)) << 3)
+        | static_cast<unsigned int>(rotation);
+    static std::unordered_map<uint64_t, FirstPersonSceneryProfile> profiles;
+    auto found = profiles.find(key);
+    if (found == profiles.end() || found->second.width != frame.width
+        || found->second.height != frame.height) {
+        profiles[key] = firstPersonSceneryProfile(frame.data, frame.width, frame.height);
+        found = profiles.find(key);
+    }
+    return found->second;
+}
+
 static bool tileFirstPersonRenderLargeScenery(Object* object,
     const TileFirstPersonActorRenderContext* context, double worldX, double worldY,
     bool templeBackwall)
@@ -2114,30 +2140,31 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
     if (!templeBackwall && (frame.width < 160 || frame.height < 64)) {
         return false;
     }
-    // Use art identity rather than a cache allocation address, which can be
-    // reused for a different FRM after eviction. Frame/rotation remain stable
-    // as the camera turns, but still follow scripted artwork changes.
-    const uint64_t key = (static_cast<uint64_t>(static_cast<unsigned int>(object->fid)) << 32)
-        | (static_cast<uint64_t>(static_cast<unsigned int>(object->frame)) << 3)
-        | static_cast<unsigned int>(rotation);
-    static std::unordered_map<uint64_t, FirstPersonSceneryProfile> profiles;
-    auto found = profiles.find(key);
-    if (found == profiles.end() || found->second.width != frame.width || found->second.height != frame.height) {
-        profiles[key] = firstPersonSceneryProfile(frame.data, frame.width, frame.height);
-        found = profiles.find(key);
-    }
-    const FirstPersonSceneryProfile& profile = found->second;
+    // Key by art identity rather than cache allocation, which can be reused
+    // after eviction. Frame and rotation still follow scripted art changes.
+    const FirstPersonSceneryProfile& profile =
+        tileFirstPersonGetSceneryProfile(object, rotation, frame);
     if (!profile.fixed && !templeBackwall) {
         return false;
     }
     if (templeBackwall && profile.left >= profile.right) {
         return false;
     }
-    const double projectedIsoX = firstPersonSceneryBackwallProjectedX(worldX, worldY);
+    double projectedIsoX = firstPersonSceneryBackwallProjectedX(worldX, worldY);
+    if (templeBackwall && context->templePanelLayouts != nullptr) {
+        for (const TileFirstPersonTemplePanelLayout& layout : *context->templePanelLayouts) {
+            if (layout.object == object) {
+                projectedIsoX += layout.projectedIsoXOffset;
+                break;
+            }
+        }
+    }
     const double projectedIsoY = firstPersonSceneryBackwallProjectedY(worldX, worldY)
         + image.getYOffset() + object->y;
-    const double backwallVerticalOffset = firstPersonSceneryBackwallVerticalOffset(
-        context->backwallIsoBaseY, projectedIsoY);
+    const double backwallVerticalOffset = templeBackwall
+        ? 0.0
+        : firstPersonSceneryBackwallVerticalOffset(
+              context->backwallIsoBaseY, projectedIsoY);
     const FirstPersonScenerySlab slab = templeBackwall
         ? firstPersonSceneryBackwallSlab(profile, projectedIsoX, context->backwallY,
               image.getXOffset() + object->x, backwallVerticalOffset)
@@ -2194,8 +2221,10 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
         for (size_t band = 0; band + 1 < edges.size(); band++) {
             const int bandTop = edges[band];
             const int bandBottom = edges[band + 1];
-            if (hit.depth >= tileFirstPersonGetWallDepthAt(x, bandTop, context->horizonY,
-                    context->wallDepths, context->wallSillDepths, context->doorCapDepths)) {
+            const double wallDepth = tileFirstPersonGetWallDepthAt(x, bandTop,
+                context->horizonY, context->wallDepths, context->wallSillDepths,
+                context->doorCapDepths);
+            if (!templeBackwall && hit.depth >= wallDepth) {
                 continue;
             }
             context->hitTargets->push_back({ object, hit.depth, x, top, 1, artHeight,
@@ -2244,6 +2273,9 @@ struct TileFirstPersonTempleBackwallBounds {
     double minimumY = std::numeric_limits<double>::infinity();
     double maximumY = -std::numeric_limits<double>::infinity();
     double maximumIsoY = -std::numeric_limits<double>::infinity();
+    double sumX = 0.0;
+    double sumY = 0.0;
+    int count = 0;
 };
 
 static void tileFirstPersonFindTempleBackwallBounds(Object* object, void* context)
@@ -2263,6 +2295,9 @@ static void tileFirstPersonFindTempleBackwallBounds(Object* object, void* contex
     }
     bounds->minimumY = std::min(bounds->minimumY, worldY);
     bounds->maximumY = std::max(bounds->maximumY, worldY);
+    bounds->sumX += worldX;
+    bounds->sumY += worldY;
+    bounds->count++;
     FrmImage image;
     if (image.lock(FrmId(object), object->frame, object->rotation)) {
         bounds->maximumIsoY = std::max(bounds->maximumIsoY,
@@ -2271,8 +2306,95 @@ static void tileFirstPersonFindTempleBackwallBounds(Object* object, void* contex
     }
 }
 
+struct TileFirstPersonTemplePanelLayoutEntry {
+    TileFirstPersonTemplePanelLayout layout;
+    int prototypeId;
+    double left;
+    double width;
+};
+
+struct TileFirstPersonTemplePanelLayoutContext {
+    MapElevation elevation;
+    std::vector<TileFirstPersonTemplePanelLayoutEntry>* entries;
+};
+
+static void tileFirstPersonCollectTemplePanelLayout(Object* object, void* context)
+{
+    auto* layoutContext = static_cast<TileFirstPersonTemplePanelLayoutContext*>(context);
+    if (!tileFirstPersonIsTempleBackwall(object)
+        || object->elevation != layoutContext->elevation
+        || (object->flags & OBJECT_HIDDEN) != OBJECT_NONE
+        || !tileIsValid(object->tile)) {
+        return;
+    }
+
+    double worldX;
+    double worldY;
+    if (!tileFirstPersonGetWorldPosition(object->tile, &worldX, &worldY)) {
+        return;
+    }
+    const Rotation rotation = rotationIsValid(object->rotation)
+        ? object->rotation
+        : ROTATION_NE;
+    FrmImage image;
+    if (!image.lock(FrmId(object), object->frame, rotation)) {
+        return;
+    }
+    const ConstBuffer2D frame = image.getBuffer();
+    const FirstPersonSceneryProfile& profile =
+        tileFirstPersonGetSceneryProfile(object, rotation, frame);
+    if (profile.left >= profile.right) {
+        return;
+    }
+
+    const double projectedIsoX = firstPersonSceneryBackwallProjectedX(worldX, worldY);
+    const double left = projectedIsoX + image.getXOffset() + object->x
+        + profile.left - frame.width * 0.5;
+    const double width = profile.right - profile.left;
+    layoutContext->entries->push_back({
+        { object, 0.0 },
+        ProtoId(object).protoId(),
+        left,
+        width,
+    });
+}
+
+struct TileFirstPersonTempleWallAnchor {
+    MapElevation elevation;
+    double targetX;
+    double targetY;
+    double nearestDistanceSquared = std::numeric_limits<double>::infinity();
+    double y = 0.0;
+};
+
+static void tileFirstPersonFindTempleWallAnchor(Object* object, void* context)
+{
+    auto* anchor = static_cast<TileFirstPersonTempleWallAnchor*>(context);
+    if (FrmId(object).objectType() != OBJ_TYPE_WALL
+        || object->elevation != anchor->elevation
+        || (object->flags & (OBJECT_HIDDEN | OBJECT_NO_BLOCK | OBJECT_LIGHT_THRU)) != OBJECT_NONE
+        || (object->flags & (OBJECT_TRANS_GLASS | OBJECT_TRANS_WALL)) != OBJECT_NONE
+        || !tileIsValid(object->tile)) {
+        return;
+    }
+
+    double worldX;
+    double worldY;
+    if (!tileFirstPersonGetWorldPosition(object->tile, &worldX, &worldY)) {
+        return;
+    }
+    const double deltaX = worldX - anchor->targetX;
+    const double deltaY = worldY - anchor->targetY;
+    const double distanceSquared = deltaX * deltaX + deltaY * deltaY;
+    if (distanceSquared < anchor->nearestDistanceSquared) {
+        anchor->nearestDistanceSquared = distanceSquared;
+        anchor->y = worldY;
+    }
+}
+
 static double tileFirstPersonGetTempleBackwallY(MapElevation elevation, int entranceTile,
-    double* backwallIsoBaseY, bool* found)
+    double* backwallIsoBaseY, bool* found,
+    std::vector<TileFirstPersonTemplePanelLayout>* panelLayouts)
 {
     TileFirstPersonTempleBackwallBounds bounds;
     bounds.elevation = elevation;
@@ -2283,13 +2405,49 @@ static double tileFirstPersonGetTempleBackwallY(MapElevation elevation, int entr
         *backwallIsoBaseY = 0.0;
         return 0.0;
     }
+    std::vector<TileFirstPersonTemplePanelLayoutEntry> layoutEntries;
+    TileFirstPersonTemplePanelLayoutContext layoutContext { elevation, &layoutEntries };
+    objectVisitAll(tileFirstPersonCollectTemplePanelLayout, &layoutContext);
+    std::sort(layoutEntries.begin(), layoutEntries.end(),
+        [](const TileFirstPersonTemplePanelLayoutEntry& left,
+            const TileFirstPersonTemplePanelLayoutEntry& right) {
+            return left.prototypeId < right.prototypeId;
+        });
+    if (!layoutEntries.empty()) {
+        double totalWidth = 0.0;
+        for (const TileFirstPersonTemplePanelLayoutEntry& entry : layoutEntries) {
+            totalWidth += entry.width;
+        }
+        const double originalCenter =
+            (layoutEntries.front().left
+                + layoutEntries.back().left + layoutEntries.back().width) * 0.5;
+        double nextLeft = originalCenter - totalWidth * 0.5;
+        for (TileFirstPersonTemplePanelLayoutEntry& entry : layoutEntries) {
+            entry.layout.projectedIsoXOffset = nextLeft - entry.left;
+            panelLayouts->push_back(entry.layout);
+            nextLeft += entry.width;
+        }
+    }
     *backwallIsoBaseY = bounds.maximumIsoY;
     double entranceX;
     double entranceY;
     if (!tileFirstPersonGetWorldPosition(entranceTile, &entranceX, &entranceY)) {
         entranceY = bounds.maximumY;
     }
-    return firstPersonSceneryBackwallDepth(entranceY);
+    const double fallbackY = firstPersonSceneryBackwallDepth(entranceY);
+
+    // Anchor the entire Temple panorama to real wall geometry instead of
+    // placing it on the map-entry-derived plane.
+    TileFirstPersonTempleWallAnchor wallAnchor {
+        elevation,
+        bounds.sumX / bounds.count,
+        bounds.sumY / bounds.count,
+    };
+    objectVisitAll(tileFirstPersonFindTempleWallAnchor, &wallAnchor);
+    if (!std::isfinite(wallAnchor.nearestDistanceSquared)) {
+        return fallbackY;
+    }
+    return wallAnchor.y;
 }
 
 static void tileFirstPersonRenderActor(Object* object, void* context)
@@ -2304,6 +2462,13 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         || (objectType != OBJ_TYPE_CRITTER
             && objectType != OBJ_TYPE_ITEM
             && objectType != OBJ_TYPE_SCENERY)) {
+        return;
+    }
+
+    if (objectType == OBJ_TYPE_SCENERY
+        && gMapHeader.index == MAP_ARROYO_TEMPLE
+        && renderContext->elevation == ELEVATION_FIRST
+        && ProtoId(object).protoId() == 1359) {
         return;
     }
 

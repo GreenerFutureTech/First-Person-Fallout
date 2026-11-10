@@ -131,11 +131,19 @@ accelerated path. Vertical spacing uses the same
 Y values from exaggerating the gaps between panels. Panel height uses this
 same scale rather than the shorter generic-scenery scale.
 
-All panels use a shared depth 7.5 world units in front of the map's entry
-tile. On the Temple map the entry tile is row 92, so the backwall plane is
-about row 77, one map row farther toward the facade than the previous
-placement. This map-specific override
-includes the narrow and flat-flagged panels that the general large-scenery
+The Temple panels are ordered by facade prototype (1360-1365, 1369, then
+1370) and packed edge-to-edge using each FRM's visible horizontal span,
+centered around their original group bounds. This removes gaps and overlaps
+caused by placing each panel at its independent isometric tile position while
+preserving the intended left-to-right artwork sequence. All panels share a
+common baseline. The resulting panorama is
+anchored to the solid wall tile nearest the facade group's center, rather than
+a fixed distance from the entry tile. Temple panels render over the procedural
+wall rather than being clipped to its per-column ray hits, so gaps in the wall
+graybox do not break up the packed art; transparent areas remain transparent.
+If no solid wall tile is found, the existing shared-plane placement 7.5 world
+units in front of the entry tile is used. This map-specific
+override includes the narrow and flat-flagged panels that the general large-scenery
 heuristic intentionally leaves alone. Fire-pit props and collision/blocker
 objects are not included. The isometric renderer, movement, and collision
 continue to use the original map objects.
