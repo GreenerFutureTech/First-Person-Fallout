@@ -33,20 +33,31 @@ The grouped prototypes are scenery proto IDs `1360` through `1365`, plus
 | 1370 | `temple08.frm` |
 
 Those identities were checked against the scenery proto FIDs and `SCENERY.LST`
-in the user's Fallout data installation. The neighboring IDs are not all part
-of the facade: proto 1359 is `gate4.frm`, 1366-1367 are the two fire pits, and
-1368 is `HOWITZR2.FRM`. None of those should be forced into the backwall.
+in the user's Fallout data installation. Proto 1359 is a separate door using
+`door06.frm`; proto 1366 is a fire pit, and proto 1368 is `HOWITZR2.FRM`.
+Those are not facade panels and should not be forced into the backwall.
 
 ### Prototype membership correction
 
 The original hardcoded set was off by one: it omitted `TEMPLE06` and
-`temple08`, and included the preceding gate and the howitzer. This is the
-specific reason facade graphics could be absent or unrelated art could be
-treated as part of the panorama. Membership is now based on the verified
-prototype IDs above and covered by a regression test for both inclusion and
-neighboring exclusions. The current ARTEMPLE state dump contains placed
-instances of the Temple01-07 set; `temple08` is available as a facade asset
-but is not placed in that map snapshot.
+`temple08`, and included the separate door and howitzer. Membership is now
+based on the verified prototype IDs above and covered by a regression test for
+both inclusion and neighboring exclusions. The ARTEMPLE map contains placed
+instances of Temple01-07; `temple08` is available as a facade asset but is not
+placed in the map.
+
+### Base flattening and overlapping panels
+
+The original backwall renderer aligned every source column's lowest opaque
+pixel to the common panel base. That incorrectly treated cutouts and isolated
+low pixels as ground, shifting the whole column and visibly tearing the
+texture below the head. Temple panels now flatten against a fitted isometric
+ground line only when the profile has a reliable map-aligned lower edge;
+irregular silhouettes retain their actual per-column base to avoid introducing
+gaps. When panels overlap at the shared depth, the software renderer permits
+later opaque panel pixels to replace an exact depth tie, matching the
+accelerated renderer's stable submission order. Both rules are limited to the
+Temple backwall; generic scenery is unchanged.
 
 At render time, F11 scans visible instances in the current elevation to find
 the panorama's vertical anchor and uses the map's entering tile to place the
@@ -95,6 +106,8 @@ ordinary doors.
     world-X slab at the shared depth while preserving each panel's projected
     map placement, horizontal offset, and relative vertical offset.
   - Defines the verified Temple facade prototype set.
+  - Adds a fitted source baseline and explicit equal-depth compositing rule for
+    the shared panorama.
   - Retains the earlier classifier addition: tall, clean facade art can use
     the large-scenery path when its base follows a Fallout map-axis slope.
 - `tools/tests/first_person_scenery_test.cc`
@@ -103,6 +116,8 @@ ordinary doors.
     and scale, including the compensation for shared-plane depth in projected X.
   - Verifies all eight Temple prototype IDs and rejects adjacent gate,
     fire-pit, and howitzer IDs.
+  - Verifies clean profiles use the fitted baseline, irregular profiles keep
+    their actual lower edge, and equal-depth panels can composite.
   - Retains the earlier tests for clean map-aligned facade classification and
     rejection of noisy bases.
 - `docs/first-person-large-scenery.md`
@@ -191,6 +206,19 @@ For the Temple prototype membership correction:
   all 4 renderer tests passed, including the Temple prototype inclusion and
   exclusion checks.
 - `git diff --check` — passed.
+
+For the fitted-baseline and equal-depth compositing correction:
+
+- `cmake --build out/build/windows-x64-vs18 --config Release --target fallout2-ce`
+  — passed; produced `out/build/windows-x64-vs18/Release/Fallout2-FPS.exe`.
+- `cmake --build out/build/render-tests` — passed.
+- `ctest --test-dir out/build/render-tests -C Debug --output-on-failure` —
+  all 4 renderer tests passed.
+- `git diff --check` — passed.
+
+After adding the reliability guard for irregular Temple profiles, only
+`git diff --check` was rerun. Per the user's preference, the game build and
+renderer tests for that final adjustment are left for the user.
 
 A post-change in-game visual check remains necessary. Run the rebuilt
 executable, load the Temple scene, and verify that the backdrop is centered

@@ -174,6 +174,24 @@ inline bool firstPersonSceneryIsTempleBackwallProto(int protoId)
     }
 }
 
+inline int firstPersonSceneryBackwallBaseline(
+    const FirstPersonSceneryProfile& profile, int sourceX)
+{
+    if (!profile.fixed) {
+        return profile.bottoms[sourceX];
+    }
+    return std::clamp(static_cast<int>(std::lround(
+                          profile.slope * sourceX + profile.intercept)),
+        0, profile.height);
+}
+
+inline bool firstPersonSceneryShouldReplaceDepth(
+    double incomingDepth, double existingDepth, bool allowEqualDepth)
+{
+    return incomingDepth < existingDepth
+        || (allowEqualDepth && incomingDepth == existingDepth);
+}
+
 inline FirstPersonScenerySlab firstPersonScenerySlab(
     const FirstPersonSceneryProfile& profile, double worldX, double worldY,
     int offsetX, int offsetY)

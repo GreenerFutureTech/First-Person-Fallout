@@ -108,6 +108,19 @@ int main()
         "panel vertical spacing uses the horizontal scale and preserves ordering");
     require(close(firstPersonSceneryBackwallDepth(46.25), 38.75),
         "Temple backwall moves one map row toward the facade");
+    auto unevenProfile = profile;
+    unevenProfile.bottoms[50] = 160;
+    require(firstPersonSceneryBackwallBaseline(unevenProfile, 50) == 128
+            && firstPersonSceneryBackwallBaseline(unevenProfile, 115) == 112,
+        "clean backwall profiles follow the fitted base instead of isolated low pixels");
+    unevenProfile.fixed = false;
+    require(firstPersonSceneryBackwallBaseline(unevenProfile, 50) == 160,
+        "irregular backwall profiles retain their actual lower edge");
+    require(!firstPersonSceneryShouldReplaceDepth(2.0, 2.0, false)
+            && firstPersonSceneryShouldReplaceDepth(2.0, 2.0, true)
+            && firstPersonSceneryShouldReplaceDepth(1.0, 2.0, false)
+            && !firstPersonSceneryShouldReplaceDepth(3.0, 2.0, true),
+        "equal-depth backwall panels composite in both renderers");
     for (int protoId : { 1360, 1361, 1362, 1363, 1364, 1365, 1369, 1370 }) {
         require(firstPersonSceneryIsTempleBackwallProto(protoId),
             "Temple facade prototype is grouped into the backwall");

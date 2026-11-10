@@ -2166,15 +2166,19 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
         if (profile.bottoms[sourceX] == 0) {
             continue;
         }
+        const int sourceBaseline = templeBackwall
+            ? firstPersonSceneryBackwallBaseline(profile, sourceX)
+            : profile.bottoms[sourceX];
         const double scale = gTileWindowHeight / hit.depth;
         const double pixelsPerWorldUnit = templeBackwall ? 48.0 : 80.0;
         const int artHeight = std::max(1,
             static_cast<int>(scale * frame.height / pixelsPerWorldUnit));
         const int base = context->horizonY + static_cast<int>(
             scale * (0.5 - slab.verticalOffset));
-        // Remove the baked-in isometric ground slope from each texture column.
+        // Only flatten against a fitted line when the profile has a reliable
+        // map-aligned base; irregular silhouettes keep their actual edge.
         const int top = base - static_cast<int>(
-            static_cast<double>(profile.bottoms[sourceX]) * artHeight / frame.height);
+            static_cast<double>(sourceBaseline) * artHeight / frame.height);
         const int firstY = std::max(0, top);
         const int lastY = std::min(gTileWindowHeight, base);
         if (firstY >= lastY) {
@@ -2214,7 +2218,8 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
                 }
                 const size_t index = static_cast<size_t>(y) * gTileWindowWidth + x;
                 if ((*context->actorDepthStamps)[index] != context->actorDepthStamp
-                    || hit.depth < (*context->actorDepths)[index]) {
+                    || firstPersonSceneryShouldReplaceDepth(hit.depth,
+                        (*context->actorDepths)[index], templeBackwall)) {
                     (*context->actorDepthStamps)[index] = context->actorDepthStamp;
                     (*context->actorDepths)[index] = hit.depth;
                     gTileWindowBuffer[y * gTileWindowPitch + x] = color;

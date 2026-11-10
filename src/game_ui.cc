@@ -166,8 +166,22 @@ void gameHandleFirstPersonPreviewInput(int eventCode)
         }
     }
 
+    gameFirstPersonPreviewUpdateHover();
+
+    if (mouseDeviceUsesRelativeMode()) {
+        int deltaX;
+        int deltaY;
+        mouseDeviceGetRelativeMotion(&deltaX, &deltaY);
+        tileFirstPersonPreviewLook(
+            deltaX * settings.preferences.mouse_sensitivity,
+            deltaY * settings.preferences.mouse_sensitivity);
+    }
+}
+
+void gameFirstPersonPreviewUpdateHover()
+{
     int hoverTile = -1;
-    if (!mouseDeviceUsesRelativeMode()) {
+    if (tileFirstPersonPreviewIsEnabled() && !tileFirstPersonPreviewIsCursorCaptured()) {
         int mouseX;
         int mouseY;
         mouseGetPosition(&mouseX, &mouseY);
@@ -181,15 +195,6 @@ void gameHandleFirstPersonPreviewInput(int eventCode)
         }
     }
     tileFirstPersonPreviewSetHoverTile(hoverTile);
-
-    if (mouseDeviceUsesRelativeMode()) {
-        int deltaX;
-        int deltaY;
-        mouseDeviceGetRelativeMotion(&deltaX, &deltaY);
-        tileFirstPersonPreviewLook(
-            deltaX * settings.preferences.mouse_sensitivity,
-            deltaY * settings.preferences.mouse_sensitivity);
-    }
 }
 
 void gameToggleFirstPersonPreview()

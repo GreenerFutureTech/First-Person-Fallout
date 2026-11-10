@@ -116,13 +116,17 @@ The eight Temple facade scenery prototypes (1360-1365, 1369, and 1370) are a
 single panorama in F11. The adjacent gate (1359), fire pits (1366-1367), and
 howitzer (1368) are separate objects, not backdrop panels. Each panel is
 placed using both components of its original isometric tile projection:
-projected screen X determines its
-horizontal position on the shared world-X plane, and projected screen Y
-determines its vertical offset. This preserves the source map's left-to-right
-ordering and places map pieces that appear higher in the isometric scene higher
-in the F11 panorama. The horizontal conversion subtracts the shared plane's
-isometric Y contribution before placing panels along world X, keeping the
-backdrop centered when its depth changes. Vertical spacing uses the same
+projected screen X determines its horizontal position on the
+shared world-X plane, and projected screen Y determines its vertical offset.
+This preserves the source map's left-to-right ordering and places map pieces
+that appear higher in the isometric scene higher in the F11 panorama. The
+horizontal conversion subtracts the shared plane's isometric Y contribution
+before placing panels along world X, keeping the backdrop centered when its
+depth changes. Backwall columns use a fitted base line only when the profile
+has a reliable map-aligned lower edge; irregular silhouettes retain their
+actual per-column base to avoid introducing gaps. Equal-depth overlapping
+Temple panels composite in map order in the software renderer, matching the
+accelerated path. Vertical spacing uses the same
 48-pixel-per-world-unit scale as horizontal placement, preventing isometric
 Y values from exaggerating the gaps between panels. Panel height uses this
 same scale rather than the shorter generic-scenery scale.
