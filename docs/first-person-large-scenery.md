@@ -104,3 +104,10 @@ then walk alongside both ends and look back. Check that the pieces remain
 fixed, their visible ends survive turns, and wall/doorway occlusion stays
 correct. Compare the software fallback with the accelerated renderer. Toggle
 F11 off to confirm the original isometric view remains unchanged.
+
+## Arroyo Temple blocked-floor boundaries
+
+F11 renders half-height wall cells around blocked floor tiles within eight
+hexes of Arroyo Temple facade scenery and fire pits (prototypes 1366 and
+1367). The perimeter is cached for the map elevation. This is visual only:
+movement, collision, doors, and the original scenery remain unchanged.

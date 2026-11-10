@@ -29,6 +29,23 @@ inline bool firstPersonSceneryIsLarge(int width, int columnHeight)
     return width >= 160 && columnHeight >= 64 && width >= columnHeight * 1.5;
 }
 
+inline bool firstPersonSceneryIsTempleBackwallProto(int protoId)
+{
+    switch (protoId) {
+    case 1360: // TEMPLE01.FRM
+    case 1361: // TEMPLE02.FRM
+    case 1362: // TEMPLE03.FRM
+    case 1363: // TEMPLE04.FRM
+    case 1364: // TEMPLE05.FRM
+    case 1365: // TEMPLE06.FRM
+    case 1369: // temple07.frm
+    case 1370: // temple08.frm
+        return true;
+    default:
+        return false;
+    }
+}
+
 inline FirstPersonSceneryProfile firstPersonSceneryProfile(
     const unsigned char* pixels, int width, int height)
 {
