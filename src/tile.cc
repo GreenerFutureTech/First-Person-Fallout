@@ -79,6 +79,7 @@ struct TileFirstPersonGrayboxRenderContext {
     unsigned char* wallCells;
     unsigned char* wallOrientations;
     std::vector<int>* exitGridTiles;
+    const std::vector<int>* templeWallAreaLandmarkTiles;
 };
 
 enum TileFirstPersonWallOrientation : unsigned char {
@@ -185,6 +186,9 @@ static void tileFirstPersonInitializeWallTextures();
 static unsigned int tileFirstPersonTextureNoise(int x, int y, unsigned int seed);
 static void tileFirstPersonTopologyMarkObject(Object* object, void* context);
 static void tileFirstPersonSnapshotTopologyObject(Object* object, void* context);
+static void tileFirstPersonFindTempleWallAreaLandmark(Object* object, void* context);
+static void tileFirstPersonMarkTempleBlockedAreaWalls(
+    const TileFirstPersonGrayboxRenderContext* renderContext);
 static void tileFirstPersonGrayboxMarkObject(Object* object, void* context);
 static void tileFirstPersonRenderActor(Object* object, void* context);
 static bool tileFirstPersonIsTempleBackwall(const Object* object);
@@ -1084,14 +1088,31 @@ static void tileRenderFirstPersonPreview()
     gFirstPersonPreviewWallCells.assign(gHexGridSize, 0);
     gFirstPersonPreviewWallOrientations.assign(gHexGridSize, 0);
     gFirstPersonPreviewExitGridTiles.clear();
+    static bool templeFirePitsCached = false;
+    static int templeFirePitsElevation = -1;
+    static std::vector<int> templeWallAreaLandmarkTiles;
+    if (gMapHeader.index == MAP_ARROYO_TEMPLE) {
+        if (!templeFirePitsCached
+            || templeFirePitsElevation != static_cast<int>(gElevation)) {
+            templeWallAreaLandmarkTiles.clear();
+            objectVisitAll(tileFirstPersonFindTempleWallAreaLandmark, &templeWallAreaLandmarkTiles);
+            std::sort(templeWallAreaLandmarkTiles.begin(), templeWallAreaLandmarkTiles.end());
+            templeFirePitsElevation = static_cast<int>(gElevation);
+            templeFirePitsCached = true;
+        }
+    }
     TileFirstPersonGrayboxRenderContext context = {
         gElevation,
         gHexGridWidth,
         gFirstPersonPreviewWallCells.data(),
         gFirstPersonPreviewWallOrientations.data(),
         &gFirstPersonPreviewExitGridTiles,
+        gMapHeader.index == MAP_ARROYO_TEMPLE ? &templeWallAreaLandmarkTiles : nullptr,
     };
     objectVisitAll(tileFirstPersonGrayboxMarkObject, &context);
+    if (gMapHeader.index == MAP_ARROYO_TEMPLE) {
+        tileFirstPersonMarkTempleBlockedAreaWalls(&context);
+    }
     std::sort(gFirstPersonPreviewExitGridTiles.begin(), gFirstPersonPreviewExitGridTiles.end());
     gFirstPersonPreviewExitGridTiles.erase(
         std::unique(gFirstPersonPreviewExitGridTiles.begin(), gFirstPersonPreviewExitGridTiles.end()),
@@ -2009,6 +2030,143 @@ static void tileFirstPersonRenderExitGridMarker(
             if (color != 0) {
                 gTileWindowBuffer[y * gTileWindowPitch + x] = color;
             }
+        }
+    }
+}
+
+static void tileFirstPersonFindTempleWallAreaLandmark(Object* object, void* context)
+{
+    const int protoId = ProtoId(object).protoId();
+    if (object->elevation != gElevation
+        || (object->flags & OBJECT_HIDDEN) != OBJECT_NONE
+        || ProtoId(object).objectType() != OBJ_TYPE_SCENERY
+        || (!firstPersonSceneryIsTempleBackwallProto(protoId)
+            && protoId != 1366 && protoId != 1367)
+        || !tileIsValid(object->tile)) {
+        return;
+    }
+
+    static_cast<std::vector<int>*>(context)->push_back(object->tile);
+}
+
+static int tileFirstPersonGetRenderHexTile(int tile, int gridWidth)
+{
+    if (!tileIsValid(tile) || gridWidth <= 0) {
+        return -1;
+    }
+
+    const int hexRow = tile / gridWidth;
+    const int hexColumn = gridWidth - 1 - tile % gridWidth;
+    const int renderHexTile = hexRow * gridWidth + hexColumn;
+    return renderHexTile >= 0 && renderHexTile < gHexGridSize ? renderHexTile : -1;
+}
+
+static bool tileFirstPersonIsTempleBlockedFloorTile(int tile, MapElevation elevation)
+{
+    Object* excludedObject = nullptr;
+    Object* blocker;
+    while ((blocker = _obj_blocking_at(excludedObject, tile, elevation)) != nullptr) {
+        excludedObject = blocker;
+        const ObjectType blockerType = FrmId(blocker).objectType();
+        if (blockerType != OBJ_TYPE_WALL && blockerType != OBJ_TYPE_SCENERY) {
+            continue;
+        }
+
+        Proto* proto = nullptr;
+        if (blockerType == OBJ_TYPE_SCENERY
+            && (protoGetProto(blocker, &proto) != 0
+                || proto->scenery.type == SCENERY_TYPE_DOOR
+                || firstPersonSceneryIsTempleBackwallProto(ProtoId(blocker).protoId())
+                || ProtoId(blocker).protoId() == 1366
+                || ProtoId(blocker).protoId() == 1367)) {
+            continue;
+        }
+        return true;
+    }
+    return false;
+}
+
+static void tileFirstPersonMarkTempleBlockedAreaWalls(
+    const TileFirstPersonGrayboxRenderContext* renderContext)
+{
+    if (renderContext->templeWallAreaLandmarkTiles == nullptr
+        || renderContext->templeWallAreaLandmarkTiles->empty()) {
+        return;
+    }
+
+    constexpr int kTempleBlockedAreaSearchRadius = 8;
+    constexpr int kBoundaryProbeRadius = kTempleBlockedAreaSearchRadius + 1;
+    static int cachedElevation = -1;
+    static int cachedGridSize = 0;
+    static int cachedMap = -1;
+    static std::vector<int> cachedLandmarkTiles;
+    static std::vector<int> cachedWallCells;
+    if (cachedMap != static_cast<int>(gMapHeader.index)
+        || cachedElevation != static_cast<int>(renderContext->elevation)
+        || cachedGridSize != gHexGridSize
+        || cachedLandmarkTiles != *renderContext->templeWallAreaLandmarkTiles) {
+        cachedMap = static_cast<int>(gMapHeader.index);
+        cachedElevation = static_cast<int>(renderContext->elevation);
+        cachedGridSize = gHexGridSize;
+        cachedLandmarkTiles = *renderContext->templeWallAreaLandmarkTiles;
+        cachedWallCells.clear();
+
+        std::vector<unsigned char> visited(gHexGridSize, 0);
+        std::vector<unsigned char> blocked(gHexGridSize, 0);
+        std::vector<std::pair<int, int>> candidates;
+        candidates.reserve(cachedLandmarkTiles.size() * 256);
+        for (int landmarkTile : cachedLandmarkTiles) {
+            if (tileIsValid(landmarkTile) && visited[landmarkTile] == 0) {
+                visited[landmarkTile] = 1;
+                candidates.push_back({ landmarkTile, 0 });
+            }
+        }
+        for (size_t index = 0; index < candidates.size(); index++) {
+            const int tile = candidates[index].first;
+            const int distance = candidates[index].second;
+            if (distance == kBoundaryProbeRadius) {
+                continue;
+            }
+            for (int rotation = ROTATION_FIRST; rotation < ROTATION_COUNT; rotation++) {
+                const int neighbor = tileGetTileInDirection(
+                    tile, static_cast<Rotation>(rotation), 1);
+                if (tileIsValid(neighbor) && visited[neighbor] == 0) {
+                    visited[neighbor] = 1;
+                    candidates.push_back({ neighbor, distance + 1 });
+                }
+            }
+        }
+        for (const auto& candidate : candidates) {
+            blocked[candidate.first] = tileFirstPersonIsTempleBlockedFloorTile(
+                candidate.first, renderContext->elevation) ? 1 : 0;
+        }
+
+        for (const auto& candidate : candidates) {
+            const int tile = candidate.first;
+            if (candidate.second > kTempleBlockedAreaSearchRadius || blocked[tile] == 0) {
+                continue;
+            }
+            for (int rotation = ROTATION_FIRST; rotation < ROTATION_COUNT; rotation++) {
+                const int neighbor = tileGetTileInDirection(
+                    tile, static_cast<Rotation>(rotation), 1);
+                if (!tileIsValid(neighbor) || blocked[neighbor] == 0) {
+                    const int renderHexTile = tileFirstPersonGetRenderHexTile(
+                        tile, renderContext->gridWidth);
+                    if (renderHexTile >= 0) {
+                        cachedWallCells.push_back(renderHexTile);
+                    }
+                    break;
+                }
+            }
+        }
+        std::sort(cachedWallCells.begin(), cachedWallCells.end());
+        cachedWallCells.erase(
+            std::unique(cachedWallCells.begin(), cachedWallCells.end()), cachedWallCells.end());
+    }
+
+    for (int renderHexTile : cachedWallCells) {
+        if (renderHexTile >= 0 && renderContext->wallCells[renderHexTile] == 0) {
+            renderContext->wallCells[renderHexTile] = 2;
         }
     }
 }

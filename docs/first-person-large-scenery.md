@@ -143,10 +143,16 @@ wall rather than being clipped to its per-column ray hits, so gaps in the wall
 graybox do not break up the packed art; transparent areas remain transparent.
 If no solid wall tile is found, the existing shared-plane placement 7.5 world
 units in front of the entry tile is used. This map-specific
-override includes the narrow and flat-flagged panels that the general large-scenery
-heuristic intentionally leaves alone. Fire-pit props and collision/blocker
-objects are not included. The isometric renderer, movement, and collision
-continue to use the original map objects.
+override includes the narrow and flat-flagged panels that the general
+large-scenery heuristic intentionally leaves alone. Fire-pit props and
+unrelated collision/blocker objects are not included. The isometric renderer,
+movement, and collision continue to use the original map objects.
+
+On Arroyo Temple only, the perimeter of blocked floor tiles within eight hexes
+of the facade panels or either fire pit (prototypes 1366 and 1367) is rendered
+as half-height wall cells in F11. This exposes the blocked-off floor areas
+around the facade and fire pits without adding collision or changing visible
+scenery, doors, or other maps. The perimeter is cached for the map elevation.
 
 Temple facade prototypes are routed into the shared backwall before the
 ordinary scenery-door exclusion. This matters because one of the facade
