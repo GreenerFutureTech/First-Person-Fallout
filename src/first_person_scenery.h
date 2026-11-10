@@ -132,7 +132,24 @@ struct FirstPersonScenerySlab {
     FirstPersonSceneryPoint axis;
     double length;
     double thickness = 0.2;
+    double verticalOffset = 0.0;
 };
+
+inline double firstPersonSceneryBackwallProjectedX(double worldX, double worldY)
+{
+    return worldX * 48.0 + worldY * 32.0;
+}
+
+inline double firstPersonSceneryBackwallProjectedY(double worldX, double worldY)
+{
+    return -worldX * 12.0 + worldY * 24.0;
+}
+
+inline double firstPersonSceneryBackwallVerticalOffset(
+    double backwallBaseY, double projectedY)
+{
+    return (backwallBaseY - projectedY) / 24.0;
+}
 
 inline FirstPersonScenerySlab firstPersonScenerySlab(
     const FirstPersonSceneryProfile& profile, double worldX, double worldY,
@@ -150,14 +167,18 @@ inline FirstPersonScenerySlab firstPersonScenerySlab(
 }
 
 inline FirstPersonScenerySlab firstPersonSceneryBackwallSlab(
-    const FirstPersonSceneryProfile& profile, double worldX, double backwallY,
-    int offsetX)
+    const FirstPersonSceneryProfile& profile, double projectedScreenX, double backwallY,
+    int offsetX, double verticalOffset)
 {
     const double middle = (profile.left + profile.right) * 0.5;
     return {
-        { worldX + (middle - profile.width * 0.5 + offsetX) / 48.0, backwallY },
+        { projectedScreenX / 48.0
+                + (middle - profile.width * 0.5 + offsetX) / 48.0,
+            backwallY },
         { 1.0, 0.0 },
         (profile.right - profile.left) / 48.0,
+        0.2,
+        verticalOffset,
     };
 }
 

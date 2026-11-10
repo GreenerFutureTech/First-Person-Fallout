@@ -113,11 +113,18 @@ F11 off to confirm the original isometric view remains unchanged.
 ## Temple of Trials backwall
 
 The eight Temple facade scenery prototypes (1359-1364 and 1368-1369) are a
-single panorama in F11. Each panel keeps its map-derived horizontal placement,
-but uses one world-X axis and the far edge of the group's tile bounds as its
-shared depth. The depth edge is selected opposite the camera's side of the
-group, so the panorama remains behind the player from either side. This
-map-specific override includes the narrow and flat-flagged panels that the
-general large-scenery heuristic intentionally leaves alone. Fire-pit props
-and collision/blocker objects are not included. The isometric renderer,
-movement, and collision continue to use the original map objects.
+single panorama in F11. Each panel is placed using both components of its
+original isometric tile projection: projected screen X determines its
+horizontal position on the shared world-X plane, and projected screen Y
+determines its vertical offset. This preserves the source map's left-to-right
+ordering and places map pieces that appear higher in the isometric scene higher
+in the F11 panorama. Panel height uses the same 48-pixel-per-world-unit scale
+as its horizontal placement, rather than the shorter generic-scenery scale.
+
+All panels use the far edge of the group's tile bounds as their shared depth.
+The edge is selected opposite the camera's side of the group, so the panorama
+remains behind the player from either side. This map-specific override
+includes the narrow and flat-flagged panels that the general large-scenery
+heuristic intentionally leaves alone. Fire-pit props and collision/blocker
+objects are not included. The isometric renderer, movement, and collision
+continue to use the original map objects.

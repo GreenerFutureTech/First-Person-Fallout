@@ -39,9 +39,14 @@ invisible collision/blocker objects are not part of this group.
 At render time, F11 scans visible instances in the current elevation to find
 the group's minimum and maximum world Y. It chooses the far Y edge based on
 which side of the group the camera occupies. Every panel's backwall slab uses
-that Y and a fixed world-X axis. Each panel keeps its map-derived X anchor and
-its FRM/object X offset, so pieces retain their horizontal arrangement while
-sharing depth and direction.
+that Y and a fixed world-X axis. The first version retained only each panel's
+world-X anchor, which flattened away the map's isometric ordering and placed
+every panel at the same vertical base. The latest adjustment uses the tile's
+isometric screen projection: projected screen X positions each panel across
+the shared plane, and projected screen Y raises or lowers it relative to the
+lowest panel anchor. It also scales panorama height at the same 48-pixel per
+world-unit ratio as its horizontal span instead of using the generic scenery's
+shorter 80-pixel scale.
 
 The renderer's existing per-column ray intersection, wall-depth clipping,
 CPU/GPU drawing, transparency, and hit-target paths are reused. The override
@@ -61,13 +66,14 @@ billboard behavior, with its anchor placed at the common backwall depth.
     preserving the existing renderer and fallback path.
 - `src/first_person_scenery.h`
   - Added `firstPersonSceneryBackwallSlab`, which constructs a horizontal
-    world-X slab at the shared depth while preserving each panel's X offset
-    and scale.
+    world-X slab at the shared depth while preserving each panel's projected
+    map placement, horizontal offset, and relative vertical offset.
   - Retains the earlier classifier addition: tall, clean facade art can use
     the large-scenery path when its base follows a Fallout map-axis slope.
 - `tools/tests/first_person_scenery_test.cc`
   - Added assertions that backwall panels share depth and axis while
-    preserving horizontal placement and scale.
+    preserving projected horizontal placement, relative vertical placement,
+    and scale.
   - Retains the earlier tests for clean map-aligned facade classification and
     rejection of noisy bases.
 - `docs/first-person-large-scenery.md`
@@ -93,12 +99,21 @@ change.
   `src/sfall_arrays.cc` (C4312 pointer-size conversion); it did not prevent the
   build.
 
-The screenshot was inspected to guide the change, but a post-change in-game
-visual check was not performed. The user should run the rebuilt executable,
-load the Temple scene, and inspect the backwall from both sides and while
-turning. In particular, verify that the far edge is consistently behind the
-player, the panels read as one picture, and walls/actors still occlude the
-panorama correctly.
+For the latest adjustment requested with the new screenshots:
+
+- `cmake --build out/build/render-tests` — passed.
+- `ctest --test-dir out/build/render-tests -C Debug --output-on-failure` —
+  all 4 renderer tests passed.
+- `cmake --build out/build/windows-x64-vs18 --config Debug --target fallout2-ce`
+  — passed; produced `out/build/windows-x64-vs18/Debug/Fallout2-FPS.exe`.
+- `git diff --check` — passed.
+
+A post-change in-game visual check remains necessary. Run the rebuilt
+executable, load the Temple scene, and inspect the backwall from both sides
+and while turning. Verify that panel order and vertical placement match the
+isometric image, the increased height does not clip important artwork, the far
+edge stays behind the player, and walls/actors still occlude the panorama
+correctly.
 
 ## Important implementation detail / next consideration
 

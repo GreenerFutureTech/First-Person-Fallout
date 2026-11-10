@@ -136,6 +136,7 @@ struct TileFirstPersonDoorCapSpan {
 struct TileFirstPersonActorRenderContext {
     MapElevation elevation;
     double backwallY;
+    double backwallIsoBaseY;
     bool hasTempleBackwall;
     double cameraX;
     double cameraY;
@@ -183,7 +184,7 @@ static void tileFirstPersonRenderActor(Object* object, void* context);
 static bool tileFirstPersonIsTempleBackwall(const Object* object);
 static void tileFirstPersonFindTempleBackwallBounds(Object* object, void* context);
 static double tileFirstPersonGetTempleBackwallY(MapElevation elevation, double cameraY,
-    bool* found);
+    double* backwallIsoBaseY, bool* found);
 static const std::vector<unsigned char>* tileFirstPersonGetActorOutlinePixels(
     const unsigned char* pixels,
     int width,
@@ -1650,11 +1651,13 @@ static void tileRenderFirstPersonPreview()
     tileFirstPersonRenderExitGridMarkers(gFirstPersonPreviewExitGridTiles, &exitGridContext);
 
     bool hasTempleBackwall = false;
+    double templeBackwallIsoBaseY = 0.0;
     const double templeBackwallY = tileFirstPersonGetTempleBackwallY(
-        gElevation, cameraY, &hasTempleBackwall);
+        gElevation, cameraY, &templeBackwallIsoBaseY, &hasTempleBackwall);
     TileFirstPersonActorRenderContext actorContext = {
         gElevation,
         templeBackwallY,
+        templeBackwallIsoBaseY,
         hasTempleBackwall,
         cameraX,
         cameraY,
@@ -2129,9 +2132,14 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
     if (templeBackwall && profile.left >= profile.right) {
         return false;
     }
+    const double projectedIsoX = firstPersonSceneryBackwallProjectedX(worldX, worldY);
+    const double projectedIsoY = firstPersonSceneryBackwallProjectedY(worldX, worldY)
+        + image.getYOffset() + object->y;
+    const double backwallVerticalOffset = firstPersonSceneryBackwallVerticalOffset(
+        context->backwallIsoBaseY, projectedIsoY);
     const FirstPersonScenerySlab slab = templeBackwall
-        ? firstPersonSceneryBackwallSlab(profile, worldX, context->backwallY,
-              image.getXOffset() + object->x)
+        ? firstPersonSceneryBackwallSlab(profile, projectedIsoX, context->backwallY,
+              image.getXOffset() + object->x, backwallVerticalOffset)
         : firstPersonScenerySlab(profile, worldX, worldY,
               image.getXOffset() + object->x, image.getYOffset() + object->y);
     const bool gpu = screenIsHardwareAccelerated();
@@ -2158,8 +2166,11 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
             continue;
         }
         const double scale = gTileWindowHeight / hit.depth;
-        const int artHeight = std::max(1, static_cast<int>(scale * frame.height / 80.0));
-        const int base = context->horizonY + static_cast<int>(scale * 0.5);
+        const double pixelsPerWorldUnit = templeBackwall ? 48.0 : 80.0;
+        const int artHeight = std::max(1,
+            static_cast<int>(scale * frame.height / pixelsPerWorldUnit));
+        const int base = context->horizonY + static_cast<int>(
+            scale * (0.5 - slab.verticalOffset));
         // Remove the baked-in isometric ground slope from each texture column.
         const int top = base - static_cast<int>(
             static_cast<double>(profile.bottoms[sourceX]) * artHeight / frame.height);
@@ -2238,6 +2249,7 @@ struct TileFirstPersonTempleBackwallBounds {
     MapElevation elevation;
     double minimumY = std::numeric_limits<double>::infinity();
     double maximumY = -std::numeric_limits<double>::infinity();
+    double maximumIsoY = -std::numeric_limits<double>::infinity();
 };
 
 static void tileFirstPersonFindTempleBackwallBounds(Object* object, void* context)
@@ -2257,19 +2269,28 @@ static void tileFirstPersonFindTempleBackwallBounds(Object* object, void* contex
     }
     bounds->minimumY = std::min(bounds->minimumY, worldY);
     bounds->maximumY = std::max(bounds->maximumY, worldY);
+    FrmImage image;
+    if (image.lock(FrmId(object), object->frame, object->rotation)) {
+        bounds->maximumIsoY = std::max(bounds->maximumIsoY,
+            firstPersonSceneryBackwallProjectedY(worldX, worldY)
+                + image.getYOffset() + object->y);
+    }
 }
 
 static double tileFirstPersonGetTempleBackwallY(MapElevation elevation, double cameraY,
-    bool* found)
+    double* backwallIsoBaseY, bool* found)
 {
     TileFirstPersonTempleBackwallBounds bounds;
     bounds.elevation = elevation;
     objectVisitAll(tileFirstPersonFindTempleBackwallBounds, &bounds);
-    *found = std::isfinite(bounds.minimumY) && std::isfinite(bounds.maximumY);
+    *found = std::isfinite(bounds.minimumY) && std::isfinite(bounds.maximumY)
+        && std::isfinite(bounds.maximumIsoY);
     if (!*found) {
+        *backwallIsoBaseY = 0.0;
         return 0.0;
     }
 
+    *backwallIsoBaseY = bounds.maximumIsoY;
     const double middle = (bounds.minimumY + bounds.maximumY) * 0.5;
     return cameraY < middle ? bounds.maximumY : bounds.minimumY;
 }

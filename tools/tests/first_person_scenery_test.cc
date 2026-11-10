@@ -85,8 +85,8 @@ int main()
     require(close(shifted.center.x - derived.center.x, 1.0)
             && close(shifted.center.y, derived.center.y),
         "honor art and object offsets");
-    const auto backwallLeft = firstPersonSceneryBackwallSlab(profile, 10, 4, 0);
-    const auto backwallRight = firstPersonSceneryBackwallSlab(profile, 20, 4, 48);
+    const auto backwallLeft = firstPersonSceneryBackwallSlab(profile, 480, 4, 0, 0);
+    const auto backwallRight = firstPersonSceneryBackwallSlab(profile, 960, 4, 48, 1.5);
     require(close(backwallLeft.center.y, backwallRight.center.y)
             && close(backwallLeft.axis.x, 1.0)
             && close(backwallLeft.axis.y, 0.0)
@@ -94,8 +94,15 @@ int main()
             && close(backwallRight.axis.y, 0.0),
         "backwall panels share one depth and horizontal axis");
     require(close(backwallRight.center.x - backwallLeft.center.x, 11.0)
-            && close(backwallLeft.length, backwallRight.length),
-        "backwall panels preserve horizontal placement and scale");
+            && close(backwallLeft.length, backwallRight.length)
+            && close(backwallLeft.verticalOffset, 0.0)
+            && close(backwallRight.verticalOffset, 1.5),
+        "backwall panels preserve projected placement, height, and scale");
+    const double upperPanelY = firstPersonSceneryBackwallProjectedY(54.25, 32.75);
+    const double lowerPanelY = firstPersonSceneryBackwallProjectedY(54.25, 41.25);
+    require(upperPanelY < lowerPanelY
+            && firstPersonSceneryBackwallVerticalOffset(lowerPanelY, upperPanelY) > 0.0,
+        "panels higher in the isometric image rise in the first-person panorama");
 
     // Temple facade art can be taller than the original aspect-ratio cutoff
     // despite having a clean base aligned to a map axis.
