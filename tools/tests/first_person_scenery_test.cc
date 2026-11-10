@@ -94,15 +94,28 @@ int main()
             && close(backwallRight.axis.y, 0.0),
         "backwall panels share one depth and horizontal axis");
     require(close(backwallRight.center.x - backwallLeft.center.x, 11.0)
+            && close(backwallLeft.center.x * 48.0 + backwallLeft.center.y * 32.0, 480.0)
             && close(backwallLeft.length, backwallRight.length)
             && close(backwallLeft.verticalOffset, 0.0)
             && close(backwallRight.verticalOffset, 1.5),
-        "backwall panels preserve projected placement, height, and scale");
+        "backwall panels preserve projected X at shared depth, height, and scale");
     const double upperPanelY = firstPersonSceneryBackwallProjectedY(54.25, 32.75);
     const double lowerPanelY = firstPersonSceneryBackwallProjectedY(54.25, 41.25);
     require(upperPanelY < lowerPanelY
+            && close(firstPersonSceneryBackwallVerticalOffset(lowerPanelY, upperPanelY),
+                (lowerPanelY - upperPanelY) / 48.0)
             && firstPersonSceneryBackwallVerticalOffset(lowerPanelY, upperPanelY) > 0.0,
-        "panels higher in the isometric image rise in the first-person panorama");
+        "panel vertical spacing uses the horizontal scale and preserves ordering");
+    require(close(firstPersonSceneryBackwallDepth(46.25), 38.75),
+        "Temple backwall moves one map row toward the facade");
+    for (int protoId : { 1360, 1361, 1362, 1363, 1364, 1365, 1369, 1370 }) {
+        require(firstPersonSceneryIsTempleBackwallProto(protoId),
+            "Temple facade prototype is grouped into the backwall");
+    }
+    for (int protoId : { 1359, 1366, 1367, 1368, 1371 }) {
+        require(!firstPersonSceneryIsTempleBackwallProto(protoId),
+            "gate, fire pits, and howitzer are not backwall panels");
+    }
 
     // Temple facade art can be taller than the original aspect-ratio cutoff
     // despite having a clean base aligned to a map axis.
