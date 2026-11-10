@@ -67,6 +67,14 @@ alignment reference, while keeping visual geometry independent where the map
 uses invisible blockers or decorative backdrops. A visual mesh must not change
 movement or collision.
 
+For a known inaccessible floor patch, a low wall may be rendered around its
+blocked-tile boundary. Keep detection scoped to validated landmarks on that
+map, exclude actors and doors, and cache the result rather than running
+full-map blocker queries in the frame renderer. Do not generalize this rule
+to other maps without validating their blocker layouts in-game. This is visual
+guidance only: the existing map objects remain the sole source of movement and
+collision.
+
 All scenery surfaces must participate in one coherent depth and transparency
 contract with procedural walls, doors, the floor, and actors. Software and
 accelerated output must agree on geometry, coverage, texture sampling, and

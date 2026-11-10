@@ -148,11 +148,21 @@ large-scenery heuristic intentionally leaves alone. Fire-pit props and
 unrelated collision/blocker objects are not included. The isometric renderer,
 movement, and collision continue to use the original map objects.
 
-On Arroyo Temple only, the perimeter of blocked floor tiles within eight hexes
-of the facade panels or either fire pit (prototypes 1366 and 1367) is rendered
-as half-height wall cells in F11. This exposes the blocked-off floor areas
-around the facade and fire pits without adding collision or changing visible
-scenery, doors, or other maps. The perimeter is cached for the map elevation.
+## Blocked-floor boundaries
+
+F11 derives floor appearance from floor FRMs, while movement uses blocking
+objects. A blocked tile therefore does not automatically look like a wall.
+On Arroyo Temple, F11 searches within eight hexes of the facade panels and the
+two fire pits (prototypes 1366 and 1367), then draws half-height wall cells on
+the perimeter of blocked tiles. The search is limited to those known landmark
+areas and its result is cached per map and elevation; it does not scan other
+maps. Doors, actors, facade panels, and fire-pit props are excluded from the
+blocking test. Movement and collision remain authoritative and unchanged.
+
+This is intentionally Temple-specific. A general rule based on all blocking
+scenery was removed because it affected unrelated maps and caused a crash when
+entering F11 on Klamath. Apply the visual treatment to another map only after
+identifying its specific blocked-floor landmarks and validating it in-game.
 
 Temple facade prototypes are routed into the shared backwall before the
 ordinary scenery-door exclusion. This matters because one of the facade
