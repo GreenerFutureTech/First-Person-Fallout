@@ -183,7 +183,7 @@ static void tileFirstPersonGrayboxMarkObject(Object* object, void* context);
 static void tileFirstPersonRenderActor(Object* object, void* context);
 static bool tileFirstPersonIsTempleBackwall(const Object* object);
 static void tileFirstPersonFindTempleBackwallBounds(Object* object, void* context);
-static double tileFirstPersonGetTempleBackwallY(MapElevation elevation, double cameraY,
+static double tileFirstPersonGetTempleBackwallY(MapElevation elevation, int entranceTile,
     double* backwallIsoBaseY, bool* found);
 static const std::vector<unsigned char>* tileFirstPersonGetActorOutlinePixels(
     const unsigned char* pixels,
@@ -1653,7 +1653,7 @@ static void tileRenderFirstPersonPreview()
     bool hasTempleBackwall = false;
     double templeBackwallIsoBaseY = 0.0;
     const double templeBackwallY = tileFirstPersonGetTempleBackwallY(
-        gElevation, cameraY, &templeBackwallIsoBaseY, &hasTempleBackwall);
+        gElevation, gMapHeader.enteringTile, &templeBackwallIsoBaseY, &hasTempleBackwall);
     TileFirstPersonActorRenderContext actorContext = {
         gElevation,
         templeBackwallY,
@@ -2101,7 +2101,8 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
         return false;
     }
     Proto* proto = nullptr;
-    if (protoGetProto(object, &proto) != 0 || proto->scenery.type != SCENERY_TYPE_GENERIC) {
+    if (protoGetProto(object, &proto) != 0
+        || (!templeBackwall && proto->scenery.type != SCENERY_TYPE_GENERIC)) {
         return false;
     }
     const Rotation rotation = rotationIsValid(object->rotation) ? object->rotation : ROTATION_NE;
@@ -2230,19 +2231,7 @@ static bool tileFirstPersonIsTempleBackwall(const Object* object)
         return false;
     }
 
-    switch (ProtoId(object).protoId()) {
-    case 1359: // TEMPLE01.FRM
-    case 1360: // TEMPLE02.FRM
-    case 1361: // TEMPLE03.FRM
-    case 1362: // TEMPLE04.FRM
-    case 1363: // TEMPLE05.FRM
-    case 1364: // TEMPLE06.FRM
-    case 1368: // temple07.frm
-    case 1369: // temple08.frm
-        return true;
-    default:
-        return false;
-    }
+    return firstPersonSceneryIsTempleBackwallProto(ProtoId(object).protoId());
 }
 
 struct TileFirstPersonTempleBackwallBounds {
@@ -2277,7 +2266,7 @@ static void tileFirstPersonFindTempleBackwallBounds(Object* object, void* contex
     }
 }
 
-static double tileFirstPersonGetTempleBackwallY(MapElevation elevation, double cameraY,
+static double tileFirstPersonGetTempleBackwallY(MapElevation elevation, int entranceTile,
     double* backwallIsoBaseY, bool* found)
 {
     TileFirstPersonTempleBackwallBounds bounds;
@@ -2289,10 +2278,13 @@ static double tileFirstPersonGetTempleBackwallY(MapElevation elevation, double c
         *backwallIsoBaseY = 0.0;
         return 0.0;
     }
-
     *backwallIsoBaseY = bounds.maximumIsoY;
-    const double middle = (bounds.minimumY + bounds.maximumY) * 0.5;
-    return cameraY < middle ? bounds.maximumY : bounds.minimumY;
+    double entranceX;
+    double entranceY;
+    if (!tileFirstPersonGetWorldPosition(entranceTile, &entranceX, &entranceY)) {
+        entranceY = bounds.maximumY;
+    }
+    return firstPersonSceneryBackwallDepth(entranceY);
 }
 
 static void tileFirstPersonRenderActor(Object* object, void* context)
@@ -2310,7 +2302,9 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         return;
     }
 
-    if (objectType == OBJ_TYPE_SCENERY) {
+    const bool templeBackwall = renderContext->hasTempleBackwall
+        && tileFirstPersonIsTempleBackwall(object);
+    if (objectType == OBJ_TYPE_SCENERY && !templeBackwall) {
         Proto* proto = nullptr;
         if (protoGetProto(object, &proto) == 0
             && proto->scenery.type == SCENERY_TYPE_DOOR) {
@@ -2324,8 +2318,6 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         return;
     }
 
-    const bool templeBackwall = renderContext->hasTempleBackwall
-        && tileFirstPersonIsTempleBackwall(object);
     if (objectType == OBJ_TYPE_SCENERY
         && tileFirstPersonRenderLargeScenery(object, renderContext, objectX, objectY,
             templeBackwall)) {

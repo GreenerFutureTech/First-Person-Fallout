@@ -112,19 +112,32 @@ F11 off to confirm the original isometric view remains unchanged.
 
 ## Temple of Trials backwall
 
-The eight Temple facade scenery prototypes (1359-1364 and 1368-1369) are a
-single panorama in F11. Each panel is placed using both components of its
-original isometric tile projection: projected screen X determines its
+The eight Temple facade scenery prototypes (1360-1365, 1369, and 1370) are a
+single panorama in F11. The adjacent gate (1359), fire pits (1366-1367), and
+howitzer (1368) are separate objects, not backdrop panels. Each panel is
+placed using both components of its original isometric tile projection:
+projected screen X determines its
 horizontal position on the shared world-X plane, and projected screen Y
 determines its vertical offset. This preserves the source map's left-to-right
 ordering and places map pieces that appear higher in the isometric scene higher
-in the F11 panorama. Panel height uses the same 48-pixel-per-world-unit scale
-as its horizontal placement, rather than the shorter generic-scenery scale.
+in the F11 panorama. The horizontal conversion subtracts the shared plane's
+isometric Y contribution before placing panels along world X, keeping the
+backdrop centered when its depth changes. Vertical spacing uses the same
+48-pixel-per-world-unit scale as horizontal placement, preventing isometric
+Y values from exaggerating the gaps between panels. Panel height uses this
+same scale rather than the shorter generic-scenery scale.
 
-All panels use the far edge of the group's tile bounds as their shared depth.
-The edge is selected opposite the camera's side of the group, so the panorama
-remains behind the player from either side. This map-specific override
+All panels use a shared depth 7.5 world units in front of the map's entry
+tile. On the Temple map the entry tile is row 92, so the backwall plane is
+about row 77, one map row farther toward the facade than the previous
+placement. This map-specific override
 includes the narrow and flat-flagged panels that the general large-scenery
 heuristic intentionally leaves alone. Fire-pit props and collision/blocker
 objects are not included. The isometric renderer, movement, and collision
 continue to use the original map objects.
+
+Temple facade prototypes are routed into the shared backwall before the
+ordinary scenery-door exclusion. This matters because one of the facade
+prototypes is tagged as a door in its prototype data even though its art is a
+backwall panel. That exception is limited to the recognized Temple backwall
+group; normal doors keep their existing F11 behavior.

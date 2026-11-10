@@ -148,7 +148,30 @@ inline double firstPersonSceneryBackwallProjectedY(double worldX, double worldY)
 inline double firstPersonSceneryBackwallVerticalOffset(
     double backwallBaseY, double projectedY)
 {
-    return (backwallBaseY - projectedY) / 24.0;
+    return (backwallBaseY - projectedY) / 48.0;
+}
+
+inline double firstPersonSceneryBackwallDepth(double entranceY)
+{
+    constexpr double kDepthBeforeEntrance = 7.5;
+    return entranceY - kDepthBeforeEntrance;
+}
+
+inline bool firstPersonSceneryIsTempleBackwallProto(int protoId)
+{
+    switch (protoId) {
+    case 1360: // TEMPLE01.FRM
+    case 1361: // TEMPLE02.FRM
+    case 1362: // TEMPLE03.FRM
+    case 1363: // TEMPLE04.FRM
+    case 1364: // TEMPLE05.FRM
+    case 1365: // TEMPLE06.FRM
+    case 1369: // temple07.frm
+    case 1370: // temple08.frm
+        return true;
+    default:
+        return false;
+    }
 }
 
 inline FirstPersonScenerySlab firstPersonScenerySlab(
@@ -172,7 +195,7 @@ inline FirstPersonScenerySlab firstPersonSceneryBackwallSlab(
 {
     const double middle = (profile.left + profile.right) * 0.5;
     return {
-        { projectedScreenX / 48.0
+        { (projectedScreenX - backwallY * 32.0) / 48.0
                 + (middle - profile.width * 0.5 + offsetX) / 48.0,
             backwallY },
         { 1.0, 0.0 },
