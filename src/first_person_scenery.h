@@ -29,6 +29,15 @@ inline bool firstPersonSceneryIsLarge(int width, int columnHeight)
     return width >= 160 && columnHeight >= 64 && width >= columnHeight * 1.5;
 }
 
+inline bool firstPersonSceneryHasMapAlignedBase(double slope, double rmsError)
+{
+    constexpr double kSlopeTolerance = 0.08;
+    constexpr double kMaxRmsError = 2.0;
+    return rmsError <= kMaxRmsError
+        && (std::abs(slope + 0.25) <= kSlopeTolerance
+            || std::abs(slope - 0.75) <= kSlopeTolerance);
+}
+
 inline FirstPersonSceneryProfile firstPersonSceneryProfile(
     const unsigned char* pixels, int width, int height)
 {
@@ -72,16 +81,33 @@ inline FirstPersonSceneryProfile firstPersonSceneryProfile(
         sumXX += static_cast<double>(x) * x;
         sumXY += static_cast<double>(x) * columnBottom;
     }
-    // Measure vertical columns, not the bounding-box height: an isometric
-    // wall running down-screen adds its ground slope to the latter.
-    result.fixed = firstPersonSceneryIsLarge(result.right - result.left,
-        std::max(endHeights[0], endHeights[1]));
-    if (!result.fixed) {
+    if (count == 0.0) {
         return result;
     }
     const double variance = count * sumXX - sumX * sumX;
     result.slope = variance > 0.0 ? (count * sumXY - sumX * sumY) / variance : 0.0;
     result.intercept = (sumY - result.slope * sumX) / count;
+    double squaredError = 0.0;
+    for (int x = result.left; x < result.right; x++) {
+        if (result.bottoms[x] == 0) {
+            continue;
+        }
+        const double error = result.bottoms[x] - (result.slope * x + result.intercept);
+        squaredError += error * error;
+    }
+    const double rmsError = std::sqrt(squaredError / count);
+    const int columnHeight = std::max(endHeights[0], endHeights[1]);
+    // Measure vertical columns, not the bounding-box height: an isometric
+    // wall running down-screen adds its ground slope to the latter. Some tall
+    // facades fail the aspect-ratio test, so accept only clean map-axis bases.
+    const bool largeMapAlignedFacade = result.right - result.left >= 160
+        && columnHeight >= 64
+        && firstPersonSceneryHasMapAlignedBase(result.slope, rmsError);
+    result.fixed = firstPersonSceneryIsLarge(result.right - result.left, columnHeight)
+        || largeMapAlignedFacade;
+    if (!result.fixed) {
+        return result;
+    }
     for (int end = 0; end < 2; end++) {
         if (result.endColumns[end] < 0) {
             result.endColumns[end] = result.endColumns[1 - end];
@@ -121,6 +147,18 @@ inline FirstPersonScenerySlab firstPersonScenerySlab(
     const double length = std::hypot(span.x, span.y);
     return { { worldX + center.x, worldY + center.y },
         { span.x / length, span.y / length }, length };
+}
+
+inline FirstPersonScenerySlab firstPersonSceneryBackwallSlab(
+    const FirstPersonSceneryProfile& profile, double worldX, double backwallY,
+    int offsetX)
+{
+    const double middle = (profile.left + profile.right) * 0.5;
+    return {
+        { worldX + (middle - profile.width * 0.5 + offsetX) / 48.0, backwallY },
+        { 1.0, 0.0 },
+        (profile.right - profile.left) / 48.0,
+    };
 }
 
 struct FirstPersonSceneryHit {

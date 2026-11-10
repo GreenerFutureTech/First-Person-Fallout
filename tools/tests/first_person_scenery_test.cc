@@ -85,6 +85,54 @@ int main()
     require(close(shifted.center.x - derived.center.x, 1.0)
             && close(shifted.center.y, derived.center.y),
         "honor art and object offsets");
+    const auto backwallLeft = firstPersonSceneryBackwallSlab(profile, 10, 4, 0);
+    const auto backwallRight = firstPersonSceneryBackwallSlab(profile, 20, 4, 48);
+    require(close(backwallLeft.center.y, backwallRight.center.y)
+            && close(backwallLeft.axis.x, 1.0)
+            && close(backwallLeft.axis.y, 0.0)
+            && close(backwallRight.axis.x, 1.0)
+            && close(backwallRight.axis.y, 0.0),
+        "backwall panels share one depth and horizontal axis");
+    require(close(backwallRight.center.x - backwallLeft.center.x, 11.0)
+            && close(backwallLeft.length, backwallRight.length),
+        "backwall panels preserve horizontal placement and scale");
+
+    // Temple facade art can be taller than the original aspect-ratio cutoff
+    // despite having a clean base aligned to a map axis.
+    constexpr int facadeWidth = 241;
+    constexpr int facadeHeight = 300;
+    std::vector<unsigned char> facadePixels(facadeWidth * facadeHeight, 0);
+    for (int x = 0; x < facadeWidth; x++) {
+        const int bottom = 270 - x / 4;
+        for (int y = bottom - 198; y < bottom; y++) {
+            facadePixels[y * facadeWidth + x] = 42;
+        }
+    }
+    const auto facade = firstPersonSceneryProfile(
+        facadePixels.data(), facadeWidth, facadeHeight);
+    require(facade.fixed && !firstPersonSceneryIsLarge(facadeWidth, 198),
+        "clean map-aligned facade bypasses the aspect-ratio cutoff");
+    require(firstPersonSceneryHasMapAlignedBase(facade.slope, 0.3),
+        "accept Fallout's first map-axis slope");
+    require(firstPersonSceneryHasMapAlignedBase(0.75, 0.3),
+        "accept Fallout's other map-axis slope");
+    require(!firstPersonSceneryHasMapAlignedBase(0.0, 0.3),
+        "reject non-map-aligned base");
+    require(!firstPersonSceneryHasMapAlignedBase(-0.25, 2.1),
+        "reject noisy composite base");
+    std::vector<unsigned char> noisyFacadePixels(facadeWidth * facadeHeight, 0);
+    for (int x = 0; x < facadeWidth; x++) {
+        const int offset = (x / 8) % 2 == 0 ? -10 : 10;
+        const int bottom = 270 - x / 4 + offset;
+        for (int y = bottom - 198; y < bottom; y++) {
+            noisyFacadePixels[y * facadeWidth + x] = 42;
+        }
+    }
+    require(!firstPersonSceneryProfile(
+                noisyFacadePixels.data(), facadeWidth, facadeHeight)
+                 .fixed,
+        "irregular wide art must not be forced into the slab path");
+
     std::fill(pixels.begin(), pixels.end(), 0);
     require(!firstPersonSceneryProfile(pixels.data(), width, height).fixed, "transparent art");
     std::vector<unsigned char> slopingPixels(width * 260, 0);

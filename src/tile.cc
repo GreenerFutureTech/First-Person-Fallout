@@ -135,6 +135,8 @@ struct TileFirstPersonDoorCapSpan {
 
 struct TileFirstPersonActorRenderContext {
     MapElevation elevation;
+    double backwallY;
+    bool hasTempleBackwall;
     double cameraX;
     double cameraY;
     double directionX;
@@ -178,6 +180,10 @@ static void tileFirstPersonTopologyMarkObject(Object* object, void* context);
 static void tileFirstPersonSnapshotTopologyObject(Object* object, void* context);
 static void tileFirstPersonGrayboxMarkObject(Object* object, void* context);
 static void tileFirstPersonRenderActor(Object* object, void* context);
+static bool tileFirstPersonIsTempleBackwall(const Object* object);
+static void tileFirstPersonFindTempleBackwallBounds(Object* object, void* context);
+static double tileFirstPersonGetTempleBackwallY(MapElevation elevation, double cameraY,
+    bool* found);
 static const std::vector<unsigned char>* tileFirstPersonGetActorOutlinePixels(
     const unsigned char* pixels,
     int width,
@@ -1643,8 +1649,13 @@ static void tileRenderFirstPersonPreview()
     };
     tileFirstPersonRenderExitGridMarkers(gFirstPersonPreviewExitGridTiles, &exitGridContext);
 
+    bool hasTempleBackwall = false;
+    const double templeBackwallY = tileFirstPersonGetTempleBackwallY(
+        gElevation, cameraY, &hasTempleBackwall);
     TileFirstPersonActorRenderContext actorContext = {
         gElevation,
+        templeBackwallY,
+        hasTempleBackwall,
         cameraX,
         cameraY,
         directionX,
@@ -2078,11 +2089,12 @@ static void tileFirstPersonGrayboxMarkObject(Object* object, void* context)
 }
 
 static bool tileFirstPersonRenderLargeScenery(Object* object,
-    const TileFirstPersonActorRenderContext* context, double worldX, double worldY)
+    const TileFirstPersonActorRenderContext* context, double worldX, double worldY,
+    bool templeBackwall)
 {
     // Backdrops can be NO_BLOCK and use separate invisible blocking hexes
     // (including the starting map). Classify the artwork, not collision flags.
-    if ((object->flags & OBJECT_FLAT) != OBJECT_NONE) {
+    if (!templeBackwall && (object->flags & OBJECT_FLAT) != OBJECT_NONE) {
         return false;
     }
     Proto* proto = nullptr;
@@ -2095,7 +2107,7 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
         return false;
     }
     const ConstBuffer2D frame = image.getBuffer();
-    if (frame.width < 160 || frame.height < 64) {
+    if (!templeBackwall && (frame.width < 160 || frame.height < 64)) {
         return false;
     }
     // Use art identity rather than a cache allocation address, which can be
@@ -2111,11 +2123,17 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
         found = profiles.find(key);
     }
     const FirstPersonSceneryProfile& profile = found->second;
-    if (!profile.fixed) {
+    if (!profile.fixed && !templeBackwall) {
         return false;
     }
-    const FirstPersonScenerySlab slab = firstPersonScenerySlab(profile, worldX, worldY,
-        image.getXOffset() + object->x, image.getYOffset() + object->y);
+    if (templeBackwall && profile.left >= profile.right) {
+        return false;
+    }
+    const FirstPersonScenerySlab slab = templeBackwall
+        ? firstPersonSceneryBackwallSlab(profile, worldX, context->backwallY,
+              image.getXOffset() + object->x)
+        : firstPersonScenerySlab(profile, worldX, worldY,
+              image.getXOffset() + object->x, image.getYOffset() + object->y);
     const bool gpu = screenIsHardwareAccelerated();
     BillboardClipBands bands;
     const auto columns = firstPersonSceneryColumns(slab, context->cameraX, context->cameraY,
@@ -2195,6 +2213,67 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
     return true;
 }
 
+static bool tileFirstPersonIsTempleBackwall(const Object* object)
+{
+    if (object == nullptr || ProtoId(object).objectType() != OBJ_TYPE_SCENERY) {
+        return false;
+    }
+
+    switch (ProtoId(object).protoId()) {
+    case 1359: // TEMPLE01.FRM
+    case 1360: // TEMPLE02.FRM
+    case 1361: // TEMPLE03.FRM
+    case 1362: // TEMPLE04.FRM
+    case 1363: // TEMPLE05.FRM
+    case 1364: // TEMPLE06.FRM
+    case 1368: // temple07.frm
+    case 1369: // temple08.frm
+        return true;
+    default:
+        return false;
+    }
+}
+
+struct TileFirstPersonTempleBackwallBounds {
+    MapElevation elevation;
+    double minimumY = std::numeric_limits<double>::infinity();
+    double maximumY = -std::numeric_limits<double>::infinity();
+};
+
+static void tileFirstPersonFindTempleBackwallBounds(Object* object, void* context)
+{
+    auto* bounds = static_cast<TileFirstPersonTempleBackwallBounds*>(context);
+    if (!tileFirstPersonIsTempleBackwall(object)
+        || object->elevation != bounds->elevation
+        || (object->flags & OBJECT_HIDDEN) != OBJECT_NONE
+        || !tileIsValid(object->tile)) {
+        return;
+    }
+
+    double worldX;
+    double worldY;
+    if (!tileFirstPersonGetWorldPosition(object->tile, &worldX, &worldY)) {
+        return;
+    }
+    bounds->minimumY = std::min(bounds->minimumY, worldY);
+    bounds->maximumY = std::max(bounds->maximumY, worldY);
+}
+
+static double tileFirstPersonGetTempleBackwallY(MapElevation elevation, double cameraY,
+    bool* found)
+{
+    TileFirstPersonTempleBackwallBounds bounds;
+    bounds.elevation = elevation;
+    objectVisitAll(tileFirstPersonFindTempleBackwallBounds, &bounds);
+    *found = std::isfinite(bounds.minimumY) && std::isfinite(bounds.maximumY);
+    if (!*found) {
+        return 0.0;
+    }
+
+    const double middle = (bounds.minimumY + bounds.maximumY) * 0.5;
+    return cameraY < middle ? bounds.maximumY : bounds.minimumY;
+}
+
 static void tileFirstPersonRenderActor(Object* object, void* context)
 {
     const TileFirstPersonActorRenderContext* renderContext =
@@ -2224,9 +2303,15 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         return;
     }
 
+    const bool templeBackwall = renderContext->hasTempleBackwall
+        && tileFirstPersonIsTempleBackwall(object);
     if (objectType == OBJ_TYPE_SCENERY
-        && tileFirstPersonRenderLargeScenery(object, renderContext, objectX, objectY)) {
+        && tileFirstPersonRenderLargeScenery(object, renderContext, objectX, objectY,
+            templeBackwall)) {
         return;
+    }
+    if (templeBackwall) {
+        objectY = renderContext->backwallY;
     }
 
     const double relativeX = objectX - renderContext->cameraX;
