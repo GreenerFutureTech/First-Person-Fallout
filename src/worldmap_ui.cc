@@ -373,6 +373,7 @@ static int wmWorldMapFunc(int a1)
                         if (wmGenData.encounterMapId != -1) {
                             wmFadeOut();
                             mapLoadById(wmGenData.encounterMapId);
+                            wmFadeIn();
                         }
                         break;
                     }
