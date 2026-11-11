@@ -172,21 +172,30 @@ to another map only after identifying its specific blocked-floor landmarks
 and validating it in-game.
 
 On Arroyo Village, all three pieces of the central Stone Monument (scenery
-prototypes 937-939, including the `head1.frm` head at prototype 938) are
-rendered as enlarged, depth-aware slabs. The head anchors suppression of its
-nine-tile front wall segment (wall prototype 621) in F11 so the monument fills
-that space rather than appearing behind a row of graybox columns. Other wall
-pieces and collision remain unchanged. Large generic scenery whose opaque base follows
-a map-axis slope is also treated as an edge backdrop when its object tile is
-within 1.5 first-person world units of the corresponding map-grid edge. The
-art's base slope selects which edge direction to use; transparent pixels are
-preserved, and the backdrop remains depth-tested against walls. This replaces
-the previous Arroyo Village-only prototype list for the Mountain and Cavern
-backdrops (1370 and 1371). The initial heuristic uses the rectangular tile-grid
-bounds, not the playable area's potentially irregular boundary. The F9
+prototypes 937-939) are suppressed in F11 and replaced by the single composite
+`art/scenery/arroyo_monument.frm` image. Its transparent PNG source is
+`tools/assets/arroyo_monument.png`; palette index 0 retains the cutout. The
+composite is anchored at the central head object's tile and scaled to match the
+original head FRM's placement offsets. Its 0.16 scale is half the previous
+composite size. It is rendered as one depth-aware slab, so the original head
+and posts are not drawn beside or over it. The head still anchors
+suppression of its nine-tile front wall segment (wall prototype 621) in F11.
+Other wall pieces, collision, and the isometric view remain unchanged.
+Large generic scenery whose
+opaque base follows a map-axis slope is also treated as an edge backdrop when
+its object tile is within 1.5 first-person world units of the corresponding
+map-grid edge. The art's base slope selects which edge direction to use; transparent pixels are
+preserved, and the backdrop remains depth-tested against walls. For the F11
+preview only, the scenery object with prototype 1370 at tile 8502, elevation 0
+is hidden on Arroyo Village. The initial heuristic uses the rectangular
+tile-grid bounds, not the playable area's potentially irregular boundary. The F9
 topology overlay shows the center ray's first solid wall hit as a yellow tile
 outline and prints its tile number, row, and column for diagnosing occlusion
 mismatches.
+The supplied Arroyo Village cave panorama is centered behind the exit-grid
+tiles that lead to Arroyo Caves, half a world unit north of the entrance. It
+renders at 40% of its native world size and takes priority over overlapping
+map-edge scenery FRMs, while retaining wall, door-cap and floor occlusion.
 
 ### Diagnosing scenery that draws through walls
 

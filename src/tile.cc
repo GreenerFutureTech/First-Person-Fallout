@@ -46,6 +46,8 @@
 #include "text_font.h"
 #include "text_object.h"
 #include "window_manager.h"
+#include "first_person_stone_wall_texture.h"
+#include "first_person_leather_wall_texture.h"
 
 namespace fallout {
 
@@ -56,12 +58,19 @@ constexpr int kArroyoTempleHiddenSceneryProtoId = 931;
 constexpr int kArroyoTempleHiddenSceneryTile = 12727;
 constexpr int kArroyoTempleHiddenSceneryElevation = 2;
 constexpr double kFirstPersonMapEdgeBackdropSnapDistance = 1.5;
+constexpr int kArroyoVillageHiddenSceneryProtoId = 1370;
+constexpr int kArroyoVillageHiddenSceneryTile = 8502;
+constexpr int kArroyoVillageHiddenSceneryElevation = 0;
+constexpr int kArroyoVillageMonumentProfileFrameId = 424;
+constexpr char kArroyoVillageMonumentFrmPath[] = "arroyo_monument.frm";
 // Along the facade normal, 32 projected pixels equal one world unit.
 constexpr double kFirstPersonTemplePanelRowGap = 64.0;
 // Fallout tile rows/columns each span half a world unit.
 constexpr double kFirstPersonTempleBackwallRowsBack = 1.0;
 constexpr double kFirstPersonTempleBackwallProjectedXOffset = -96.0;
 constexpr char kFirstPersonTempleBackwallFrmPath[] = "temple_backdrop.frm";
+constexpr char kFirstPersonArroyoVillageCaveBackdropFrmPath[] = "cave_backdrop.frm";
+constexpr double kFirstPersonCaveBackdropDepthBias = 0.001;
 
 static bool tileScrollLeashUnlocked();
 
@@ -95,6 +104,7 @@ struct TileFirstPersonGrayboxRenderContext {
     int arroyoMonumentTile;
     unsigned char* wallCells;
     unsigned char* wallOrientations;
+    MaterialType* wallMaterials;
     std::vector<int>* exitGridTiles;
     const std::vector<int>* templeWallAreaLandmarkTiles;
 };
@@ -158,6 +168,12 @@ struct TileFirstPersonTemplePanelLayout {
     int drawOrder;
 };
 
+struct TileFirstPersonCaveExitSearchContext {
+    double worldXSum = 0.0;
+    double northmostWorldY = std::numeric_limits<double>::infinity();
+    int count = 0;
+};
+
 struct TileFirstPersonActorRenderContext {
     MapElevation elevation;
     double backwallY;
@@ -178,8 +194,11 @@ struct TileFirstPersonActorRenderContext {
     std::vector<double>* actorDepths;
     std::vector<unsigned int>* actorDepthStamps;
     unsigned int actorDepthStamp;
+    std::vector<unsigned int>* caveBackdropPixelStamps;
+    std::vector<double>* caveBackdropColumnDepths;
     std::vector<TileFirstPersonActorHitTarget>* hitTargets;
     bool templeBackwallCompositeRendered;
+    bool arroyoVillageCaveBackdropRendered;
 };
 
 struct TileFirstPersonExitGridRenderContext {
@@ -207,18 +226,21 @@ static unsigned int tileFirstPersonTextureNoise(int x, int y, unsigned int seed)
 static void tileFirstPersonTopologyMarkObject(Object* object, void* context);
 static void tileFirstPersonSnapshotTopologyObject(Object* object, void* context);
 static void tileFirstPersonFindArroyoVillageMonument(Object* object, void* context);
+static void tileFirstPersonFindArroyoVillageCaveExitGrid(Object* object, void* context);
 static void tileFirstPersonFindTempleWallAreaLandmark(Object* object, void* context);
 static void tileFirstPersonMarkTempleBlockedAreaWalls(
     const TileFirstPersonGrayboxRenderContext* renderContext);
 static void tileFirstPersonGrayboxMarkObject(Object* object, void* context);
 static void tileFirstPersonRenderActor(Object* object, void* context);
-static bool tileFirstPersonIsHiddenArroyoTempleScenery(const Object* object);
+static bool tileFirstPersonIsHiddenScenery(const Object* object);
 static bool tileFirstPersonIsTempleBackwall(const Object* object);
 static void tileFirstPersonFindTempleBackwallBounds(Object* object, void* context);
 static double tileFirstPersonGetTempleBackwallY(MapElevation elevation, int entranceTile,
     double* backwallIsoBaseY, bool* found,
     std::vector<TileFirstPersonTemplePanelLayout>* panelLayouts);
 static bool tileFirstPersonRenderTempleBackwallComposite(
+    const TileFirstPersonActorRenderContext* context);
+static bool tileFirstPersonRenderArroyoVillageCaveBackdrop(
     const TileFirstPersonActorRenderContext* context);
 static const std::vector<unsigned char>* tileFirstPersonGetActorOutlinePixels(
     const unsigned char* pixels,
@@ -281,6 +303,8 @@ static constexpr int kFirstPersonWallTextureSize = 64;
 static std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize> gFirstPersonStoneWallTexture;
 static std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize> gFirstPersonCaveWallTexture;
 static std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize> gFirstPersonDoorWallTexture;
+static std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize> gFirstPersonImportedStoneWallTexture;
+static std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize> gFirstPersonLeatherWallTexture;
 static bool gFirstPersonWallTexturesInitialized = false;
 static double gFirstPersonPreviewYaw = 0.0;
 static double gFirstPersonPreviewPitch = 0.0;
@@ -306,6 +330,7 @@ static std::vector<TileFirstPersonActorHitTarget> gFirstPersonPreviewActorHitTar
 static std::vector<TileFirstPersonDoorHitTarget> gFirstPersonPreviewDoorHitTargets;
 static std::vector<unsigned char> gFirstPersonPreviewWallCells;
 static std::vector<unsigned char> gFirstPersonPreviewWallOrientations;
+static std::vector<MaterialType> gFirstPersonPreviewWallMaterials;
 static int gFirstPersonPreviewCenterRayWallTile = -1;
 static std::vector<int> gFirstPersonPreviewExitGridTiles;
 static std::vector<TileFirstPersonTopologyMarker> gFirstPersonPreviewTopologyMarkers;
@@ -909,6 +934,11 @@ static void tileFirstPersonInitializeWallTextures()
     const Color woodEdge = _colorTable[rgb555(0x2A1E18)];
     const Color woodHighlight = _colorTable[rgb555(0x806040)];
 
+    for (size_t index = 0; index < gFirstPersonImportedStoneWallTexture.size(); index++) {
+        gFirstPersonImportedStoneWallTexture[index] = _colorTable[kFirstPersonStoneWallTextureRgb555[index]];
+        gFirstPersonLeatherWallTexture[index] = _colorTable[kFirstPersonLeatherWallTextureRgb555[index]];
+    }
+
     for (int y = 0; y < kFirstPersonWallTextureSize; y++) {
         const int course = y / 16;
         const int localY = y % 16;
@@ -1112,6 +1142,7 @@ static void tileRenderFirstPersonPreview()
 
     gFirstPersonPreviewWallCells.assign(gHexGridSize, 0);
     gFirstPersonPreviewWallOrientations.assign(gHexGridSize, 0);
+    gFirstPersonPreviewWallMaterials.assign(gHexGridSize, MATERIAL_TYPE_INVALID);
     gFirstPersonPreviewExitGridTiles.clear();
     static int arroyoMonumentMap = -1;
     static int arroyoMonumentElevation = -1;
@@ -1143,6 +1174,7 @@ static void tileRenderFirstPersonPreview()
         gMapHeader.index == MAP_ARROYO_VILLAGE ? arroyoMonumentTile : -1,
         gFirstPersonPreviewWallCells.data(),
         gFirstPersonPreviewWallOrientations.data(),
+        gFirstPersonPreviewWallMaterials.data(),
         &gFirstPersonPreviewExitGridTiles,
         gMapHeader.index == MAP_ARROYO_TEMPLE ? &templeWallAreaLandmarkTiles : nullptr,
     };
@@ -1324,18 +1356,27 @@ static void tileRenderFirstPersonPreview()
     bool hasDoorCaps = false;
     static std::vector<double> actorDepths;
     static std::vector<unsigned int> actorDepthStamps;
+    static std::vector<unsigned int> caveBackdropPixelStamps;
+    static std::vector<double> caveBackdropColumnDepths;
     static unsigned int actorDepthStamp = 0;
     const size_t actorDepthSize =
         static_cast<size_t>(gTileWindowWidth) * gTileWindowHeight;
     if (actorDepths.size() != actorDepthSize) {
         actorDepths.resize(actorDepthSize);
         actorDepthStamps.assign(actorDepthSize, 0);
+        caveBackdropPixelStamps.assign(actorDepthSize, 0);
         actorDepthStamp = 0;
+    }
+    if (caveBackdropColumnDepths.size() != static_cast<size_t>(gTileWindowWidth)) {
+        caveBackdropColumnDepths.resize(gTileWindowWidth);
     }
     if (++actorDepthStamp == 0) {
         std::fill(actorDepthStamps.begin(), actorDepthStamps.end(), 0);
+        std::fill(caveBackdropPixelStamps.begin(), caveBackdropPixelStamps.end(), 0);
         actorDepthStamp = 1;
     }
+    std::fill(caveBackdropColumnDepths.begin(), caveBackdropColumnDepths.end(),
+        std::numeric_limits<double>::infinity());
 
     // Solid walls and window sills cover a continuous span from the horizon
     // down to their floor edge. Door caps end above the floor and do not hide
@@ -1373,9 +1414,11 @@ static void tileRenderFirstPersonPreview()
             * deltaDistanceY;
         int side = 0;
         unsigned char wallType = 0;
+        MaterialType wallMaterial = MATERIAL_TYPE_INVALID;
         TileFirstPersonWallOrientation wallOrientation = TILE_FIRST_PERSON_WALL_ORIENTATION_CELL;
         double wallDistance = std::numeric_limits<double>::infinity();
         unsigned char windowType = 0;
+        MaterialType windowMaterial = MATERIAL_TYPE_INVALID;
         TileFirstPersonWallOrientation windowOrientation = TILE_FIRST_PERSON_WALL_ORIENTATION_CELL;
         double windowDistance = std::numeric_limits<double>::infinity();
         int windowSide = 0;
@@ -1388,6 +1431,7 @@ static void tileRenderFirstPersonPreview()
             && mapY >= 0 && mapY < gHexGridHeight) {
             const int cellIndex = mapY * gHexGridWidth + mapX;
             wallType = gFirstPersonPreviewWallCells[cellIndex];
+            const MaterialType cellMaterial = gFirstPersonPreviewWallMaterials[cellIndex];
             if (wallType != 0) {
                 wallOrientation =
                     static_cast<TileFirstPersonWallOrientation>(
@@ -1397,6 +1441,7 @@ static void tileRenderFirstPersonPreview()
                     if (wallType == 2) {
                         if (windowDistance == std::numeric_limits<double>::infinity()) {
                             windowType = wallType;
+                            windowMaterial = cellMaterial;
                             windowOrientation = wallOrientation;
                             windowDistance = hitDistance;
                             windowSide = side;
@@ -1408,6 +1453,7 @@ static void tileRenderFirstPersonPreview()
                             doorCapSide = side;
                         }
                     } else {
+                        wallMaterial = cellMaterial;
                         wallDistance = hitDistance;
                         if (x == gTileWindowWidth / 2) {
                             gFirstPersonPreviewCenterRayWallTile =
@@ -1474,6 +1520,7 @@ static void tileRenderFirstPersonPreview()
                     if (wallType == 2) {
                         if (windowDistance == std::numeric_limits<double>::infinity()) {
                             windowType = wallType;
+                            windowMaterial = cellMaterial;
                             windowOrientation = wallOrientation;
                             windowDistance = hitDistance;
                             windowSide = wallEntryDistance >= cellEntryDistance - kIntersectionEpsilon
@@ -1489,6 +1536,7 @@ static void tileRenderFirstPersonPreview()
                                 : side;
                         }
                     } else {
+                        wallMaterial = cellMaterial;
                         wallDistance = hitDistance;
                         if (x == gTileWindowWidth / 2) {
                             gFirstPersonPreviewCenterRayWallTile =
@@ -1530,6 +1578,7 @@ static void tileRenderFirstPersonPreview()
         wallSillDepths[x] = windowDistance;
         if (wallDistance == std::numeric_limits<double>::infinity()) {
             wallType = windowType;
+            wallMaterial = windowMaterial;
             wallOrientation = windowOrientation;
             wallDistance = windowDistance;
             side = windowSide;
@@ -1565,7 +1614,7 @@ static void tileRenderFirstPersonPreview()
                 object = objectFindNextAtLocation();
             }
         }
-        const auto renderWall = [&](unsigned char type, double distance,
+        const auto renderWall = [&](unsigned char type, MaterialType material, double distance,
                                     TileFirstPersonWallOrientation orientation, int wallSide) {
             const double projectedWallHeight = gTileWindowHeight / distance;
             const bool halfHeightWall = type == 2;
@@ -1596,6 +1645,15 @@ static void tileRenderFirstPersonPreview()
             if (textureX < 0) {
                 textureX += kFirstPersonWallTextureSize;
             }
+            int leatherTextureX = textureX;
+            if (material == MATERIAL_TYPE_LEATHER) {
+                leatherTextureX = static_cast<int>(
+                    floor(wallCoordinate * (kFirstPersonWallTextureSize / 2)))
+                    % kFirstPersonWallTextureSize;
+                if (leatherTextureX < 0) {
+                    leatherTextureX += kFirstPersonWallTextureSize;
+                }
+            }
             const double textureHeight = std::max(1.0, projectedWallHeight);
             const int faceShade = wallSide == 0 ? 116 : 96;
             const int distanceShade = std::min(48, static_cast<int>(distance * 7.0));
@@ -1608,8 +1666,14 @@ static void tileRenderFirstPersonPreview()
             }
             for (int y = wallTop; y <= wallBottom; y += wallRenderStep) {
                 const bool brickTexture = type != 3 || y < doorSplitY;
+                const bool stoneWall = brickTexture && material == MATERIAL_TYPE_STONE;
+                const bool leatherWall = brickTexture && material == MATERIAL_TYPE_LEATHER;
                 const auto& texture = brickTexture
-                    ? gFirstPersonStoneWallTexture
+                    ? stoneWall
+                        ? gFirstPersonImportedStoneWallTexture
+                        : leatherWall
+                            ? gFirstPersonLeatherWallTexture
+                            : gFirstPersonStoneWallTexture
                     : gFirstPersonDoorWallTexture;
                 const double textureOffset = type == 3 && !brickTexture
                     ? y - doorSplitY
@@ -1620,8 +1684,9 @@ static void tileRenderFirstPersonPreview()
                 int textureY = static_cast<int>(
                     textureOffset * kFirstPersonWallTextureSize / textureScaleHeight);
                 textureY %= kFirstPersonWallTextureSize;
-                const int textureIndex = textureY * kFirstPersonWallTextureSize + textureX;
-                const Color texel = brickTexture && useCaveWallTexture
+                const int textureIndex = textureY * kFirstPersonWallTextureSize
+                    + (leatherWall ? leatherTextureX : textureX);
+                const Color texel = brickTexture && useCaveWallTexture && !stoneWall && !leatherWall
                     ? gFirstPersonCaveWallTexture[textureIndex]
                     : texture[textureIndex];
                 const unsigned char color = intensityColorTable[texel][light];
@@ -1641,15 +1706,16 @@ static void tileRenderFirstPersonPreview()
         };
         if (windowDistance != std::numeric_limits<double>::infinity()
             && wallDepths[x] != std::numeric_limits<double>::infinity()) {
-            renderWall(wallType, wallDepths[x], wallOrientation, side);
-            renderWall(windowType, windowDistance, windowOrientation, windowSide);
+            renderWall(wallType, wallMaterial, wallDepths[x], wallOrientation, side);
+            renderWall(windowType, windowMaterial, windowDistance, windowOrientation, windowSide);
         } else if (wallDistance != std::numeric_limits<double>::infinity()) {
-            renderWall(wallType, wallDistance, wallOrientation, side);
+            renderWall(wallType, wallMaterial, wallDistance, wallOrientation, side);
         } else if (windowDistance != std::numeric_limits<double>::infinity()) {
-            renderWall(windowType, windowDistance, windowOrientation, windowSide);
+            renderWall(windowType, windowMaterial, windowDistance, windowOrientation, windowSide);
         }
         if (doorCapDistance != std::numeric_limits<double>::infinity()) {
-            renderWall(5, doorCapDistance, doorCapOrientation, doorCapSide);
+            renderWall(5, MATERIAL_TYPE_INVALID, doorCapDistance,
+                doorCapOrientation, doorCapSide);
         }
     }
 
@@ -1762,11 +1828,16 @@ static void tileRenderFirstPersonPreview()
         &actorDepths,
         &actorDepthStamps,
         actorDepthStamp,
+        &caveBackdropPixelStamps,
+        &caveBackdropColumnDepths,
         &gFirstPersonPreviewActorHitTargets,
+        false,
         false,
     };
     actorContext.templeBackwallCompositeRendered =
         tileFirstPersonRenderTempleBackwallComposite(&actorContext);
+    actorContext.arroyoVillageCaveBackdropRendered =
+        tileFirstPersonRenderArroyoVillageCaveBackdrop(&actorContext);
     const unsigned int actorStart = profileFrame ? getTicks() : 0;
     objectVisitAll(tileFirstPersonRenderActor, &actorContext);
     const unsigned int actorEnd = profileFrame ? getTicks() : 0;
@@ -2106,6 +2177,28 @@ static void tileFirstPersonFindArroyoVillageMonument(Object* object, void* conte
     }
 }
 
+static void tileFirstPersonFindArroyoVillageCaveExitGrid(Object* object, void* context)
+{
+    if (object->elevation != gElevation
+        || (object->flags & OBJECT_HIDDEN) != OBJECT_NONE
+        || !isExitGridProtoId(object)
+        || object->data.misc.map != MAP_ARROYO_CAVES
+        || !tileIsValid(object->tile)) {
+        return;
+    }
+
+    double worldX;
+    double worldY;
+    if (!tileFirstPersonGetWorldPosition(object->tile, &worldX, &worldY)) {
+        return;
+    }
+
+    auto* search = static_cast<TileFirstPersonCaveExitSearchContext*>(context);
+    search->worldXSum += worldX;
+    search->northmostWorldY = std::min(search->northmostWorldY, worldY);
+    search->count++;
+}
+
 static void tileFirstPersonFindTempleWallAreaLandmark(Object* object, void* context)
 {
     const int protoId = ProtoId(object).protoId();
@@ -2261,7 +2354,7 @@ static void tileFirstPersonGrayboxMarkObject(Object* object, void* context)
     if (objectType != OBJ_TYPE_WALL && objectType != OBJ_TYPE_SCENERY) {
         return;
     }
-    if (tileFirstPersonIsHiddenArroyoTempleScenery(object)) {
+    if (tileFirstPersonIsHiddenScenery(object)) {
         return;
     }
     if (objectType == OBJ_TYPE_WALL
@@ -2345,6 +2438,10 @@ static void tileFirstPersonGrayboxMarkObject(Object* object, void* context)
     if (cellWallType == 0 || wallType == 3 || wallType == 5) {
         cellWallType = wallType;
         renderContext->wallOrientations[renderHexTile] = wallOrientation;
+        renderContext->wallMaterials[renderHexTile] =
+            objectType == OBJ_TYPE_WALL && hasProto
+            ? proto->wall.material
+            : MATERIAL_TYPE_INVALID;
     }
 }
 
@@ -2462,7 +2559,7 @@ static bool tileFirstPersonRenderTempleBackwallComposite(
             Object* object = const_cast<Object*>(layout->object);
             if (object == nullptr || object->elevation != context->elevation
                 || (object->flags & OBJECT_HIDDEN) != OBJECT_NONE
-                || tileFirstPersonIsHiddenArroyoTempleScenery(object)
+                || tileFirstPersonIsHiddenScenery(object)
                 || !tileIsValid(object->tile)
                 || firstPersonSceneryIsTempleBackwallSuppressedProto(
                     ProtoId(object).protoId())) {
@@ -2670,6 +2767,147 @@ static bool tileFirstPersonRenderTempleBackwallComposite(
     return true;
 }
 
+static bool tileFirstPersonRenderArroyoVillageCaveBackdrop(
+    const TileFirstPersonActorRenderContext* context)
+{
+    if (gMapHeader.index != MAP_ARROYO_VILLAGE || gHexGridWidth <= 0) {
+        return false;
+    }
+
+    FrmImage image;
+    if (!image.lock(OBJ_TYPE_SCENERY,
+            kFirstPersonArroyoVillageCaveBackdropFrmPath, 0, ROTATION_NE)) {
+        static bool loggedMissingBackdrop = false;
+        if (!loggedMissingBackdrop) {
+            debugPrint("F11 Arroyo Village cave backdrop asset not found: art\\scenery\\%s\n",
+                kFirstPersonArroyoVillageCaveBackdropFrmPath);
+            loggedMissingBackdrop = true;
+        }
+        return false;
+    }
+
+    const ConstBuffer2D frame = image.getBuffer();
+    if (!frame || frame.width <= 0 || frame.height <= 0) {
+        debugPrint("F11 Arroyo Village cave backdrop asset is invalid: art\\scenery\\%s\n",
+            kFirstPersonArroyoVillageCaveBackdropFrmPath);
+        return false;
+    }
+
+    FirstPersonSceneryProfile profile;
+    profile.width = frame.width;
+    profile.height = frame.height;
+    profile.left = 0;
+    profile.right = frame.width;
+    constexpr double backdropScale = 0.4;
+    static int cachedMap = -1;
+    static int cachedElevation = -1;
+    static bool hasCaveExit = false;
+    static double caveExitX = 0.0;
+    static double caveBackdropY = 0.0;
+    if (cachedMap != static_cast<int>(gMapHeader.index)
+        || cachedElevation != static_cast<int>(context->elevation)) {
+        TileFirstPersonCaveExitSearchContext search;
+        objectVisitAll(tileFirstPersonFindArroyoVillageCaveExitGrid, &search);
+        hasCaveExit = search.count > 0;
+        if (hasCaveExit) {
+            caveExitX = search.worldXSum / search.count;
+            // Put the panorama half a world unit behind the cave exit grid.
+            caveBackdropY = search.northmostWorldY - 0.5;
+        }
+        cachedMap = static_cast<int>(gMapHeader.index);
+        cachedElevation = static_cast<int>(context->elevation);
+    }
+    if (!hasCaveExit) {
+        return false;
+    }
+    const double projectedCenterX = caveExitX * 48.0 + caveBackdropY * 32.0;
+    FirstPersonScenerySlab slab = firstPersonSceneryBackwallSlab(
+        profile, projectedCenterX, caveBackdropY, 0, 0.0);
+    slab.length *= backdropScale;
+    const FirstPersonSceneryColumns columns = firstPersonSceneryColumns(slab,
+        context->cameraX, context->cameraY, context->directionX, context->directionY,
+        context->cameraPlaneX, context->cameraPlaneY, gTileWindowWidth);
+    const bool gpu = screenIsHardwareAccelerated();
+    const int firstColumn = std::max(0, columns.first);
+    const int lastColumn = std::min(gTileWindowWidth, columns.end);
+    static BillboardClipBands bands;
+    for (int x = firstColumn; x < lastColumn; x++) {
+        const double cameraX = 2.0 * x / gTileWindowWidth - 1.0;
+        const double rayX = context->directionX + context->cameraPlaneX * cameraX;
+        const double rayY = context->directionY + context->cameraPlaneY * cameraX;
+        FirstPersonSceneryHit hit;
+        if (!firstPersonSceneryIntersect(slab, context->cameraX, context->cameraY,
+                rayX, rayY, hit)) {
+            continue;
+        }
+
+        const int sourceX = std::clamp(static_cast<int>(hit.u * frame.width),
+            0, frame.width - 1);
+        const double scale = gTileWindowHeight / hit.depth;
+        const int artHeight = std::max(1,
+            static_cast<int>(scale * frame.height / (48.0 / backdropScale)));
+        const int base = context->horizonY + static_cast<int>(scale * 0.5);
+        const int top = base - artHeight;
+        const int firstY = std::max(0, top);
+        const int lastY = std::min(gTileWindowHeight, base);
+        if (firstY >= lastY) {
+            continue;
+        }
+
+        bands.reset(firstY, lastY);
+        bands.addOccluder(context->horizonY, lastY);
+        if (context->doorCapDepths != nullptr) {
+            const auto& cap = (*context->doorCapDepths)[x];
+            bands.addOccluder(cap.top, cap.bottom);
+        }
+        bands.addOccluder(firstPersonSceneryFloorOcclusionTop(
+                              hit.depth, context->horizonY, gTileWindowHeight),
+            lastY);
+        const std::vector<int>& edges = bands.boundaries();
+        for (size_t band = 0; band + 1 < edges.size(); band++) {
+            const int bandTop = edges[band];
+            const int bandBottom = edges[band + 1];
+            const double wallDepth = tileFirstPersonGetWallDepthAt(x, bandTop,
+                context->horizonY, context->wallDepths, context->wallSillDepths,
+                context->doorCapDepths);
+            if (hit.depth >= wallDepth
+                || (bandTop > context->horizonY
+                    && hit.depth >= (gTileWindowHeight * 0.5)
+                            / (bandTop - context->horizonY))) {
+                continue;
+            }
+            (*context->caveBackdropColumnDepths)[x] =
+                std::min((*context->caveBackdropColumnDepths)[x], hit.depth);
+
+            if (gpu) {
+                const SDL_Rect destination = { x - sourceX, top, frame.width, artHeight };
+                const SDL_Rect clip = { x, bandTop, 1, bandBottom - bandTop };
+                gpuBillboardSubmit(frame.data, frame.width, frame.height,
+                    destination, clip, hit.depth);
+                continue;
+            }
+            for (int y = bandTop; y < bandBottom; y++) {
+                const int sourceY = std::clamp(static_cast<int>(
+                    static_cast<double>(y - top) * frame.height / artHeight),
+                    0, frame.height - 1);
+                const unsigned char color = frame.data[sourceY * frame.width + sourceX];
+                if (color == 0) {
+                    continue;
+                }
+                const size_t index = static_cast<size_t>(y) * gTileWindowWidth + x;
+                if ((*context->actorDepthStamps)[index] != context->actorDepthStamp
+                    || hit.depth < (*context->actorDepths)[index]) {
+                    (*context->actorDepthStamps)[index] = context->actorDepthStamp;
+                    (*context->actorDepths)[index] = hit.depth;
+                    (*context->caveBackdropPixelStamps)[index] = context->actorDepthStamp;
+                    gTileWindowBuffer[y * gTileWindowPitch + x] = color;
+                }
+            }
+        }
+    }
+    return true;
+}
+
 static bool tileFirstPersonRenderLargeScenery(Object* object,
     const TileFirstPersonActorRenderContext* context, double worldX, double worldY,
     bool templeBackwall)
@@ -2678,7 +2916,12 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
         && ProtoId(object).objectType() == OBJ_TYPE_SCENERY
         && firstPersonSceneryIsArroyoVillageMonumentProto(
             ProtoId(object).protoId());
-    constexpr double kArroyoMonumentScale = 1.6;
+    const bool arroyoVillageMonumentComposite = arroyoVillageMonument
+        && ProtoId(object).protoId() == kArroyoVillageMonumentHeadProtoId;
+    if (arroyoVillageMonument && !arroyoVillageMonumentComposite) {
+        return true;
+    }
+    constexpr double kArroyoMonumentScale = 0.25;
     Proto* proto = nullptr;
     if (protoGetProto(object, &proto) != 0
         || (!templeBackwall && !arroyoVillageMonument
@@ -2688,12 +2931,45 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
     const Rotation rotation = rotationIsValid(object->rotation) ? object->rotation : ROTATION_NE;
     const FrmId sceneryFrmId = templeBackwall
         ? tileFirstPersonTempleBackwallFrmId(object)
+        : arroyoVillageMonumentComposite
+        ? FrmId(OBJ_TYPE_ITEM, kArroyoVillageMonumentProfileFrameId)
         : FrmId(object);
     FrmImage image;
-    if (!image.lock(sceneryFrmId, object->frame, rotation)) {
+    const bool imageLocked = arroyoVillageMonumentComposite
+        ? image.lock(OBJ_TYPE_SCENERY, kArroyoVillageMonumentFrmPath, 0, rotation)
+        : image.lock(sceneryFrmId, object->frame, rotation);
+    if (!imageLocked) {
+        if (arroyoVillageMonumentComposite) {
+            static bool loggedMissingMonument = false;
+            if (!loggedMissingMonument) {
+                debugPrint("F11 Arroyo Village monument asset not found: art\\scenery\\%s\n",
+                    kArroyoVillageMonumentFrmPath);
+                loggedMissingMonument = true;
+            }
+            return true;
+        }
         return false;
     }
     const ConstBuffer2D frame = image.getBuffer();
+    if (!frame || frame.width <= 0 || frame.height <= 0) {
+        if (arroyoVillageMonumentComposite) {
+            debugPrint("F11 Arroyo Village monument asset is invalid: art\\scenery\\%s\n",
+                kArroyoVillageMonumentFrmPath);
+            return true;
+        }
+        return false;
+    }
+    int placementXOffset = image.getXOffset();
+    int placementYOffset = image.getYOffset();
+    if (arroyoVillageMonumentComposite) {
+        FrmImage placementImage;
+        if (!placementImage.lock(FrmId(object), object->frame, rotation)) {
+            debugPrint("F11 Arroyo Village monument placement art could not be loaded\n");
+            return true;
+        }
+        placementXOffset = placementImage.getXOffset() + 100;
+        placementYOffset = placementImage.getYOffset();
+    }
     if (!templeBackwall && !arroyoVillageMonument
         && (frame.width < 160 || frame.height < 64)) {
         return false;
@@ -2723,6 +2999,9 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
     }
     if ((templeBackwall || arroyoVillageMonument || mapEdgeBackdrop)
         && profile.left >= profile.right) {
+        if (arroyoVillageMonumentComposite) {
+            return true;
+        }
         return false;
     }
     double projectedIsoX = firstPersonSceneryBackwallProjectedX(worldX, worldY);
@@ -2739,11 +3018,15 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
     if (templeBackwall) {
         projectedIsoX += kFirstPersonTempleBackwallProjectedXOffset;
     }
+    const double monumentVerticalOffset =
+        -(placementYOffset + object->y) / 48.0;
     const double projectedIsoY = firstPersonSceneryBackwallProjectedY(worldX, worldY)
         + image.getYOffset() + object->y;
     const double backwallVerticalOffset = templeBackwall
         ? templePanelVerticalOffset
-        : arroyoVillageMonument || mapEdgeBackdrop
+        : arroyoVillageMonument
+        ? monumentVerticalOffset
+        : mapEdgeBackdrop
         ? 0.0
         : firstPersonSceneryBackwallVerticalOffset(
               context->backwallIsoBaseY, projectedIsoY);
@@ -2775,7 +3058,7 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
             image.getXOffset() + object->x, backwallVerticalOffset);
     } else if (arroyoVillageMonument) {
         slab = firstPersonSceneryBackwallSlab(profile, projectedIsoX, worldY,
-            image.getXOffset() + object->x, backwallVerticalOffset);
+            placementXOffset + object->x, backwallVerticalOffset);
     } else {
         slab = firstPersonScenerySlab(profile, worldX, worldY,
             image.getXOffset() + object->x, image.getYOffset() + object->y);
@@ -2785,6 +3068,9 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
         slab.thickness = 0.35;
     }
     const bool gpu = screenIsHardwareAccelerated();
+    const bool caveBackdropPanel = context->arroyoVillageCaveBackdropRendered
+        && mapEdgeBackdrop;
+    const bool allowEqualDepth = templeBackwall;
     BillboardClipBands bands;
     const auto columns = firstPersonSceneryColumns(slab, context->cameraX, context->cameraY,
         context->directionX, context->directionY, context->cameraPlaneX, context->cameraPlaneY,
@@ -2862,7 +3148,15 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
                 // these strips correctly with actors and other scenery.
                 const SDL_Rect destination = { x - sourceX, top, frame.width, artHeight };
                 const SDL_Rect clip = { x, bandTop, 1, bandBottom - bandTop };
-                gpuBillboardSubmit(frame.data, frame.width, frame.height, destination, clip, hit.depth);
+                double billboardDepth = hit.depth;
+                if (caveBackdropPanel
+                    && std::isfinite((*context->caveBackdropColumnDepths)[x])) {
+                    billboardDepth = std::max(billboardDepth,
+                        (*context->caveBackdropColumnDepths)[x]
+                            + kFirstPersonCaveBackdropDepthBias);
+                }
+                gpuBillboardSubmit(frame.data, frame.width, frame.height,
+                    destination, clip, billboardDepth);
                 continue;
             }
             for (int y = bandTop; y < bandBottom; y++) {
@@ -2873,9 +3167,14 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
                     continue;
                 }
                 const size_t index = static_cast<size_t>(y) * gTileWindowWidth + x;
+                if (caveBackdropPanel
+                    && (*context->caveBackdropPixelStamps)[index]
+                        == context->actorDepthStamp) {
+                    continue;
+                }
                 if ((*context->actorDepthStamps)[index] != context->actorDepthStamp
                     || firstPersonSceneryShouldReplaceDepth(hit.depth,
-                        (*context->actorDepths)[index], templeBackwall)) {
+                        (*context->actorDepths)[index], allowEqualDepth)) {
                     (*context->actorDepthStamps)[index] = context->actorDepthStamp;
                     (*context->actorDepths)[index] = hit.depth;
                     gTileWindowBuffer[y * gTileWindowPitch + x] = color;
@@ -3195,9 +3494,16 @@ static double tileFirstPersonGetTempleBackwallY(MapElevation elevation, int entr
     return wallAnchor.y - kFirstPersonTempleBackwallRowsBack;
 }
 
-static bool tileFirstPersonIsHiddenArroyoTempleScenery(const Object* object)
+static bool tileFirstPersonIsHiddenScenery(const Object* object)
 {
     const bool isScenery = FrmId(object->fid).objectType() == OBJ_TYPE_SCENERY;
+    if (isScenery && gMapHeader.index == MAP_ARROYO_VILLAGE
+        && ProtoId(object).protoId() == kArroyoVillageHiddenSceneryProtoId
+        && object->tile == kArroyoVillageHiddenSceneryTile
+        && object->elevation == kArroyoVillageHiddenSceneryElevation) {
+        return true;
+    }
+
     if (isScenery && gMapHeader.index == MAP_ARROYO_TEMPLE
         && firstPersonSceneryIsTempleBackwallSuppressedProto(
             ProtoId(object).protoId())) {
@@ -3225,7 +3531,7 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         return;
     }
 
-    if (tileFirstPersonIsHiddenArroyoTempleScenery(object)) {
+    if (tileFirstPersonIsHiddenScenery(object)) {
         return;
     }
 
@@ -3248,10 +3554,11 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         return;
     }
 
-    if (objectType == OBJ_TYPE_SCENERY
-        && tileFirstPersonRenderLargeScenery(object, renderContext, objectX, objectY,
-            templeBackwall)) {
-        return;
+    if (objectType == OBJ_TYPE_SCENERY) {
+        if (tileFirstPersonRenderLargeScenery(object, renderContext, objectX, objectY,
+                templeBackwall)) {
+            return;
+        }
     }
     if (templeBackwall) {
         objectY = renderContext->backwallY;
@@ -4716,14 +5023,61 @@ static void tileRenderFirstPersonTopology()
         }
     }
 
+    const auto materialName = [](MaterialType material) {
+        switch (material) {
+        case MATERIAL_TYPE_GLASS:
+            return "Glass";
+        case MATERIAL_TYPE_METAL:
+            return "Metal";
+        case MATERIAL_TYPE_PLASTIC:
+            return "Plastic";
+        case MATERIAL_TYPE_WOOD:
+            return "Wood";
+        case MATERIAL_TYPE_DIRT:
+            return "Dirt";
+        case MATERIAL_TYPE_STONE:
+            return "Stone";
+        case MATERIAL_TYPE_CEMENT:
+            return "Cement";
+        case MATERIAL_TYPE_LEATHER:
+            return "Leather";
+        default:
+            return "Unknown";
+        }
+    };
+    const auto rayHitMaterial = [&]() {
+        if (!tileIsValid(gFirstPersonPreviewCenterRayWallTile)) {
+            return "Unknown";
+        }
+
+        Object* object = objectFindFirstAtLocation(
+            gElevation, gFirstPersonPreviewCenterRayWallTile);
+        while (object != nullptr) {
+            Proto* proto = nullptr;
+            if (protoGetProto(object, &proto) == 0) {
+                const ObjectType objectType = FrmId(object).objectType();
+                if (objectType == OBJ_TYPE_WALL) {
+                    return materialName(proto->wall.material);
+                }
+                if (objectType == OBJ_TYPE_SCENERY
+                    && proto->scenery.type == SCENERY_TYPE_DOOR) {
+                    return materialName(proto->scenery.material);
+                }
+            }
+            object = objectFindNextAtLocation();
+        }
+        return "Unknown";
+    };
+
     char rayHitLabel[64];
     if (gHexGridWidth > 0 && tileIsValid(gFirstPersonPreviewCenterRayWallTile)) {
-        std::snprintf(rayHitLabel, sizeof(rayHitLabel), "Ray hit: %d (row %d, col %d)",
+        std::snprintf(rayHitLabel, sizeof(rayHitLabel), "Ray hit: %d (row %d, col %d), mat: %s",
             gFirstPersonPreviewCenterRayWallTile,
             gFirstPersonPreviewCenterRayWallTile / gHexGridWidth,
-            gFirstPersonPreviewCenterRayWallTile % gHexGridWidth);
+            gFirstPersonPreviewCenterRayWallTile % gHexGridWidth,
+            rayHitMaterial());
     } else {
-        std::snprintf(rayHitLabel, sizeof(rayHitLabel), "Ray hit: none");
+        std::snprintf(rayHitLabel, sizeof(rayHitLabel), "Ray hit: none, mat: Unknown");
     }
     const int labelHeight = std::max(1, fontGetLineHeight());
     const int labelTop = std::max(0, gTileWindowHeight - labelHeight - 2);
