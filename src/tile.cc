@@ -52,12 +52,10 @@ namespace fallout {
 constexpr int kArroyoVillageMonumentProtoId = 938;
 constexpr int kArroyoVillageMonumentFrontWallProtoId = 621;
 constexpr int kArroyoVillageMonumentFrontWallLength = 9;
-constexpr int kArroyoVillageNorthMountainProtoId = 1370;
-constexpr int kArroyoVillageNorthCavernProtoId = 1371;
 constexpr int kArroyoTempleHiddenSceneryProtoId = 931;
 constexpr int kArroyoTempleHiddenSceneryTile = 12727;
 constexpr int kArroyoTempleHiddenSceneryElevation = 2;
-constexpr double kArroyoVillageNorthBackdropY = 0.25;
+constexpr double kFirstPersonMapEdgeBackdropSnapDistance = 1.5;
 
 static bool tileScrollLeashUnlocked();
 
@@ -2359,20 +2357,10 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
     const bool arroyoVillageMonument = gMapHeader.index == MAP_ARROYO_VILLAGE
         && ProtoId(object).objectType() == OBJ_TYPE_SCENERY
         && ProtoId(object).protoId() == kArroyoVillageMonumentProtoId;
-    const bool arroyoVillageNorthBackdrop = gMapHeader.index == MAP_ARROYO_VILLAGE
-        && ProtoId(object).objectType() == OBJ_TYPE_SCENERY
-        && (ProtoId(object).protoId() == kArroyoVillageNorthMountainProtoId
-            || ProtoId(object).protoId() == kArroyoVillageNorthCavernProtoId);
     constexpr double kArroyoMonumentScale = 1.6;
-    // Backdrops can be NO_BLOCK and use separate invisible blocking hexes
-    // (including the starting map). Classify the artwork, not collision flags.
-    if (!templeBackwall && !arroyoVillageMonument && !arroyoVillageNorthBackdrop
-        && (object->flags & OBJECT_FLAT) != OBJECT_NONE) {
-        return false;
-    }
     Proto* proto = nullptr;
     if (protoGetProto(object, &proto) != 0
-        || (!templeBackwall && !arroyoVillageMonument && !arroyoVillageNorthBackdrop
+        || (!templeBackwall && !arroyoVillageMonument
             && proto->scenery.type != SCENERY_TYPE_GENERIC)) {
         return false;
     }
@@ -2382,7 +2370,7 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
         return false;
     }
     const ConstBuffer2D frame = image.getBuffer();
-    if (!templeBackwall && !arroyoVillageMonument && !arroyoVillageNorthBackdrop
+    if (!templeBackwall && !arroyoVillageMonument
         && (frame.width < 160 || frame.height < 64)) {
         return false;
     }
@@ -2390,11 +2378,25 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
     // after eviction. Frame and rotation still follow scripted art changes.
     const FirstPersonSceneryProfile& profile =
         tileFirstPersonGetSceneryProfile(object, rotation, frame);
-    if (!profile.fixed && !templeBackwall && !arroyoVillageMonument
-        && !arroyoVillageNorthBackdrop) {
+    FirstPersonSceneryMapEdge mapEdge = FirstPersonSceneryMapEdge::None;
+    if (!templeBackwall && !arroyoVillageMonument
+        && gHexGridWidth > 0 && gHexGridHeight > 0) {
+        mapEdge = firstPersonSceneryMapEdge(worldX, worldY,
+            0.25, (gHexGridWidth - 1) / 2.0 + 0.25,
+            0.25, (gHexGridHeight - 1) / 2.0 + 0.25,
+            kFirstPersonMapEdgeBackdropSnapDistance,
+            profile.slope, profile.baseRmsError);
+    }
+    const bool mapEdgeBackdrop = mapEdge != FirstPersonSceneryMapEdge::None
+        && profile.fixed;
+    if (!profile.fixed && !templeBackwall && !arroyoVillageMonument) {
         return false;
     }
-    if ((templeBackwall || arroyoVillageMonument || arroyoVillageNorthBackdrop)
+    if (!templeBackwall && !arroyoVillageMonument && !mapEdgeBackdrop
+        && (object->flags & OBJECT_FLAT) != OBJECT_NONE) {
+        return false;
+    }
+    if ((templeBackwall || arroyoVillageMonument || mapEdgeBackdrop)
         && profile.left >= profile.right) {
         return false;
     }
@@ -2411,22 +2413,43 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
         + image.getYOffset() + object->y;
     const double backwallVerticalOffset = templeBackwall
         ? 0.0
-        : arroyoVillageMonument || arroyoVillageNorthBackdrop
+        : arroyoVillageMonument || mapEdgeBackdrop
         ? 0.0
         : firstPersonSceneryBackwallVerticalOffset(
               context->backwallIsoBaseY, projectedIsoY);
-    FirstPersonScenerySlab slab = templeBackwall
-        ? firstPersonSceneryBackwallSlab(profile, projectedIsoX, context->backwallY,
-              image.getXOffset() + object->x, backwallVerticalOffset)
-        : arroyoVillageNorthBackdrop
-        ? firstPersonSceneryBackwallSlab(profile, projectedIsoX,
-              kArroyoVillageNorthBackdropY, image.getXOffset() + object->x,
-              backwallVerticalOffset)
-        : arroyoVillageMonument
-        ? firstPersonSceneryBackwallSlab(profile, projectedIsoX, worldY,
-              image.getXOffset() + object->x, backwallVerticalOffset)
-        : firstPersonScenerySlab(profile, worldX, worldY,
-              image.getXOffset() + object->x, image.getYOffset() + object->y);
+    FirstPersonScenerySlab slab;
+    if (templeBackwall) {
+        slab = firstPersonSceneryBackwallSlab(profile, projectedIsoX, context->backwallY,
+            image.getXOffset() + object->x, backwallVerticalOffset);
+    } else if (mapEdgeBackdrop) {
+        double edgeCoordinate;
+        switch (mapEdge) {
+        case FirstPersonSceneryMapEdge::MinX:
+            edgeCoordinate = 0.25;
+            break;
+        case FirstPersonSceneryMapEdge::MaxX:
+            edgeCoordinate = (gHexGridWidth - 1) / 2.0 + 0.25;
+            break;
+        case FirstPersonSceneryMapEdge::MinY:
+            edgeCoordinate = 0.25;
+            break;
+        case FirstPersonSceneryMapEdge::MaxY:
+            edgeCoordinate = (gHexGridHeight - 1) / 2.0 + 0.25;
+            break;
+        default:
+            return false;
+        }
+        slab = firstPersonSceneryMapEdgeSlab(profile, mapEdge,
+            firstPersonSceneryBackwallProjectedX(worldX, worldY),
+            firstPersonSceneryBackwallProjectedY(worldX, worldY), edgeCoordinate,
+            image.getXOffset() + object->x, backwallVerticalOffset);
+    } else if (arroyoVillageMonument) {
+        slab = firstPersonSceneryBackwallSlab(profile, projectedIsoX, worldY,
+            image.getXOffset() + object->x, backwallVerticalOffset);
+    } else {
+        slab = firstPersonScenerySlab(profile, worldX, worldY,
+            image.getXOffset() + object->x, image.getYOffset() + object->y);
+    }
     if (arroyoVillageMonument) {
         slab.length *= kArroyoMonumentScale;
         slab.thickness = 0.35;
@@ -2454,14 +2477,14 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
         if (profile.bottoms[sourceX] == 0) {
             continue;
         }
-        const int sourceBaseline = templeBackwall || arroyoVillageNorthBackdrop
+        const int sourceBaseline = templeBackwall || mapEdgeBackdrop
             ? firstPersonSceneryBackwallBaseline(profile, sourceX)
             : profile.bottoms[sourceX];
         const double scale = gTileWindowHeight / hit.depth;
         const double pixelsPerWorldUnit = templeBackwall
                 ? 48.0
                 : arroyoVillageMonument ? 48.0 / kArroyoMonumentScale
-                : arroyoVillageNorthBackdrop ? 48.0 : 80.0;
+                : mapEdgeBackdrop ? 48.0 : 80.0;
         const int artHeight = std::max(1,
             static_cast<int>(scale * frame.height / pixelsPerWorldUnit));
         const int base = context->horizonY + static_cast<int>(

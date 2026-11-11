@@ -19,6 +19,7 @@ struct FirstPersonSceneryProfile {
     int right = 0; // exclusive
     double slope = 0.0;
     double intercept = 0.0;
+    double baseRmsError = std::numeric_limits<double>::infinity();
     bool fixed = false;
     std::vector<int> bottoms;
     std::array<int, 2> endColumns { -1, -1 };
@@ -96,6 +97,7 @@ inline FirstPersonSceneryProfile firstPersonSceneryProfile(
         squaredError += error * error;
     }
     const double rmsError = std::sqrt(squaredError / count);
+    result.baseRmsError = rmsError;
     const int columnHeight = std::max(endHeights[0], endHeights[1]);
     // Measure vertical columns, not the bounding-box height: an isometric
     // wall running down-screen adds its ground slope to the latter. Some tall
@@ -108,12 +110,53 @@ inline FirstPersonSceneryProfile firstPersonSceneryProfile(
     if (!result.fixed) {
         return result;
     }
+
     for (int end = 0; end < 2; end++) {
         if (result.endColumns[end] < 0) {
             result.endColumns[end] = result.endColumns[1 - end];
         }
     }
     return result;
+}
+
+enum class FirstPersonSceneryMapEdge {
+    None,
+    MinX,
+    MaxX,
+    MinY,
+    MaxY,
+};
+
+inline FirstPersonSceneryMapEdge firstPersonSceneryMapEdge(
+    double worldX, double worldY, double mapMinX, double mapMaxX,
+    double mapMinY, double mapMaxY, double maximumDistance,
+    double baseSlope, double baseRmsError)
+{
+    if (!firstPersonSceneryHasMapAlignedBase(baseSlope, baseRmsError)) {
+        return FirstPersonSceneryMapEdge::None;
+    }
+
+    if (std::abs(baseSlope + 0.25) <= 0.08) {
+        const double minDistance = worldY - mapMinY;
+        const double maxDistance = mapMaxY - worldY;
+        if (minDistance <= maximumDistance && minDistance <= maxDistance) {
+            return FirstPersonSceneryMapEdge::MinY;
+        }
+        if (maxDistance <= maximumDistance) {
+            return FirstPersonSceneryMapEdge::MaxY;
+        }
+    } else if (std::abs(baseSlope - 0.75) <= 0.08) {
+        const double minDistance = worldX - mapMinX;
+        const double maxDistance = mapMaxX - worldX;
+        if (minDistance <= maximumDistance && minDistance <= maxDistance) {
+            return FirstPersonSceneryMapEdge::MinX;
+        }
+        if (maxDistance <= maximumDistance) {
+            return FirstPersonSceneryMapEdge::MaxX;
+        }
+    }
+
+    return FirstPersonSceneryMapEdge::None;
 }
 
 struct FirstPersonSceneryPoint {
@@ -218,6 +261,29 @@ inline FirstPersonScenerySlab firstPersonSceneryBackwallSlab(
             backwallY },
         { 1.0, 0.0 },
         (profile.right - profile.left) / 48.0,
+        0.2,
+        verticalOffset,
+    };
+}
+
+inline FirstPersonScenerySlab firstPersonSceneryMapEdgeSlab(
+    const FirstPersonSceneryProfile& profile, FirstPersonSceneryMapEdge edge,
+    double projectedIsoX, double projectedIsoY, double edgeCoordinate,
+    int offsetX, double verticalOffset)
+{
+    if (edge == FirstPersonSceneryMapEdge::MinY
+        || edge == FirstPersonSceneryMapEdge::MaxY) {
+        return firstPersonSceneryBackwallSlab(
+            profile, projectedIsoX, edgeCoordinate, offsetX, verticalOffset);
+    }
+
+    const double middle = (profile.left + profile.right) * 0.5;
+    return {
+        { edgeCoordinate,
+            (projectedIsoY + edgeCoordinate * 12.0) / 24.0
+                + (middle - profile.width * 0.5 + offsetX) / 32.0 },
+        { 0.0, 1.0 },
+        (profile.right - profile.left) / 32.0,
         0.2,
         verticalOffset,
     };

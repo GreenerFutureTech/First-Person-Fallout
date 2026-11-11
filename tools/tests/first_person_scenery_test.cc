@@ -99,6 +99,19 @@ int main()
             && close(backwallLeft.verticalOffset, 0.0)
             && close(backwallRight.verticalOffset, 1.5),
         "backwall panels preserve projected X at shared depth, height, and scale");
+    const auto nearEdge = firstPersonSceneryMapEdgeSlab(
+        profile, FirstPersonSceneryMapEdge::MinY, 480, 120, 0.5, 0, 0.0);
+    const auto sideEdge = firstPersonSceneryMapEdgeSlab(
+        profile, FirstPersonSceneryMapEdge::MinX, 480, 120, 0.5, 0, 0.0);
+    require(close(nearEdge.center.y, 0.5) && close(nearEdge.axis.x, 1.0)
+            && close(nearEdge.axis.y, 0.0)
+            && close(nearEdge.length, 200.0 / 48.0),
+        "north and south map edges align along world X");
+    require(close(sideEdge.center.x, 0.5) && close(sideEdge.axis.x, 0.0)
+            && close(sideEdge.axis.y, 1.0)
+            && close(sideEdge.center.y * 24.0 - sideEdge.center.x * 12.0, 120.0)
+            && close(sideEdge.length, 200.0 / 32.0),
+        "west and east map edges align along world Y");
     const double upperPanelY = firstPersonSceneryBackwallProjectedY(54.25, 32.75);
     const double lowerPanelY = firstPersonSceneryBackwallProjectedY(54.25, 41.25);
     require(upperPanelY < lowerPanelY
@@ -153,6 +166,21 @@ int main()
         "reject non-map-aligned base");
     require(!firstPersonSceneryHasMapAlignedBase(-0.25, 2.1),
         "reject noisy composite base");
+    require(firstPersonSceneryMapEdge(5.0, 0.5, 0.5, 9.5, 0.5, 9.5,
+                1.0, -0.25, 0.3) == FirstPersonSceneryMapEdge::MinY,
+        "classify aligned scenery at the near map edge");
+    require(firstPersonSceneryMapEdge(5.0, 9.0, 0.5, 9.5, 0.5, 9.5,
+                1.0, -0.25, 0.3) == FirstPersonSceneryMapEdge::MaxY,
+        "classify aligned scenery at the far map edge");
+    require(firstPersonSceneryMapEdge(0.75, 5.0, 0.5, 9.5, 0.5, 9.5,
+                1.0, 0.75, 0.3) == FirstPersonSceneryMapEdge::MinX,
+        "classify the other map-axis edge");
+    require(firstPersonSceneryMapEdge(5.0, 5.0, 0.5, 9.5, 0.5, 9.5,
+                1.0, -0.25, 0.3) == FirstPersonSceneryMapEdge::None,
+        "leave scenery away from map edges unchanged");
+    require(firstPersonSceneryMapEdge(5.0, 0.5, 0.5, 9.5, 0.5, 9.5,
+                1.0, 0.0, 0.3) == FirstPersonSceneryMapEdge::None,
+        "leave non-aligned scenery unchanged");
     std::vector<unsigned char> noisyFacadePixels(facadeWidth * facadeHeight, 0);
     for (int x = 0; x < facadeWidth; x++) {
         const int offset = (x / 8) % 2 == 0 ? -10 : 10;

@@ -171,11 +171,17 @@ On Arroyo Village, the central Stone Monument (`head1.frm`, scenery prototype
 938) is rendered as an enlarged, depth-aware slab. Its nine-tile front wall
 segment (wall prototype 621) is suppressed in F11 so the monument fills that
 space rather than appearing behind a row of graybox columns. Other wall pieces
-and collision remain unchanged. The northern Mountain and Cavern scenery
-(prototypes 1370 and 1371) are rendered as depth-tested backdrops at the north
-map edge rather than foreground-facing billboards. The F9 topology overlay
-shows the center ray's first solid wall hit as a yellow tile outline and prints
-its tile number, row, and column for diagnosing occlusion mismatches.
+and collision remain unchanged. Large generic scenery whose opaque base follows
+a map-axis slope is also treated as an edge backdrop when its object tile is
+within 1.5 first-person world units of the corresponding map-grid edge. The
+art's base slope selects which edge direction to use; transparent pixels are
+preserved, and the backdrop remains depth-tested against walls. This replaces
+the previous Arroyo Village-only prototype list for the Mountain and Cavern
+backdrops (1370 and 1371). The initial heuristic uses the rectangular tile-grid
+bounds, not the playable area's potentially irregular boundary. The F9
+topology overlay shows the center ray's first solid wall hit as a yellow tile
+outline and prints its tile number, row, and column for diagnosing occlusion
+mismatches.
 
 ### Diagnosing scenery that draws through walls
 
