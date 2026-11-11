@@ -18,6 +18,15 @@ Its panels are rendered on a shared world-space horizontal plane rather than
 each panel deriving its own ground direction and depth from its isometric
 artwork.
 
+The user supplied a complete first-person facade image, and selected it as the
+actual F11 backdrop. It is converted to the Fallout palette as
+`files/ce.dat/art/scenery/temple_backdrop.frm` and projected as one slab,
+retaining wall, floor, and door-cap occlusion in both CPU and accelerated
+rendering. The image's perspective is baked in, so it remains visually fixed
+within the texture as the player moves or turns. The original panel FRMs still
+determine the backdrop's horizontal center, and proto 1369 remains a layout
+anchor.
+
 The ARTEMPLE map overrides the prototype FIDs on several placed scenery
 objects. Its facade instances and actual artwork are:
 
@@ -46,9 +55,10 @@ inclusions and exclusions. Proto 1369 remains in the group as a layout anchor,
 but its pixels are hidden; its replacement `temple07.frm` profile is used only
 to preserve the tier alignment. Objects 1359 and 1368 retain their
 map-projected horizontal positions and map-derived vertical levels rather than
-being packed into an artificial row. Proto 1363 (`TEMPLE05.FRM`) and proto 1364 (`TEMPLE06.FRM`), the
-rightmost upper panels, are lowered by half a world unit to keep their seam
-aligned. All panels share the same backwall depth plane.
+being packed into an artificial row. Proto 1363 (`TEMPLE05.FRM`) and proto
+1364 (`TEMPLE06.FRM`), the rightmost upper panels, retain their one-world-unit
+downward adjustment in the fallback panel renderer. The supplied-image
+backdrop uses their profiles only to determine its center.
 
 The shared Temple backdrop plane is moved two map rows back (1.0 world unit)
 and four map columns left (96 projected-X pixels) as a group, to clear and
@@ -91,7 +101,8 @@ are reused. The override also includes narrow or flat-flagged Temple facade
 panels that the general large-scenery classifier would not otherwise select.
 If a grouped panel cannot be loaded or has no opaque pixels, the code falls
 through to the existing billboard behavior, with its anchor placed at the
-common backwall depth.
+common backwall depth. The supplied-image panorama renders at 80% of its prior
+width and height, centered horizontally and retaining its floor baseline.
 One Temple facade prototype is typed as a door in its proto data; the F11 door
 exclusion now runs after backwall recognition so this panel is not dropped.
 The large-scenery path likewise allows the recognized Temple group through
@@ -108,8 +119,13 @@ ordinary doors.
   - Routes recognized Temple facade pieces through the backwall before the
     ordinary door exclusion, including the facade proto typed as a door.
   - Added backwall group data to `TileFirstPersonActorRenderContext`.
-  - Routed matching scenery through a shared-axis/shared-depth slab while
-    preserving the existing renderer and fallback path.
+  - Loads `temple_backdrop.frm` from the CE data archive and renders it as one
+    shared-axis/shared-depth slab, preserving wall/floor clipping, CPU/GPU
+    rendering, and hit targets. Original panel rendering remains a fallback
+    if the new asset cannot be loaded.
+- `tools/assets/temple_backdrop.png` and
+  `files/ce.dat/art/scenery/temple_backdrop.frm`
+  - Preserve the supplied image source and its Fallout-palette runtime asset.
 - `src/first_person_scenery.h`
   - Added `firstPersonSceneryBackwallSlab`, which constructs a horizontal
     world-X slab at the shared depth while preserving each panel's projected
@@ -129,6 +145,8 @@ ordinary doors.
     their actual lower edge, and equal-depth panels can composite.
   - Retains the earlier tests for clean map-aligned facade classification and
     rejection of noisy bases.
+  - Verifies the current one-world-unit downward adjustment for `TEMPLE05`
+    and `TEMPLE06`.
 - `docs/first-person-large-scenery.md`
   - Updated the classifier description and documented the Temple-specific
     backwall behavior and scope.
@@ -168,6 +186,8 @@ For the entrance-depth adjustment:
 - `cmake --build out/build/render-tests` — passed.
 - `ctest --test-dir out/build/render-tests -C Debug --output-on-failure` —
   all 4 renderer tests passed.
+- `out/build/windows-x64-vs18/Release/ce-dat-tool.exe create files/ce.dat out/dist/ce.dat`
+  — passed; the archive contains `art\scenery\temple_backdrop.frm`.
 - `git diff --check` — passed.
 
 For the projected-X centering adjustment:
@@ -228,6 +248,15 @@ For the fitted-baseline and equal-depth compositing correction:
 After adding the reliability guard for irregular Temple profiles, only
 `git diff --check` was rerun. Per the user's preference, the game build and
 renderer tests for that final adjustment are left for the user.
+
+For the supplied-image backdrop revision:
+
+- `cmake --build out/build/windows-x64-vs18 --config Release --target fallout2-ce`
+  — passed; produced `out/build/windows-x64-vs18/Release/Fallout2-FPS.exe`.
+- `cmake --build out/build/render-tests` — passed.
+- `ctest --test-dir out/build/render-tests -C Debug --output-on-failure` —
+  all 4 renderer tests passed.
+- `git diff --check` — passed.
 
 A post-change in-game visual check remains necessary. Run the rebuilt
 executable, load the Temple scene, and verify that the backdrop is centered

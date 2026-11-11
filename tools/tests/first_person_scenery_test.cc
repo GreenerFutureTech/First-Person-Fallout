@@ -133,8 +133,8 @@ int main()
         "backwall row coordinate handles the other map axis");
     require(close(firstPersonSceneryBackwallDepth(46.25), 38.75),
         "Temple backwall moves one map row toward the facade");
-    require(close(firstPersonSceneryTemplePanelVerticalOffset(1363, 1.25), 0.75)
-            && close(firstPersonSceneryTemplePanelVerticalOffset(1364, 1.25), 0.75)
+    require(close(firstPersonSceneryTemplePanelVerticalOffset(1363, 1.25), 0.25)
+            && close(firstPersonSceneryTemplePanelVerticalOffset(1364, 1.25), 0.25)
             && close(firstPersonSceneryTemplePanelVerticalOffset(1362, 1.25), 1.25),
         "Temple05 and the texture to its right share the downward tier adjustment");
     require(firstPersonSceneryFloorOcclusionTop(2.0, 100, 600) == 250
@@ -159,6 +159,13 @@ int main()
         require(firstPersonSceneryIsTempleBackwallProto(protoId),
             "placed Temple facade object is grouped into the backwall");
     }
+    for (int protoId : { 937, 938, 939 }) {
+        require(firstPersonSceneryIsArroyoVillageMonumentProto(protoId),
+            "all Arroyo Village monument pieces are enlarged");
+    }
+    require(!firstPersonSceneryIsArroyoVillageMonumentProto(936)
+            && !firstPersonSceneryIsArroyoVillageMonumentProto(940),
+        "unrelated neighboring scenery is not enlarged");
     for (int protoId : { 1365, 1366, 1367, 1370, 1371 }) {
         require(!firstPersonSceneryIsTempleBackwallProto(protoId),
             "fire pits and unplaced scenery are not backwall panels");

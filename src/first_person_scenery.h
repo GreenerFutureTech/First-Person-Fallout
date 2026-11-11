@@ -253,6 +253,11 @@ inline bool firstPersonSceneryIsTempleBackwallSupplementalProto(int protoId)
     return protoId == 1359 || protoId == 1368;
 }
 
+inline bool firstPersonSceneryIsArroyoVillageMonumentProto(int protoId)
+{
+    return protoId >= 937 && protoId <= 939;
+}
+
 inline bool firstPersonSceneryIsTempleBackwallSuppressedProto(int protoId)
 {
     return protoId == 1369;

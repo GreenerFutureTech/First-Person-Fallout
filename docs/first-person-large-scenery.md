@@ -123,49 +123,36 @@ profile. The fire pits (1365-1366) are not facade panels.
 The newly recovered panels (1359 and 1368) retain their map-projected
 horizontal positions and map-derived vertical levels rather than being packed
 as another row. Proto 1363 (`TEMPLE05.FRM`) and proto 1364 (`TEMPLE06.FRM`),
-the rightmost upper panels, are both lowered by half a world unit so their
-seam remains aligned. All panels share the established backwall depth plane
-and retain their individual horizontal positions. The isometric wall objects
-are still represented by F11's procedural graybox, not by their original wall
-textures. Each scenery panel's original tile, object, and FRM offsets
-determine its projected baseline. To infer its row, the renderer removes the
-fitted map-axis slope along the wall from that baseline's projected X/Y
-position. This prevents a panel from appearing higher or lower just because it
-lies farther along the isometric wall. Reliable panel art selects the wall
-axis; if the art does not establish one, the panels retain a single-row
-layout.
+the rightmost upper panels, retain the prior one-world-unit adjustment in the
+fallback renderer. Their profiles determine the Temple backdrop's center.
+The F11 facade itself uses `files/ce.dat/art/scenery/temple_backdrop.frm`, a
+game-palette version of the supplied first-person image, projected as one
+slab. The original panel FRMs are not drawn while this asset loads; if it is
+missing, the renderer logs the issue and falls back to the original panels.
+The image includes baked-in perspective, so the apparent viewpoint within the
+texture does not change as the player moves or turns. The original panel
+profiles are still used to estimate the facade group's center; their individual
+vertical offsets no longer change the rendered image. The isometric wall
+objects are still represented by F11's procedural graybox, not by their
+original wall textures.
 
-The whole Temple backdrop is shifted two map rows away from the camera
-(1.0 world unit) and four map columns left (96 projected-X pixels) so its
-doorway clears and aligns with the in-world door opening. All panels receive
-the same translation.
+The image is centered using the original facade layout, shifted two map rows
+away from the camera (1.0 world unit) and four map columns left (96 projected-X
+pixels) so its doorway aligns with the in-world opening.
 
-Panels whose corrected baseline positions are within 64 projected pixels
-(two world units normal to the wall) are grouped into a row. Each row is
-ordered by facade prototype and packed edge-to-edge using the FRMs' visible
-horizontal spans, with rows centered on the same group bounds. Upper tiers
-retain their map-derived positive offsets from the default backwall baseline,
-while the lowest tier remains on that baseline. Offsets use the same
-48-pixel-per-world-unit scale as the backwall renderer, without per-prototype
-row settings.
-Backwall columns use a fitted base line only when the profile has a reliable
-map-aligned lower edge; irregular silhouettes retain their actual per-column
-base to avoid introducing gaps. Equal-depth overlapping Temple panels
-composite in map order in the software renderer, matching the accelerated
-path. Panel height uses the same 48-pixel scale rather than the shorter
-generic-scenery scale.
+The custom FRM is quantized to the Fallout palette and uses the existing
+48-pixel-per-world-unit scale, wall/sill depth tests, floor occlusion, and
+accelerated/software rendering paths. Its dark doorway is part of the image,
+not a transparent cutout.
 
 The resulting panorama is anchored to the solid wall tile nearest the facade
 group's center, rather than a fixed distance from the entry tile. Temple
-panels are clipped against per-column wall and sill ray depths, plus the
-projected floor depth, so foreground walls and floor cover the backdrop while
-transparent areas and the open doorway remain visible. If no solid wall tile
-is found, the existing shared-plane placement 7.5 world units in front of the
-entry tile is used. This map-specific override includes the narrow and
-flat-flagged panels that the general large-scenery heuristic intentionally
-leaves alone. Fire-pit props and unrelated collision/blocker objects are not
-included. The isometric renderer, movement, and collision continue to use the
-original map objects.
+backdrop is clipped against per-column wall and sill ray depths, plus the
+projected floor depth, so foreground walls and floor cover it. If no solid wall
+tile is found, the existing shared-plane placement 7.5 world units in front of
+the entry tile is used. Fire-pit props and unrelated collision/blocker objects
+are not included. The isometric renderer, movement, and collision continue to
+use the original map objects.
 
 ## Temple blocked-floor boundaries
 
@@ -184,11 +171,12 @@ Klamath; the exact crash cause was not confirmed. Apply the visual treatment
 to another map only after identifying its specific blocked-floor landmarks
 and validating it in-game.
 
-On Arroyo Village, the central Stone Monument (`head1.frm`, scenery prototype
-938) is rendered as an enlarged, depth-aware slab. Its nine-tile front wall
-segment (wall prototype 621) is suppressed in F11 so the monument fills that
-space rather than appearing behind a row of graybox columns. Other wall pieces
-and collision remain unchanged. Large generic scenery whose opaque base follows
+On Arroyo Village, all three pieces of the central Stone Monument (scenery
+prototypes 937-939, including the `head1.frm` head at prototype 938) are
+rendered as enlarged, depth-aware slabs. The head anchors suppression of its
+nine-tile front wall segment (wall prototype 621) in F11 so the monument fills
+that space rather than appearing behind a row of graybox columns. Other wall
+pieces and collision remain unchanged. Large generic scenery whose opaque base follows
 a map-axis slope is also treated as an edge backdrop when its object tile is
 within 1.5 first-person world units of the corresponding map-grid edge. The
 art's base slope selects which edge direction to use; transparent pixels are
