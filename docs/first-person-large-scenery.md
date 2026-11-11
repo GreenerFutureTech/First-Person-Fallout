@@ -205,12 +205,12 @@ group and the Arroyo Temple map; prototype IDs can refer to unrelated scenery
 on other maps.
 
 The F11 click diagnostic identified the unwanted panel as scenery prototype
-931 at tile 12727, elevation 2. Earlier suppression attempts also required
-`gMapHeader.index == MAP_ARROYO_TEMPLE`; that extra condition did not match the
-object in the running game, despite the player being in the Temple area, so
-the renderer kept drawing it. Matching the diagnostic's object type,
+931 at tile 12727, elevation 2. A prior suppression also required
+`gMapHeader.index == MAP_ARROYO_TEMPLE` (map ID 126), but the panel remained.
+The specific reason that attempt failed is unconfirmed; the map-ID comparison
+should match on Arroyo Temple. Matching the diagnostic's object type,
 prototype, tile, and elevation instead excluded the exact instance from both
-the F11 actor renderer and graybox builder. When a map-scoped prototype check
-fails, capture the object's click diagnostic and prefer its specific instance
-identity over assuming the runtime map index. The map object, collision, and
-other objects using prototype 931 remain unchanged.
+the F11 actor renderer and graybox builder. When a prototype-based exclusion
+does not work, capture the object's click diagnostic and use its specific
+instance identity rather than guessing at the cause. The map object, collision,
+and other objects using prototype 931 remain unchanged.
