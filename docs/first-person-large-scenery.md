@@ -61,8 +61,10 @@ depth and texture coordinate. Conservative bounds include all four corners
 and retain volumes crossing the near plane. GPU rendering submits clipped
 texture columns through the existing depth-sorted queue; CPU rendering uses
 the same intersections with its per-pixel depth buffer. Wall, sill and door-cap
-clipping use each column's depth. Scenery picking uses the corresponding
-source column and visible vertical intervals.
+clipping use each column's depth. Wall texture spans use a separate per-pixel
+depth buffer to order textured wall hits against each other; it does not
+depth-test those textures against scenery artwork. Scenery picking uses the
+corresponding source column and visible vertical intervals.
 
 Ordinary billboards now cull against the actual opaque artwork bounds. The
 placeholder bounds are used only when artwork cannot be loaded.
@@ -148,7 +150,7 @@ large-scenery heuristic intentionally leaves alone. Fire-pit props and
 unrelated collision/blocker objects are not included. The isometric renderer,
 movement, and collision continue to use the original map objects.
 
-## Blocked-floor boundaries
+## Temple blocked-floor boundaries
 
 F11 derives floor appearance from floor FRMs, while movement uses blocking
 objects. A blocked tile therefore does not automatically look like a wall.
@@ -160,12 +162,55 @@ maps. Doors, actors, facade panels, and fire-pit props are excluded from the
 blocking test. Movement and collision remain authoritative and unchanged.
 
 This is intentionally Temple-specific. A general rule based on all blocking
-scenery was removed because it affected unrelated maps and caused a crash when
-entering F11 on Klamath. Apply the visual treatment to another map only after
-identifying its specific blocked-floor landmarks and validating it in-game.
+scenery affected unrelated maps and was reverted after F11 began crashing on
+Klamath; the exact crash cause was not confirmed. Apply the visual treatment
+to another map only after identifying its specific blocked-floor landmarks
+and validating it in-game.
+
+On Arroyo Village, the central Stone Monument (`head1.frm`, scenery prototype
+938) is rendered as an enlarged, depth-aware slab. Its nine-tile front wall
+segment (wall prototype 621) is suppressed in F11 so the monument fills that
+space rather than appearing behind a row of graybox columns. Other wall pieces
+and collision remain unchanged. The northern Mountain and Cavern scenery
+(prototypes 1370 and 1371) are rendered as depth-tested backdrops at the north
+map edge rather than foreground-facing billboards. The F9 topology overlay
+shows the center ray's first solid wall hit as a yellow tile outline and prints
+its tile number, row, and column for diagnosing occlusion mismatches.
+
+### Diagnosing scenery that draws through walls
+
+Start with the exact center-ray hit rather than guessing which nearby prop
+supplies the artwork. Enable the F9 topology overlay while aiming at the
+offending image; read the displayed tile/row/column, then inspect the map
+objects at that tile to identify the wall prototype and verify the wall appears
+in the F11 topology. This establishes that the raycaster found the wall, but
+does not by itself prove every scenery pixel is depth-tested against it.
+
+Trace the scenery render path for exceptions that bypass normal wall-depth
+clipping. In particular, keep special prototype groups map-scoped: prototype
+IDs are not globally unique descriptions of artwork. Arroyo Temple's
+`firstPersonSceneryIsTempleBackwallProto` group includes prototype 1370, while
+Arroyo Village uses that same ID for its Mountain backdrop. Before this
+correction, the Village Mountain was classified as a Temple backwall and its
+pixels skipped the ordinary wall-depth test, so it could show through any
+building wall even though the center ray correctly hit the building. Gate the
+Temple-backwall classification on `MAP_ARROYO_TEMPLE`; do not suppress or move
+nearby props to compensate for a render-classification/depth-test error.
 
 Temple facade prototypes are routed into the shared backwall before the
 ordinary scenery-door exclusion. This matters because one of the facade
 prototypes is tagged as a door in its prototype data even though its art is a
 backwall panel. That exception is limited to the recognized Temple backwall
-group; normal doors keep their existing F11 behavior.
+group and the Arroyo Temple map; prototype IDs can refer to unrelated scenery
+on other maps.
+
+The F11 click diagnostic identified the unwanted panel as scenery prototype
+931 at tile 12727, elevation 2. Earlier suppression attempts also required
+`gMapHeader.index == MAP_ARROYO_TEMPLE`; that extra condition did not match the
+object in the running game, despite the player being in the Temple area, so
+the renderer kept drawing it. Matching the diagnostic's object type,
+prototype, tile, and elevation instead excluded the exact instance from both
+the F11 actor renderer and graybox builder. When a map-scoped prototype check
+fails, capture the object's click diagnostic and prefer its specific instance
+identity over assuming the runtime map index. The map object, collision, and
+other objects using prototype 931 remain unchanged.
