@@ -176,9 +176,14 @@ and validating it in-game.
 
 On Arroyo Village, the central Stone Monument (scenery prototype 938) is
 rendered as an enlarged slab. Its nine-tile front wall segment (wall prototype
-621) is suppressed in F11 so the monument fills that space. The northern
-Mountain and Cavern scenery (prototypes 1370 and 1371) are rendered as
-backdrops at the north map edge rather than foreground-facing billboards.
+621) is suppressed in F11 so the monument fills that space. More generally,
+large scenery with a map-aligned base is rendered as a backdrop when its object
+tile is within 1.5 first-person world units of the corresponding rectangular
+map-grid edge. The base slope selects the edge direction, and transparent art
+pixels are preserved. This replaces the Village-specific Mountain and Cavern
+backdrop list (prototypes 1370 and 1371); map collision and other wall pieces
+remain unchanged. The heuristic uses the rectangular tile-grid bounds rather
+than the playable area's potentially irregular boundary.
 
 Temple facade prototypes are routed into the shared backwall before the
 ordinary scenery-door exclusion. This matters because one of the facade
