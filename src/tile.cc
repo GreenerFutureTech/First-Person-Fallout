@@ -56,6 +56,11 @@ constexpr int kArroyoTempleHiddenSceneryProtoId = 931;
 constexpr int kArroyoTempleHiddenSceneryTile = 12727;
 constexpr int kArroyoTempleHiddenSceneryElevation = 2;
 constexpr double kFirstPersonMapEdgeBackdropSnapDistance = 1.5;
+// Along the facade normal, 32 projected pixels equal one world unit.
+constexpr double kFirstPersonTemplePanelRowGap = 64.0;
+// Fallout tile rows/columns each span half a world unit.
+constexpr double kFirstPersonTempleBackwallRowsBack = 1.0;
+constexpr double kFirstPersonTempleBackwallProjectedXOffset = -96.0;
 
 static bool tileScrollLeashUnlocked();
 
@@ -148,6 +153,7 @@ struct TileFirstPersonDoorCapSpan {
 struct TileFirstPersonTemplePanelLayout {
     const Object* object;
     double projectedIsoXOffset;
+    double verticalOffset;
 };
 
 struct TileFirstPersonActorRenderContext {
@@ -2099,7 +2105,7 @@ static void tileFirstPersonFindTempleWallAreaLandmark(Object* object, void* cont
         || (object->flags & OBJECT_HIDDEN) != OBJECT_NONE
         || ProtoId(object).objectType() != OBJ_TYPE_SCENERY
         || (!firstPersonSceneryIsTempleBackwallProto(protoId)
-            && protoId != 1366 && protoId != 1367)
+            && protoId != 1365 && protoId != 1366)
         || !tileIsValid(object->tile)) {
         return;
     }
@@ -2135,8 +2141,8 @@ static bool tileFirstPersonIsTempleBlockedFloorTile(int tile, MapElevation eleva
             && (protoGetProto(blocker, &proto) != 0
                 || proto->scenery.type == SCENERY_TYPE_DOOR
                 || firstPersonSceneryIsTempleBackwallProto(ProtoId(blocker).protoId())
-                || ProtoId(blocker).protoId() == 1366
-                || ProtoId(blocker).protoId() == 1367)) {
+                || ProtoId(blocker).protoId() == 1365
+                || ProtoId(blocker).protoId() == 1366)) {
             continue;
         }
         return true;
@@ -2335,10 +2341,10 @@ static void tileFirstPersonGrayboxMarkObject(Object* object, void* context)
 }
 
 static const FirstPersonSceneryProfile& tileFirstPersonGetSceneryProfile(
-    const Object* object, Rotation rotation, const ConstBuffer2D& frame)
+    unsigned int fid, int frameIndex, Rotation rotation, const ConstBuffer2D& frame)
 {
-    const uint64_t key = (static_cast<uint64_t>(static_cast<unsigned int>(object->fid)) << 32)
-        | (static_cast<uint64_t>(static_cast<unsigned int>(object->frame)) << 3)
+    const uint64_t key = (static_cast<uint64_t>(fid) << 32)
+        | (static_cast<uint64_t>(static_cast<unsigned int>(frameIndex)) << 3)
         | static_cast<unsigned int>(rotation);
     static std::unordered_map<uint64_t, FirstPersonSceneryProfile> profiles;
     auto found = profiles.find(key);
@@ -2348,6 +2354,17 @@ static const FirstPersonSceneryProfile& tileFirstPersonGetSceneryProfile(
         found = profiles.find(key);
     }
     return found->second;
+}
+
+static FrmId tileFirstPersonTempleBackwallFrmId(Object* object)
+{
+    const int replacementFrame =
+        firstPersonSceneryTempleBackwallReplacementFrame(ProtoId(object).protoId());
+    if (replacementFrame < 0) {
+        return FrmId(object);
+    }
+
+    return FrmId(OBJ_TYPE_SCENERY, replacementFrame);
 }
 
 static bool tileFirstPersonRenderLargeScenery(Object* object,
@@ -2365,8 +2382,11 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
         return false;
     }
     const Rotation rotation = rotationIsValid(object->rotation) ? object->rotation : ROTATION_NE;
+    const FrmId sceneryFrmId = templeBackwall
+        ? tileFirstPersonTempleBackwallFrmId(object)
+        : FrmId(object);
     FrmImage image;
-    if (!image.lock(FrmId(object), object->frame, rotation)) {
+    if (!image.lock(sceneryFrmId, object->frame, rotation)) {
         return false;
     }
     const ConstBuffer2D frame = image.getBuffer();
@@ -2377,7 +2397,8 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
     // Key by art identity rather than cache allocation, which can be reused
     // after eviction. Frame and rotation still follow scripted art changes.
     const FirstPersonSceneryProfile& profile =
-        tileFirstPersonGetSceneryProfile(object, rotation, frame);
+        tileFirstPersonGetSceneryProfile(
+            static_cast<unsigned int>(sceneryFrmId.fid()), object->frame, rotation, frame);
     FirstPersonSceneryMapEdge mapEdge = FirstPersonSceneryMapEdge::None;
     if (!templeBackwall && !arroyoVillageMonument
         && gHexGridWidth > 0 && gHexGridHeight > 0) {
@@ -2401,18 +2422,23 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
         return false;
     }
     double projectedIsoX = firstPersonSceneryBackwallProjectedX(worldX, worldY);
+    double templePanelVerticalOffset = 0.0;
     if (templeBackwall && context->templePanelLayouts != nullptr) {
         for (const TileFirstPersonTemplePanelLayout& layout : *context->templePanelLayouts) {
             if (layout.object == object) {
                 projectedIsoX += layout.projectedIsoXOffset;
+                templePanelVerticalOffset = layout.verticalOffset;
                 break;
             }
         }
     }
+    if (templeBackwall) {
+        projectedIsoX += kFirstPersonTempleBackwallProjectedXOffset;
+    }
     const double projectedIsoY = firstPersonSceneryBackwallProjectedY(worldX, worldY)
         + image.getYOffset() + object->y;
     const double backwallVerticalOffset = templeBackwall
-        ? 0.0
+        ? templePanelVerticalOffset
         : arroyoVillageMonument || mapEdgeBackdrop
         ? 0.0
         : firstPersonSceneryBackwallVerticalOffset(
@@ -2504,6 +2530,11 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
             const auto& cap = (*context->doorCapDepths)[x];
             bands.addOccluder(cap.top, cap.bottom);
         }
+        if (templeBackwall) {
+            bands.addOccluder(firstPersonSceneryFloorOcclusionTop(
+                                  hit.depth, context->horizonY, gTileWindowHeight),
+                lastY);
+        }
         const auto& edges = bands.boundaries();
         for (size_t band = 0; band + 1 < edges.size(); band++) {
             const int bandTop = edges[band];
@@ -2511,7 +2542,12 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
             const double wallDepth = tileFirstPersonGetWallDepthAt(x, bandTop,
                 context->horizonY, context->wallDepths, context->wallSillDepths,
                 context->doorCapDepths);
-            if (!templeBackwall && hit.depth >= wallDepth) {
+            if (hit.depth >= wallDepth) {
+                continue;
+            }
+            if (templeBackwall && bandTop > context->horizonY
+                && hit.depth >= (gTileWindowHeight * 0.5)
+                        / (bandTop - context->horizonY)) {
                 continue;
             }
             context->hitTargets->push_back({ object, hit.depth, x, top, 1, artHeight,
@@ -2571,6 +2607,8 @@ static void tileFirstPersonFindTempleBackwallBounds(Object* object, void* contex
 {
     auto* bounds = static_cast<TileFirstPersonTempleBackwallBounds*>(context);
     if (!tileFirstPersonIsTempleBackwall(object)
+        || firstPersonSceneryIsTempleBackwallSupplementalProto(
+            ProtoId(object).protoId())
         || object->elevation != bounds->elevation
         || (object->flags & OBJECT_HIDDEN) != OBJECT_NONE
         || !tileIsValid(object->tile)) {
@@ -2600,6 +2638,11 @@ struct TileFirstPersonTemplePanelLayoutEntry {
     int prototypeId;
     double left;
     double width;
+    double baselineX;
+    double baselineY;
+    double baseSlope;
+    double baseRmsError;
+    double rowCoordinate = 0.0;
 };
 
 struct TileFirstPersonTemplePanelLayoutContext {
@@ -2625,26 +2668,41 @@ static void tileFirstPersonCollectTemplePanelLayout(Object* object, void* contex
     const Rotation rotation = rotationIsValid(object->rotation)
         ? object->rotation
         : ROTATION_NE;
+    const FrmId sceneryFrmId = tileFirstPersonTempleBackwallFrmId(object);
     FrmImage image;
-    if (!image.lock(FrmId(object), object->frame, rotation)) {
+    if (!image.lock(sceneryFrmId, object->frame, rotation)) {
         return;
     }
     const ConstBuffer2D frame = image.getBuffer();
     const FirstPersonSceneryProfile& profile =
-        tileFirstPersonGetSceneryProfile(object, rotation, frame);
+        tileFirstPersonGetSceneryProfile(
+            static_cast<unsigned int>(sceneryFrmId.fid()), object->frame, rotation, frame);
     if (profile.left >= profile.right) {
         return;
     }
 
     const double projectedIsoX = firstPersonSceneryBackwallProjectedX(worldX, worldY);
+    const double projectedIsoY = firstPersonSceneryBackwallProjectedY(worldX, worldY);
+    const int sourceCenter = std::clamp(
+        static_cast<int>(std::lround((profile.left + profile.right) * 0.5)),
+        profile.left, profile.right - 1);
+    const double baseline = firstPersonSceneryBackwallBaseline(profile, sourceCenter);
+    const double baselineX = projectedIsoX + image.getXOffset() + object->x
+        + sourceCenter - frame.width * 0.5;
+    const double baselineY = projectedIsoY + image.getYOffset() + object->y
+        + baseline - frame.height;
     const double left = projectedIsoX + image.getXOffset() + object->x
         + profile.left - frame.width * 0.5;
     const double width = profile.right - profile.left;
     layoutContext->entries->push_back({
-        { object, 0.0 },
+        { object, 0.0, 0.0 },
         ProtoId(object).protoId(),
         left,
         width,
+        baselineX,
+        baselineY,
+        profile.slope,
+        profile.baseRmsError,
     });
 }
 
@@ -2697,24 +2755,118 @@ static double tileFirstPersonGetTempleBackwallY(MapElevation elevation, int entr
     std::vector<TileFirstPersonTemplePanelLayoutEntry> layoutEntries;
     TileFirstPersonTemplePanelLayoutContext layoutContext { elevation, &layoutEntries };
     objectVisitAll(tileFirstPersonCollectTemplePanelLayout, &layoutContext);
-    std::sort(layoutEntries.begin(), layoutEntries.end(),
-        [](const TileFirstPersonTemplePanelLayoutEntry& left,
-            const TileFirstPersonTemplePanelLayoutEntry& right) {
-            return left.prototypeId < right.prototypeId;
-        });
     if (!layoutEntries.empty()) {
-        double totalWidth = 0.0;
-        for (const TileFirstPersonTemplePanelLayoutEntry& entry : layoutEntries) {
-            totalWidth += entry.width;
-        }
-        const double originalCenter =
-            (layoutEntries.front().left
-                + layoutEntries.back().left + layoutEntries.back().width) * 0.5;
-        double nextLeft = originalCenter - totalWidth * 0.5;
+        std::vector<TileFirstPersonTemplePanelLayoutEntry*> upperEntries;
+        std::vector<TileFirstPersonTemplePanelLayoutEntry*> supplementalEntries;
         for (TileFirstPersonTemplePanelLayoutEntry& entry : layoutEntries) {
-            entry.layout.projectedIsoXOffset = nextLeft - entry.left;
-            panelLayouts->push_back(entry.layout);
-            nextLeft += entry.width;
+            if (firstPersonSceneryIsTempleBackwallSupplementalProto(entry.prototypeId)) {
+                supplementalEntries.push_back(&entry);
+            } else {
+                upperEntries.push_back(&entry);
+            }
+        }
+        if (upperEntries.empty()) {
+            upperEntries.swap(supplementalEntries);
+        }
+
+        int xAxisPanelCount = 0;
+        int yAxisPanelCount = 0;
+        for (const TileFirstPersonTemplePanelLayoutEntry* entry : upperEntries) {
+            if (!firstPersonSceneryHasMapAlignedBase(
+                    entry->baseSlope, entry->baseRmsError)) {
+                continue;
+            }
+            if (std::abs(entry->baseSlope + 0.25) <= 0.08) {
+                xAxisPanelCount++;
+            } else {
+                yAxisPanelCount++;
+            }
+        }
+
+        const bool hasWallAxis = std::max(xAxisPanelCount, yAxisPanelCount) >= 2
+            && xAxisPanelCount != yAxisPanelCount;
+        const double wallSlope = xAxisPanelCount > yAxisPanelCount ? -0.25 : 0.75;
+        if (hasWallAxis) {
+            for (TileFirstPersonTemplePanelLayoutEntry* entry : upperEntries) {
+                entry->rowCoordinate = firstPersonSceneryBackwallRowCoordinate(
+                    entry->baselineX, entry->baselineY, wallSlope);
+            }
+            for (TileFirstPersonTemplePanelLayoutEntry* entry : supplementalEntries) {
+                entry->rowCoordinate = firstPersonSceneryBackwallRowCoordinate(
+                    entry->baselineX, entry->baselineY, wallSlope);
+            }
+        }
+
+        std::vector<TileFirstPersonTemplePanelLayoutEntry*> orderedEntries = upperEntries;
+        double minimumLeft = std::numeric_limits<double>::infinity();
+        double maximumRight = -std::numeric_limits<double>::infinity();
+        for (const TileFirstPersonTemplePanelLayoutEntry* entry : upperEntries) {
+            minimumLeft = std::min(minimumLeft, entry->left);
+            maximumRight = std::max(maximumRight, entry->left + entry->width);
+        }
+        std::sort(orderedEntries.begin(), orderedEntries.end(),
+            [](const TileFirstPersonTemplePanelLayoutEntry* left,
+                const TileFirstPersonTemplePanelLayoutEntry* right) {
+                return left->rowCoordinate < right->rowCoordinate;
+            });
+
+        std::vector<std::vector<TileFirstPersonTemplePanelLayoutEntry*>> rows;
+        for (TileFirstPersonTemplePanelLayoutEntry* entry : orderedEntries) {
+            if (rows.empty()
+                || entry->rowCoordinate - rows.back().back()->rowCoordinate
+                    > kFirstPersonTemplePanelRowGap) {
+                rows.emplace_back();
+            }
+            rows.back().push_back(entry);
+        }
+
+        std::vector<double> rowCoordinates;
+        rowCoordinates.reserve(rows.size());
+        for (const auto& row : rows) {
+            double rowCoordinate = 0.0;
+            for (const TileFirstPersonTemplePanelLayoutEntry* entry : row) {
+                rowCoordinate += entry->rowCoordinate;
+            }
+            rowCoordinates.push_back(rowCoordinate / static_cast<double>(row.size()));
+        }
+        const double bottomRowCoordinate = rowCoordinates.back();
+        const double rowCenterX = (minimumLeft + maximumRight) * 0.5;
+        for (size_t rowIndex = 0; rowIndex < rows.size(); rowIndex++) {
+            auto& row = rows[rowIndex];
+            std::sort(row.begin(), row.end(),
+                [](const TileFirstPersonTemplePanelLayoutEntry* left,
+                    const TileFirstPersonTemplePanelLayoutEntry* right) {
+                    return left->prototypeId < right->prototypeId;
+                });
+            double totalWidth = 0.0;
+            for (const TileFirstPersonTemplePanelLayoutEntry* entry : row) {
+                totalWidth += entry->width;
+            }
+            double nextLeft = rowCenterX - totalWidth * 0.5;
+            const double verticalOffset =
+                firstPersonSceneryBackwallVerticalOffset(
+                    bottomRowCoordinate, rowCoordinates[rowIndex]);
+            for (TileFirstPersonTemplePanelLayoutEntry* entry : row) {
+                entry->layout.projectedIsoXOffset = nextLeft - entry->left;
+                entry->layout.verticalOffset =
+                    firstPersonSceneryTemplePanelVerticalOffset(
+                        entry->prototypeId, verticalOffset);
+                panelLayouts->push_back(entry->layout);
+                nextLeft += entry->width;
+            }
+        }
+
+        std::sort(supplementalEntries.begin(), supplementalEntries.end(),
+            [](const TileFirstPersonTemplePanelLayoutEntry* left,
+                const TileFirstPersonTemplePanelLayoutEntry* right) {
+                return left->prototypeId < right->prototypeId;
+            });
+        for (TileFirstPersonTemplePanelLayoutEntry* entry : supplementalEntries) {
+            entry->layout.projectedIsoXOffset = 0.0;
+            entry->layout.verticalOffset =
+                firstPersonSceneryBackwallVerticalOffset(
+                    bottomRowCoordinate, entry->rowCoordinate);
+            panelLayouts->push_back(entry->layout);
         }
     }
     *backwallIsoBaseY = bounds.maximumIsoY;
@@ -2734,14 +2886,21 @@ static double tileFirstPersonGetTempleBackwallY(MapElevation elevation, int entr
     };
     objectVisitAll(tileFirstPersonFindTempleWallAnchor, &wallAnchor);
     if (!std::isfinite(wallAnchor.nearestDistanceSquared)) {
-        return fallbackY;
+        return fallbackY - kFirstPersonTempleBackwallRowsBack;
     }
-    return wallAnchor.y;
+    return wallAnchor.y - kFirstPersonTempleBackwallRowsBack;
 }
 
 static bool tileFirstPersonIsHiddenArroyoTempleScenery(const Object* object)
 {
-    return FrmId(object->fid).objectType() == OBJ_TYPE_SCENERY
+    const bool isScenery = FrmId(object->fid).objectType() == OBJ_TYPE_SCENERY;
+    if (isScenery && gMapHeader.index == MAP_ARROYO_TEMPLE
+        && firstPersonSceneryIsTempleBackwallSuppressedProto(
+            ProtoId(object).protoId())) {
+        return true;
+    }
+
+    return isScenery
         && ProtoId(object).protoId() == kArroyoTempleHiddenSceneryProtoId
         && object->tile == kArroyoTempleHiddenSceneryTile
         && object->elevation == kArroyoTempleHiddenSceneryElevation;
@@ -2763,13 +2922,6 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
     }
 
     if (tileFirstPersonIsHiddenArroyoTempleScenery(object)) {
-        return;
-    }
-
-    if (objectType == OBJ_TYPE_SCENERY
-        && gMapHeader.index == MAP_ARROYO_TEMPLE
-        && renderContext->elevation == ELEVATION_FIRST
-        && ProtoId(object).protoId() == 1359) {
         return;
     }
 

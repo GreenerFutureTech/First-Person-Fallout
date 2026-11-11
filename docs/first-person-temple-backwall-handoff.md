@@ -18,33 +18,41 @@ Its panels are rendered on a shared world-space horizontal plane rather than
 each panel deriving its own ground direction and depth from its isometric
 artwork.
 
-The grouped prototypes are scenery proto IDs `1360` through `1365`, plus
-`1369` and `1370`:
+The ARTEMPLE map overrides the prototype FIDs on several placed scenery
+objects. Its facade instances and actual artwork are:
 
-| Proto ID | FRM |
-|---:|---|
-| 1360 | `TEMPLE01.FRM` |
-| 1361 | `TEMPLE02.FRM` |
-| 1362 | `TEMPLE03.FRM` |
-| 1363 | `TEMPLE04.FRM` |
-| 1364 | `TEMPLE05.FRM` |
-| 1365 | `TEMPLE06.FRM` |
-| 1369 | `temple07.frm` |
-| 1370 | `temple08.frm` |
+| Proto ID | Map FID frame | Map-instance FRM |
+|---:|---:|---|
+| 1359 | 1373 | `TEMPLE01.FRM` |
+| 1360 | 1374 | `TEMPLE02.FRM` |
+| 1361 | 1375 | `TEMPLE03.FRM` |
+| 1362 | 1376 | `TEMPLE04.FRM` |
+| 1363 | 1377 | `TEMPLE05.FRM` |
+| 1364 | 1378 | `TEMPLE06.FRM` |
+| 1368 | 1382 | `temple07.frm` |
+| 1369 | 1383 | `temple08.frm` (hidden; layout anchor only) |
 
-Those identities were checked against the scenery proto FIDs and `SCENERY.LST`
-in the user's Fallout data installation. Proto 1359 is a separate door using
-`door06.frm`; proto 1366 is a fire pit, and proto 1368 is `HOWITZR2.FRM`.
-Those are not facade panels and should not be forced into the backwall.
+The fire pits are map objects 1365 and 1366 (frames 1379 and 1380). Proto
+1368's prototype default is `HOWITZR2.FRM`, but its placed ARTEMPLE instance
+uses `temple07.frm`. Proto 1370 has no placed instance in ARTEMPLE.
 
 ### Prototype membership correction
 
-The original hardcoded set was off by one: it omitted `TEMPLE06` and
-`temple08`, and included the separate door and howitzer. Membership is now
-based on the verified prototype IDs above and covered by a regression test for
-both inclusion and neighboring exclusions. The ARTEMPLE map contains placed
-instances of Temple01-07; `temple08` is available as a facade asset but is not
-placed in the map.
+The backwall group is based on the placed ARTEMPLE object IDs, not the
+prototype-default FIDs: 1359-1364 and 1368-1369. This includes the door-typed
+1359 object because its map-instance art is `TEMPLE01.FRM`; it excludes the
+fire pits and the unplaced proto 1370. The regression test covers these
+inclusions and exclusions. Proto 1369 remains in the group as a layout anchor,
+but its pixels are hidden; its replacement `temple07.frm` profile is used only
+to preserve the tier alignment. Objects 1359 and 1368 retain their
+map-projected horizontal positions and map-derived vertical levels rather than
+being packed into an artificial row. Proto 1363 (`TEMPLE05.FRM`) and proto 1364 (`TEMPLE06.FRM`), the
+rightmost upper panels, are lowered by half a world unit to keep their seam
+aligned. All panels share the same backwall depth plane.
+
+The shared Temple backdrop plane is moved two map rows back (1.0 world unit)
+and four map columns left (96 projected-X pixels) as a group, to clear and
+align the actual door opening.
 
 ### Base flattening and overlapping panels
 
@@ -77,12 +85,13 @@ world unit. The earlier 24-pixel conversion doubled vertical separation and
 left large gaps between the panels. The artwork also scales at 48 pixels per
 world unit instead of using the generic scenery's shorter 80-pixel scale.
 
-The renderer's existing per-column ray intersection, wall-depth clipping,
-CPU/GPU drawing, transparency, and hit-target paths are reused. The override
-also includes narrow or flat-flagged Temple facade panels that the general
-large-scenery classifier would not otherwise select. If a grouped panel cannot
-be loaded or has no opaque pixels, the code falls through to the existing
-billboard behavior, with its anchor placed at the common backwall depth.
+The renderer's existing per-column ray intersection, wall/sill-depth clipping,
+projected-floor clipping, CPU/GPU drawing, transparency, and hit-target paths
+are reused. The override also includes narrow or flat-flagged Temple facade
+panels that the general large-scenery classifier would not otherwise select.
+If a grouped panel cannot be loaded or has no opaque pixels, the code falls
+through to the existing billboard behavior, with its anchor placed at the
+common backwall depth.
 One Temple facade prototype is typed as a door in its proto data; the F11 door
 exclusion now runs after backwall recognition so this panel is not dropped.
 The large-scenery path likewise allows the recognized Temple group through

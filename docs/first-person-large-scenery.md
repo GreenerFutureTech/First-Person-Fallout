@@ -114,41 +114,58 @@ F11 off to confirm the original isometric view remains unchanged.
 
 ## Temple of Trials backwall
 
-The eight Temple facade scenery prototypes (1360-1365, 1369, and 1370) are a
-single panorama in F11. The adjacent gate (1359), fire pits (1366-1367), and
-howitzer (1368) are separate objects, not backdrop panels. Each panel is
-placed using both components of its original isometric tile projection:
-projected screen X determines its horizontal position on the
-shared world-X plane, and projected screen Y determines its vertical offset.
-This preserves the source map's left-to-right ordering and places map pieces
-that appear higher in the isometric scene higher in the F11 panorama. The
-horizontal conversion subtracts the shared plane's isometric Y contribution
-before placing panels along world X, keeping the backdrop centered when its
-depth changes. Backwall columns use a fitted base line only when the profile
-has a reliable map-aligned lower edge; irregular silhouettes retain their
-actual per-column base to avoid introducing gaps. Equal-depth overlapping
-Temple panels composite in map order in the software renderer, matching the
-accelerated path. Vertical spacing uses the same
-48-pixel-per-world-unit scale as horizontal placement, preventing isometric
-Y values from exaggerating the gaps between panels. Panel height uses this
-same scale rather than the shorter generic-scenery scale.
+The ARTEMPLE map places the Temple facade as scenery objects 1359-1364 and
+1368-1369. Their map-instance FIDs override some prototype defaults: proto
+1359 supplies `TEMPLE01.FRM`, proto 1368 supplies `temple07.frm`, and proto
+1369 supplies `temple08.frm`. F11 hides proto 1369's pixels but retains it as
+a layout anchor, using `temple07.frm` (frame 1382) only for its placement
+profile. The fire pits (1365-1366) are not facade panels.
+The newly recovered panels (1359 and 1368) retain their map-projected
+horizontal positions and map-derived vertical levels rather than being packed
+as another row. Proto 1363 (`TEMPLE05.FRM`) and proto 1364 (`TEMPLE06.FRM`),
+the rightmost upper panels, are both lowered by half a world unit so their
+seam remains aligned. All panels share the established backwall depth plane
+and retain their individual horizontal positions. The isometric wall objects
+are still represented by F11's procedural graybox, not by their original wall
+textures. Each scenery panel's original tile, object, and FRM offsets
+determine its projected baseline. To infer its row, the renderer removes the
+fitted map-axis slope along the wall from that baseline's projected X/Y
+position. This prevents a panel from appearing higher or lower just because it
+lies farther along the isometric wall. Reliable panel art selects the wall
+axis; if the art does not establish one, the panels retain a single-row
+layout.
 
-The Temple panels are ordered by facade prototype (1360-1365, 1369, then
-1370) and packed edge-to-edge using each FRM's visible horizontal span,
-centered around their original group bounds. This removes gaps and overlaps
-caused by placing each panel at its independent isometric tile position while
-preserving the intended left-to-right artwork sequence. All panels share a
-common baseline. The resulting panorama is
-anchored to the solid wall tile nearest the facade group's center, rather than
-a fixed distance from the entry tile. Temple panels render over the procedural
-wall rather than being clipped to its per-column ray hits, so gaps in the wall
-graybox do not break up the packed art; transparent areas remain transparent.
-If no solid wall tile is found, the existing shared-plane placement 7.5 world
-units in front of the entry tile is used. This map-specific
-override includes the narrow and flat-flagged panels that the general
-large-scenery heuristic intentionally leaves alone. Fire-pit props and
-unrelated collision/blocker objects are not included. The isometric renderer,
-movement, and collision continue to use the original map objects.
+The whole Temple backdrop is shifted two map rows away from the camera
+(1.0 world unit) and four map columns left (96 projected-X pixels) so its
+doorway clears and aligns with the in-world door opening. All panels receive
+the same translation.
+
+Panels whose corrected baseline positions are within 64 projected pixels
+(two world units normal to the wall) are grouped into a row. Each row is
+ordered by facade prototype and packed edge-to-edge using the FRMs' visible
+horizontal spans, with rows centered on the same group bounds. Upper tiers
+retain their map-derived positive offsets from the default backwall baseline,
+while the lowest tier remains on that baseline. Offsets use the same
+48-pixel-per-world-unit scale as the backwall renderer, without per-prototype
+row settings.
+Backwall columns use a fitted base line only when the profile has a reliable
+map-aligned lower edge; irregular silhouettes retain their actual per-column
+base to avoid introducing gaps. Equal-depth overlapping Temple panels
+composite in map order in the software renderer, matching the accelerated
+path. Panel height uses the same 48-pixel scale rather than the shorter
+generic-scenery scale.
+
+The resulting panorama is anchored to the solid wall tile nearest the facade
+group's center, rather than a fixed distance from the entry tile. Temple
+panels are clipped against per-column wall and sill ray depths, plus the
+projected floor depth, so foreground walls and floor cover the backdrop while
+transparent areas and the open doorway remain visible. If no solid wall tile
+is found, the existing shared-plane placement 7.5 world units in front of the
+entry tile is used. This map-specific override includes the narrow and
+flat-flagged panels that the general large-scenery heuristic intentionally
+leaves alone. Fire-pit props and unrelated collision/blocker objects are not
+included. The isometric renderer, movement, and collision continue to use the
+original map objects.
 
 ## Temple blocked-floor boundaries
 
@@ -194,14 +211,10 @@ does not by itself prove every scenery pixel is depth-tested against it.
 
 Trace the scenery render path for exceptions that bypass normal wall-depth
 clipping. In particular, keep special prototype groups map-scoped: prototype
-IDs are not globally unique descriptions of artwork. Arroyo Temple's
-`firstPersonSceneryIsTempleBackwallProto` group includes prototype 1370, while
-Arroyo Village uses that same ID for its Mountain backdrop. Before this
-correction, the Village Mountain was classified as a Temple backwall and its
-pixels skipped the ordinary wall-depth test, so it could show through any
-building wall even though the center ray correctly hit the building. Gate the
-Temple-backwall classification on `MAP_ARROYO_TEMPLE`; do not suppress or move
-nearby props to compensate for a render-classification/depth-test error.
+IDs are not globally unique descriptions of artwork. Gate the
+Temple-backwall classification on `MAP_ARROYO_TEMPLE`; other maps reuse nearby
+prototype IDs for unrelated scenery. Do not suppress or move nearby props to
+compensate for a render-classification/depth-test error.
 
 Temple facade prototypes are routed into the shared backwall before the
 ordinary scenery-door exclusion. This matters because one of the facade

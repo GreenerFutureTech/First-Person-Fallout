@@ -194,33 +194,79 @@ inline double firstPersonSceneryBackwallVerticalOffset(
     return (backwallBaseY - projectedY) / 48.0;
 }
 
+inline double firstPersonSceneryTemplePanelVerticalOffset(
+    int protoId, double rowOffset)
+{
+    constexpr double kTempleUpperRightVerticalDrop = 1;
+    return protoId == 1363 || protoId == 1364
+        ? rowOffset - kTempleUpperRightVerticalDrop
+        : rowOffset;
+}
+
+inline double firstPersonSceneryBackwallRowCoordinate(
+    double projectedX, double projectedY, double wallSlope)
+{
+    return projectedY - wallSlope * projectedX;
+}
+
 inline double firstPersonSceneryBackwallDepth(double entranceY)
 {
     constexpr double kDepthBeforeEntrance = 7.5;
     return entranceY - kDepthBeforeEntrance;
 }
 
+inline int firstPersonSceneryFloorOcclusionTop(
+    double sceneryDepth, int horizonY, int screenHeight)
+{
+    if (!(sceneryDepth > 0.0)) {
+        return screenHeight;
+    }
+
+    const double top = horizonY + std::ceil(
+        (screenHeight * 0.5) / sceneryDepth);
+    if (top <= horizonY) {
+        return horizonY + 1;
+    }
+    return top >= screenHeight ? screenHeight : static_cast<int>(top);
+}
+
 inline bool firstPersonSceneryIsTempleBackwallProto(int protoId)
 {
     switch (protoId) {
-    case 1360: // TEMPLE01.FRM
-    case 1361: // TEMPLE02.FRM
-    case 1362: // TEMPLE03.FRM
-    case 1363: // TEMPLE04.FRM
-    case 1364: // TEMPLE05.FRM
-    case 1365: // TEMPLE06.FRM
-    case 1369: // temple07.frm
-    case 1370: // temple08.frm
+    // ARTEMPLE overrides several prototype FIDs on its placed instances.
+    case 1359: // TEMPLE01.FRM
+    case 1360: // TEMPLE02.FRM
+    case 1361: // TEMPLE03.FRM
+    case 1362: // TEMPLE04.FRM
+    case 1363: // TEMPLE05.FRM
+    case 1364: // TEMPLE06.FRM
+    case 1368: // temple07.frm
+    case 1369: // temple08.frm
         return true;
     default:
         return false;
     }
 }
 
+inline bool firstPersonSceneryIsTempleBackwallSupplementalProto(int protoId)
+{
+    return protoId == 1359 || protoId == 1368;
+}
+
+inline bool firstPersonSceneryIsTempleBackwallSuppressedProto(int protoId)
+{
+    return protoId == 1369;
+}
+
+inline int firstPersonSceneryTempleBackwallReplacementFrame(int protoId)
+{
+    return protoId == 1369 ? 1382 : -1;
+}
+
 inline int firstPersonSceneryBackwallBaseline(
     const FirstPersonSceneryProfile& profile, int sourceX)
 {
-    if (!profile.fixed) {
+    if (!firstPersonSceneryHasMapAlignedBase(profile.slope, profile.baseRmsError)) {
         return profile.bottoms[sourceX];
     }
     return std::clamp(static_cast<int>(std::lround(

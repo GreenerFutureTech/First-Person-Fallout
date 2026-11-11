@@ -119,29 +119,61 @@ int main()
                 (lowerPanelY - upperPanelY) / 48.0)
             && firstPersonSceneryBackwallVerticalOffset(lowerPanelY, upperPanelY) > 0.0,
         "panel vertical spacing uses the horizontal scale and preserves ordering");
+    const double xAxisRow = firstPersonSceneryBackwallRowCoordinate(480, 120, -0.25);
+    require(close(firstPersonSceneryBackwallRowCoordinate(528, 108, -0.25), xAxisRow)
+            && close(firstPersonSceneryBackwallRowCoordinate(512, 144, -0.25)
+                    - xAxisRow,
+                32.0),
+        "backwall row coordinate removes along-wall isometric slope");
+    const double yAxisRow = firstPersonSceneryBackwallRowCoordinate(480, 120, 0.75);
+    require(close(firstPersonSceneryBackwallRowCoordinate(512, 144, 0.75), yAxisRow)
+            && close(firstPersonSceneryBackwallRowCoordinate(528, 108, 0.75)
+                    - yAxisRow,
+                -48.0),
+        "backwall row coordinate handles the other map axis");
     require(close(firstPersonSceneryBackwallDepth(46.25), 38.75),
         "Temple backwall moves one map row toward the facade");
+    require(close(firstPersonSceneryTemplePanelVerticalOffset(1363, 1.25), 0.75)
+            && close(firstPersonSceneryTemplePanelVerticalOffset(1364, 1.25), 0.75)
+            && close(firstPersonSceneryTemplePanelVerticalOffset(1362, 1.25), 1.25),
+        "Temple05 and the texture to its right share the downward tier adjustment");
+    require(firstPersonSceneryFloorOcclusionTop(2.0, 100, 600) == 250
+            && firstPersonSceneryFloorOcclusionTop(1000.0, 100, 600) == 101
+            && firstPersonSceneryFloorOcclusionTop(0.5, 100, 600) == 600,
+        "Temple backwall is clipped where the projected floor becomes nearer");
     auto unevenProfile = profile;
     unevenProfile.bottoms[50] = 160;
     require(firstPersonSceneryBackwallBaseline(unevenProfile, 50) == 128
             && firstPersonSceneryBackwallBaseline(unevenProfile, 115) == 112,
         "clean backwall profiles follow the fitted base instead of isolated low pixels");
-    unevenProfile.fixed = false;
+    unevenProfile.fixed = true;
+    unevenProfile.baseRmsError = 3.0;
     require(firstPersonSceneryBackwallBaseline(unevenProfile, 50) == 160,
-        "irregular backwall profiles retain their actual lower edge");
+        "large irregular backwall profiles retain their actual lower edge");
     require(!firstPersonSceneryShouldReplaceDepth(2.0, 2.0, false)
             && firstPersonSceneryShouldReplaceDepth(2.0, 2.0, true)
             && firstPersonSceneryShouldReplaceDepth(1.0, 2.0, false)
             && !firstPersonSceneryShouldReplaceDepth(3.0, 2.0, true),
         "equal-depth backwall panels composite in both renderers");
-    for (int protoId : { 1360, 1361, 1362, 1363, 1364, 1365, 1369, 1370 }) {
+    for (int protoId : { 1359, 1360, 1361, 1362, 1363, 1364, 1368, 1369 }) {
         require(firstPersonSceneryIsTempleBackwallProto(protoId),
-            "Temple facade prototype is grouped into the backwall");
+            "placed Temple facade object is grouped into the backwall");
     }
-    for (int protoId : { 1359, 1366, 1367, 1368, 1371 }) {
+    for (int protoId : { 1365, 1366, 1367, 1370, 1371 }) {
         require(!firstPersonSceneryIsTempleBackwallProto(protoId),
-            "gate, fire pits, and howitzer are not backwall panels");
+            "fire pits and unplaced scenery are not backwall panels");
     }
+    require(firstPersonSceneryIsTempleBackwallSupplementalProto(1359)
+            && firstPersonSceneryIsTempleBackwallSupplementalProto(1368)
+            && !firstPersonSceneryIsTempleBackwallSupplementalProto(1369),
+        "newly recovered Temple panels keep separate map-derived placement");
+    require(firstPersonSceneryIsTempleBackwallProto(1369)
+            && firstPersonSceneryIsTempleBackwallSuppressedProto(1369)
+            && !firstPersonSceneryIsTempleBackwallSuppressedProto(1368),
+        "Temple08 stays as a layout anchor while its pixels are hidden");
+    require(firstPersonSceneryTempleBackwallReplacementFrame(1369) == 1382
+            && firstPersonSceneryTempleBackwallReplacementFrame(1370) == -1,
+        "placed Temple08 uses Temple07 artwork only for its F11 replacement");
 
     // Temple facade art can be taller than the original aspect-ratio cutoff
     // despite having a clean base aligned to a map axis.
