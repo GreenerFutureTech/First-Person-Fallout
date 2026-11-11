@@ -121,48 +121,52 @@ movement, collision, doors, and the original scenery remain unchanged.
 
 ## Temple of Trials backwall
 
-The eight Temple facade scenery prototypes (1360-1365, 1369, and 1370) are a
-single panorama in F11. The adjacent gate (1359), fire pits (1366-1367), and
-howitzer (1368) are separate objects, not backdrop panels. Each panel is
-placed using both components of its original isometric tile projection:
-projected screen X determines its horizontal position on the
-shared world-X plane, and projected screen Y determines its vertical offset.
-This preserves the source map's left-to-right ordering and places map pieces
-that appear higher in the isometric scene higher in the F11 panorama. The
-horizontal conversion subtracts the shared plane's isometric Y contribution
-before placing panels along world X, keeping the backdrop centered when its
-depth changes. Backwall columns use a fitted base line only when the profile
-has a reliable map-aligned lower edge; irregular silhouettes retain their
-actual per-column base to avoid introducing gaps. Equal-depth overlapping
-Temple panels composite in map order in the software renderer, matching the
-accelerated path. Vertical spacing uses the same
-48-pixel-per-world-unit scale as horizontal placement, preventing isometric
-Y values from exaggerating the gaps between panels. Panel height uses this
-same scale rather than the shorter generic-scenery scale.
+The ARTEMPLE map places the Temple facade as scenery objects 1359-1364 and
+1368-1369. Their map-instance FIDs override some prototype defaults: proto
+1359 supplies `TEMPLE01.FRM`, proto 1368 supplies `temple07.frm`, and proto
+1369 supplies `temple08.frm`. F11 hides proto 1369's pixels but retains it as
+a layout anchor, using `temple07.frm` (frame 1382) only for its placement
+profile. The fire pits (1365-1366) are not facade panels.
+The newly recovered panels (1359 and 1368) retain their map-projected
+horizontal positions and map-derived vertical levels rather than being packed
+as another row. Proto 1363 (`TEMPLE05.FRM`) and proto 1364 (`TEMPLE06.FRM`),
+the rightmost upper panels, retain the prior one-world-unit adjustment in the
+fallback renderer. Their profiles determine the Temple backdrop's center.
+The F11 facade itself uses `files/ce.dat/art/scenery/temple_backdrop.frm`, a
+game-palette version of the supplied first-person image, projected as one
+slab. The original panel FRMs are not drawn while this asset loads; if it is
+missing, the renderer logs the issue and falls back to the original panels.
+The image includes baked-in perspective, so the apparent viewpoint within the
+texture does not change as the player moves or turns. The original panel
+profiles are still used to estimate the facade group's center; their individual
+vertical offsets no longer change the rendered image. The isometric wall
+objects are still represented by F11's procedural graybox, not by their
+original wall textures.
 
-The Temple panels are ordered by facade prototype (1360-1365, 1369, then
-1370) and packed edge-to-edge using each FRM's visible horizontal span,
-centered around their original group bounds. This removes gaps and overlaps
-caused by placing each panel at its independent isometric tile position while
-preserving the intended left-to-right artwork sequence. All panels share a
-common baseline. The resulting panorama is
-anchored to the solid wall tile nearest the facade group's center, rather than
-a fixed distance from the entry tile. Temple panels render over the procedural
-wall rather than being clipped to its per-column ray hits, so gaps in the wall
-graybox do not break up the packed art; transparent areas remain transparent.
-If no solid wall tile is found, the existing shared-plane placement 7.5 world
-units in front of the entry tile is used. This map-specific
-override includes the narrow and flat-flagged panels that the general
-large-scenery heuristic intentionally leaves alone. Fire-pit props and
-unrelated collision/blocker objects are not included. The isometric renderer,
-movement, and collision continue to use the original map objects.
+The image is centered using the original facade layout, shifted two map rows
+away from the camera (1.0 world unit) and four map columns left (96 projected-X
+pixels) so its doorway aligns with the in-world opening.
+
+The custom FRM is quantized to the Fallout palette and uses the existing
+48-pixel-per-world-unit scale, wall/sill depth tests, floor occlusion, and
+accelerated/software rendering paths. Its dark doorway is part of the image,
+not a transparent cutout.
+
+The resulting panorama is anchored to the solid wall tile nearest the facade
+group's center, rather than a fixed distance from the entry tile. Temple
+backdrop is clipped against per-column wall and sill ray depths, plus the
+projected floor depth, so foreground walls and floor cover it. If no solid wall
+tile is found, the existing shared-plane placement 7.5 world units in front of
+the entry tile is used. Fire-pit props and unrelated collision/blocker objects
+are not included. The isometric renderer, movement, and collision continue to
+use the original map objects.
 
 ## Temple blocked-floor boundaries
 
 F11 derives floor appearance from floor FRMs, while movement uses blocking
 objects. A blocked tile therefore does not automatically look like a wall.
 On Arroyo Temple, F11 searches within eight hexes of the facade panels and the
-two fire pits (prototypes 1366 and 1367), then draws half-height wall cells on
+two fire pits (map objects 1365 and 1366), then draws half-height wall cells on
 the perimeter of blocked tiles. The search is limited to those known landmark
 areas and its result is cached per map and elevation; it does not scan other
 maps. Doors, actors, facade panels, and fire-pit props are excluded from the
@@ -174,16 +178,17 @@ Klamath; the exact crash cause was not confirmed. Apply the visual treatment
 to another map only after identifying its specific blocked-floor landmarks
 and validating it in-game.
 
-On Arroyo Village, the central Stone Monument (scenery prototype 938) is
-rendered as an enlarged slab. Its nine-tile front wall segment (wall prototype
-621) is suppressed in F11 so the monument fills that space. More generally,
-large scenery with a map-aligned base is rendered as a backdrop when its object
-tile is within 1.5 first-person world units of the corresponding rectangular
-map-grid edge. The base slope selects the edge direction, and transparent art
-pixels are preserved. This replaces the Village-specific Mountain and Cavern
-backdrop list (prototypes 1370 and 1371); map collision and other wall pieces
-remain unchanged. The heuristic uses the rectangular tile-grid bounds rather
-than the playable area's potentially irregular boundary.
+On Arroyo Village, all three pieces of the central Stone Monument (scenery
+prototypes 937-939, including the `head1.frm` head at prototype 938) are
+rendered as enlarged slabs. The head anchors suppression of its nine-tile front
+wall segment (wall prototype 621) in F11. More generally, large scenery with a
+map-aligned base is rendered as a backdrop when its object tile is within 1.5
+first-person world units of the corresponding rectangular map-grid edge. The
+base slope selects the edge direction, and transparent art pixels are
+preserved. This replaces the Village-specific Mountain and Cavern backdrop
+list (prototypes 1370 and 1371); map collision and other wall pieces remain
+unchanged. The heuristic uses rectangular tile-grid bounds, not the playable
+area's potentially irregular boundary.
 
 Temple facade prototypes are routed into the shared backwall before the
 ordinary scenery-door exclusion. This matters because one of the facade
