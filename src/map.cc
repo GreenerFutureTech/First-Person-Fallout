@@ -754,6 +754,10 @@ int mapLoadById(Map map)
 // 0x482B74 map_load_file
 int mapLoad(File* stream)
 {
+    if (gMapViewerLoad) {
+        debugPrint("client mapLoad: begin\n");
+    }
+
     presenterSetEmissionsSuppressed(true);
     gMapLoadGeneration++;
     int mapLoadSoundId = 0;
@@ -799,6 +803,11 @@ int mapLoad(File* stream)
     if (mapHeaderRead(&gMapHeader, stream) != 0) {
         goto err;
     }
+    if (gMapViewerLoad) {
+        debugPrint("client mapLoad: header read version=%d flags=0x%X globalVars=%d localVars=%d\n",
+            gMapHeader.version, (unsigned int)gMapHeader.flags,
+            gMapHeader.globalVariablesCount, gMapHeader.localVariablesCount);
+    }
 
     error = "Invalid map version";
     if (gMapHeader.version != 19 && gMapHeader.version != 20) {
@@ -828,8 +837,14 @@ int mapLoad(File* stream)
 
     error = "Error loading global vars";
     // NOTE: Uninline.
+    if (gMapViewerLoad) {
+        debugPrint("client mapLoad: loading global vars\n");
+    }
     if (mapGlobalVariablesLoad(stream) != 0) {
         goto err;
+    }
+    if (gMapViewerLoad) {
+        debugPrint("client mapLoad: global vars loaded\n");
     }
 
     error = "Error allocating local vars";
@@ -840,22 +855,46 @@ int mapLoad(File* stream)
 
     error = "Error loading local vars";
     // NOTE: Uninline.
+    if (gMapViewerLoad) {
+        debugPrint("client mapLoad: loading local vars\n");
+    }
     if (mapLocalVariablesLoad(stream) != 0) {
         goto err;
     }
+    if (gMapViewerLoad) {
+        debugPrint("client mapLoad: local vars loaded\n");
+    }
 
+    if (gMapViewerLoad) {
+        debugPrint("client mapLoad: loading squares\n");
+    }
     if (_square_load(stream, gMapHeader.flags) != 0) {
         goto err;
     }
+    if (gMapViewerLoad) {
+        debugPrint("client mapLoad: squares loaded\n");
+    }
 
     error = "Error reading scripts";
+    if (gMapViewerLoad) {
+        debugPrint("client mapLoad: loading scripts\n");
+    }
     if (scriptLoadAll(stream) != 0) {
         goto err;
     }
+    if (gMapViewerLoad) {
+        debugPrint("client mapLoad: scripts loaded\n");
+    }
 
     error = "Error reading objects";
+    if (gMapViewerLoad) {
+        debugPrint("client mapLoad: loading objects\n");
+    }
     if (objectLoadAll(stream) != 0) {
         goto err;
+    }
+    if (gMapViewerLoad) {
+        debugPrint("client mapLoad: objects loaded\n");
     }
 
     if (!_isLoadingGame()) {
@@ -974,12 +1013,18 @@ int mapLoad(File* stream)
 err:
 
     if (error != nullptr) {
+        if (gMapViewerLoad) {
+            debugPrint("client mapLoad: failed: %s\n", error);
+        }
         char message[100]; // TODO: Size is probably wrong.
         snprintf(message, sizeof(message), "%s while loading map.", error);
         debugPrint(message);
         mapNewMap();
         rc = -1;
     } else {
+        if (gMapViewerLoad) {
+            debugPrint("client mapLoad: map data loaded; preloading art cache\n");
+        }
         _obj_preload_art_cache(gMapHeader.flags);
 
         // MP_PROTOCOL.md §2/§5: the active tactical map is now fully loaded — the
@@ -995,6 +1040,9 @@ err:
 
     sfallOnBeforeMapLoad();
 
+    if (gMapViewerLoad) {
+        debugPrint("client mapLoad: post-load setup\n");
+    }
     _partyMemberRecoverLoad();
     presenter()->hudBarShow();
     _proto_dude_update_gender();
@@ -1008,6 +1056,9 @@ err:
         debugPrint("\n   Error: scr_load_all_scripts failed!");
     }
 
+    if (gMapViewerLoad) {
+        debugPrint("client mapLoad: map start proc complete\n");
+    }
     scriptsExecMapEnterProc();
     scriptsExecMapUpdateProc();
     tileEnable();
@@ -1056,6 +1107,9 @@ err:
     }
 
     presenterSetEmissionsSuppressed(false);
+    if (gMapViewerLoad) {
+        debugPrint("client mapLoad: complete rc=%d map=%d elevation=%d\n", rc, gMapHeader.index, gElevation);
+    }
     return rc;
 }
 
