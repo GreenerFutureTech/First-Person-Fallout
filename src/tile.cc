@@ -162,6 +162,15 @@ struct TileFirstPersonDoorCapSpan {
     double depth = std::numeric_limits<double>::infinity();
 };
 
+struct TileFirstPersonTransparentWallLayer {
+    unsigned char type;
+    MaterialType material;
+    double distance;
+    TileFirstPersonWallOrientation orientation;
+    int cellTile;
+    int side;
+};
+
 struct TileFirstPersonTemplePanelLayout {
     const Object* object;
     double projectedIsoXOffset;
@@ -1530,6 +1539,8 @@ static void tileRenderFirstPersonPreview()
     wallPixelDepths.assign(
         static_cast<size_t>(gTileWindowWidth) * gTileWindowHeight,
         std::numeric_limits<double>::infinity());
+    static std::vector<std::vector<TileFirstPersonTransparentWallLayer>> transparentWallLayers;
+    transparentWallLayers.resize(gTileWindowWidth);
     static std::vector<TileFirstPersonDoorCapSpan> doorCapDepths;
     doorCapDepths.assign(gTileWindowWidth, TileFirstPersonDoorCapSpan {});
     bool hasDoorCaps = false;
@@ -1568,6 +1579,9 @@ static void tileRenderFirstPersonPreview()
 
     const unsigned int wallStart = profileFrame ? getTicks() : 0;
     for (int x = 0; x < gTileWindowWidth; x++) {
+        std::vector<TileFirstPersonTransparentWallLayer>& transparentLayers =
+            transparentWallLayers[x];
+        transparentLayers.clear();
         const double rayDirectionX = rayDirectionXs[x];
         const double rayDirectionY = rayDirectionYs[x];
 
@@ -1613,6 +1627,36 @@ static void tileRenderFirstPersonPreview()
         int doorCapCellTile = -1;
         int doorCapSide = 0;
         double cellEntryDistance = 0.0;
+        const auto addTransparentWallLayer = [&](unsigned char type,
+                                                  MaterialType material,
+                                                  double distance,
+                                                  TileFirstPersonWallOrientation orientation,
+                                                  int cellTile,
+                                                  int wallSide) {
+            auto existingLayer = std::find_if(
+                transparentLayers.begin(),
+                transparentLayers.end(),
+                [cellTile](const TileFirstPersonTransparentWallLayer& layer) {
+                    return layer.cellTile == cellTile;
+                });
+            if (existingLayer == transparentLayers.end()) {
+                transparentLayers.push_back({
+                    type, material, distance, orientation, cellTile, wallSide,
+                });
+            } else if (distance < existingLayer->distance) {
+                *existingLayer = { type, material, distance, orientation, cellTile, wallSide };
+            }
+
+            if (distance < windowDistance) {
+                windowType = type;
+                windowMaterial = material;
+                windowOrientation = orientation;
+                windowDistance = distance;
+                windowCellTile = cellTile;
+                windowSide = wallSide;
+                windowGateClosed = type == kFirstPersonWoodGateType;
+            }
+        };
         while (mapX >= 0 && mapX < gHexGridWidth
             && mapY >= 0 && mapY < gHexGridHeight) {
             const int cellIndex = mapY * gHexGridWidth + mapX;
@@ -1628,21 +1672,17 @@ static void tileRenderFirstPersonPreview()
                         || (wallType == 1 && cellMaterial == MATERIAL_TYPE_WOOD)
                         || wallType == kFirstPersonWoodGateType
                         || wallType == kFirstPersonClosedWoodGateType) {
-                        if (windowDistance == std::numeric_limits<double>::infinity()) {
-                            windowType = wallType == 1
+                        addTransparentWallLayer(
+                            wallType == 1
                                 ? kFirstPersonTransparentWoodWallType
                                 : wallType == kFirstPersonClosedWoodGateType
                                     ? kFirstPersonWoodGateType
-                                    : wallType;
-                            windowMaterial = cellMaterial;
-                            windowOrientation = wallOrientation;
-                            windowDistance = hitDistance;
-                            windowCellTile = mapY * gHexGridWidth
-                                + (gHexGridWidth - 1 - mapX);
-                            windowSide = side;
-                            windowGateClosed =
-                                wallType == kFirstPersonClosedWoodGateType;
-                        }
+                                    : wallType,
+                            cellMaterial,
+                            hitDistance,
+                            wallOrientation,
+                            mapY * gHexGridWidth + (gHexGridWidth - 1 - mapX),
+                            side);
                     } else if (wallType == 5) {
                         if (doorCapDistance == std::numeric_limits<double>::infinity()) {
                             doorCapDistance = hitDistance;
@@ -1722,23 +1762,19 @@ static void tileRenderFirstPersonPreview()
                         || (wallType == 1 && cellMaterial == MATERIAL_TYPE_WOOD)
                         || wallType == kFirstPersonWoodGateType
                         || wallType == kFirstPersonClosedWoodGateType) {
-                        if (windowDistance == std::numeric_limits<double>::infinity()) {
-                            windowType = wallType == 1
+                        addTransparentWallLayer(
+                            wallType == 1
                                 ? kFirstPersonTransparentWoodWallType
                                 : wallType == kFirstPersonClosedWoodGateType
                                     ? kFirstPersonWoodGateType
-                                    : wallType;
-                            windowMaterial = cellMaterial;
-                            windowOrientation = wallOrientation;
-                            windowDistance = hitDistance;
-                            windowCellTile = mapY * gHexGridWidth
-                                + (gHexGridWidth - 1 - mapX);
-                            windowSide = wallEntryDistance >= cellEntryDistance - kIntersectionEpsilon
+                                    : wallType,
+                            cellMaterial,
+                            hitDistance,
+                            wallOrientation,
+                            mapY * gHexGridWidth + (gHexGridWidth - 1 - mapX),
+                            wallEntryDistance >= cellEntryDistance - kIntersectionEpsilon
                                 ? nearX > nearY ? 0 : 1
-                                : side;
-                            windowGateClosed =
-                                wallType == kFirstPersonClosedWoodGateType;
-                        }
+                                : side);
                     } else if (wallType == 5) {
                         if (doorCapDistance == std::numeric_limits<double>::infinity()) {
                             doorCapDistance = hitDistance;
@@ -1823,7 +1859,6 @@ static void tileRenderFirstPersonPreview()
             wallType = windowType;
             wallMaterial = windowMaterial;
             wallOrientation = windowOrientation;
-            wallDistance = windowDistance;
             side = windowSide;
         }
         if (wallType == 3 || wallType == 4) {
@@ -1994,14 +2029,23 @@ static void tileRenderFirstPersonPreview()
                 }
             }
         };
-        if (windowDistance != std::numeric_limits<double>::infinity()
-            && wallDepths[x] != std::numeric_limits<double>::infinity()) {
-            renderWall(wallType, wallMaterial, wallDepths[x], wallOrientation, side);
-            renderWall(windowType, windowMaterial, windowDistance, windowOrientation, windowSide);
-        } else if (wallDistance != std::numeric_limits<double>::infinity()) {
+        if (wallDistance != std::numeric_limits<double>::infinity()) {
             renderWall(wallType, wallMaterial, wallDistance, wallOrientation, side);
-        } else if (windowDistance != std::numeric_limits<double>::infinity()) {
-            renderWall(windowType, windowMaterial, windowDistance, windowOrientation, windowSide);
+        }
+        std::sort(
+            transparentLayers.begin(),
+            transparentLayers.end(),
+            [](const TileFirstPersonTransparentWallLayer& left,
+                const TileFirstPersonTransparentWallLayer& right) {
+                return left.distance > right.distance;
+            });
+        for (const TileFirstPersonTransparentWallLayer& layer : transparentLayers) {
+            renderWall(
+                layer.type,
+                layer.material,
+                layer.distance,
+                layer.orientation,
+                layer.side);
         }
         if (doorCapDistance != std::numeric_limits<double>::infinity()) {
             renderWall(5, MATERIAL_TYPE_INVALID, doorCapDistance,
