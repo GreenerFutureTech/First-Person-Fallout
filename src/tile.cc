@@ -1993,7 +1993,7 @@ static void tileRenderFirstPersonPreview()
                     || material == MATERIAL_TYPE_WOOD
                 ? 1
                 : 2;
-            if ((type == 5 || gatePanel) && wallTop <= wallBottom) {
+            if (type == 5 && wallTop <= wallBottom) {
                 hasDoorCaps = true;
                 TileFirstPersonDoorCapSpan& cap = doorCapDepths[x];
                 if (!std::isfinite(cap.depth)) {
@@ -4342,10 +4342,8 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         isTinyScenery = sceneryProtoId == SceneryProtoTypeId::SmallBowl
         || sceneryProtoId == SceneryProtoTypeId::TempleRubble
         || sceneryProtoId == SceneryProtoTypeId::Rubble1
-        || sceneryProtoId == SceneryProtoTypeId::Rocks
         || sceneryProtoId == SceneryProtoTypeId::RocksAlt9
         || sceneryProtoId == static_cast<SceneryProtoTypeId>(91)
-        || sceneryProtoId == static_cast<SceneryProtoTypeId>(429)
         || sceneryProtoId == static_cast<SceneryProtoTypeId>(432)
 
         || sceneryProtoId == SceneryProtoTypeId::Unknown1;
@@ -4417,7 +4415,8 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         || sceneryProtoId == SceneryProtoTypeId::TableAlt9
         || sceneryProtoId == SceneryProtoTypeId::TableAlt10
         || sceneryProtoId == SceneryProtoTypeId::Bar
-        || sceneryProtoId == SceneryProtoTypeId::Rocks;
+        || sceneryProtoId == SceneryProtoTypeId::Rocks
+        || sceneryProtoId == static_cast<SceneryProtoTypeId>(429);
 
         isTallScenery = sceneryProtoId == SceneryProtoTypeId::LampPost
         || sceneryProtoId == SceneryProtoTypeId::TreeAlt
