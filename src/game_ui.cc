@@ -167,7 +167,8 @@ void gameHandleFirstPersonPreviewInput(int eventCode)
         }
     }
 
-    gameFirstPersonPreviewUpdateHover();
+    // Resolve hover during rendering once this frame's hit targets exist.
+    tileFirstPersonPreviewRequestRefresh();
 
     if (mouseDeviceUsesRelativeMode()) {
         int deltaX;

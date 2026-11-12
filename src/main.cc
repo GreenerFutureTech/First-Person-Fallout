@@ -2784,9 +2784,6 @@ static int mainClientViewer(const char* connectSpec)
         // is a pure mirror, so just repaint the whole iso window from current object
         // state each frame — simple and complete.
         tileWindowRefresh();
-        // Picking flushes the queued F11 render to rebuild actor hit targets.
-        // Defer a changed hover marker to the next frame to avoid rendering twice.
-        gameFirstPersonPreviewUpdateHover(false);
         tileFirstPersonPreviewFlushRefresh();
 
         renderPresent();

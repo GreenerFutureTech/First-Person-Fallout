@@ -344,6 +344,7 @@ static bool gFirstPersonPreviewTopologyEnabled = false;
 static bool gFirstPersonPreviewTopologyRendering = false;
 static int gFirstPersonPreviewTopologyPosition = -1;
 static int gFirstPersonPreviewTopologyZoom = 0;
+// Column-major: wall rasterization and occlusion runs both traverse vertical columns.
 static std::vector<double> gFirstPersonPreviewWallPixelDepths;
 static std::vector<std::vector<TileFirstPersonWallPixelDepthSpan>> gFirstPersonPreviewWallPixelDepthSpans;
 static constexpr int kFirstPersonWallTextureSize = 64;
@@ -1568,10 +1569,10 @@ static void tileRenderFirstPersonPreview()
     wallDepths.assign(gTileWindowWidth, std::numeric_limits<double>::infinity());
     static std::vector<double> wallSillDepths;
     wallSillDepths.assign(gTileWindowWidth, std::numeric_limits<double>::infinity());
-    gFirstPersonPreviewWallPixelDepths.assign(
-        static_cast<size_t>(gTileWindowWidth) * gTileWindowHeight,
-        std::numeric_limits<double>::infinity());
+    gFirstPersonPreviewWallPixelDepths.resize(
+        static_cast<size_t>(gTileWindowWidth) * gTileWindowHeight);
     std::vector<double>& wallPixelDepths = gFirstPersonPreviewWallPixelDepths;
+    gFirstPersonPreviewWallPixelDepthSpans.resize(gTileWindowWidth);
     static std::vector<std::vector<TileFirstPersonTransparentWallLayer>> transparentWallLayers;
     transparentWallLayers.resize(gTileWindowWidth);
     static std::vector<TileFirstPersonDoorCapSpan> doorCapDepths;
@@ -1615,6 +1616,13 @@ static void tileRenderFirstPersonPreview()
         std::vector<TileFirstPersonTransparentWallLayer>& transparentLayers =
             transparentWallLayers[x];
         transparentLayers.clear();
+        int depthTop = gTileWindowHeight;
+        int depthBottom = 0;
+        auto& depthSpans = gFirstPersonPreviewWallPixelDepthSpans[x];
+        depthSpans.clear();
+        const size_t columnOffset = static_cast<size_t>(x) * gTileWindowHeight;
+        std::fill_n(wallPixelDepths.begin() + columnOffset, gTileWindowHeight,
+            std::numeric_limits<double>::infinity());
         const double rayDirectionX = rayDirectionXs[x];
         const double rayDirectionY = rayDirectionYs[x];
 
@@ -2005,6 +2013,8 @@ static void tileRenderFirstPersonPreview()
                     cap.depth = std::min(cap.depth, distance);
                 }
             }
+            depthTop = std::min(depthTop, wallTop);
+            depthBottom = std::max(depthBottom, wallBottom + 1);
             for (int y = wallTop; y <= wallBottom; y += wallRenderStep) {
                 const bool brickTexture = type != 3 || y < doorSplitY;
                 const bool stoneWall = brickTexture && material == MATERIAL_TYPE_STONE;
@@ -2048,13 +2058,13 @@ static void tileRenderFirstPersonPreview()
                     ? gFirstPersonCaveWallTexture[textureIndex]
                     : texture[textureIndex];
                 const unsigned char color = intensityColorTable[texel][light];
-                const size_t depthIndex = static_cast<size_t>(y) * gTileWindowWidth + x;
+                const size_t depthIndex = static_cast<size_t>(x) * gTileWindowHeight + y;
                 if (distance < wallPixelDepths[depthIndex]) {
                     wallPixelDepths[depthIndex] = distance;
                     gTileWindowBuffer[y * gTileWindowPitch + x] = color;
                 }
                 if (wallRenderStep == 2 && y + 1 <= wallBottom) {
-                    const size_t nextDepthIndex = depthIndex + gTileWindowWidth;
+                    const size_t nextDepthIndex = depthIndex + 1;
                     if (distance < wallPixelDepths[nextDepthIndex]) {
                         wallPixelDepths[nextDepthIndex] = distance;
                         gTileWindowBuffer[(y + 1) * gTileWindowPitch + x] = color;
@@ -2084,47 +2094,20 @@ static void tileRenderFirstPersonPreview()
             renderWall(5, MATERIAL_TYPE_INVALID, doorCapDistance,
                 doorCapOrientation, doorCapSide);
         }
-    }
 
-    static std::vector<double> previousWallPixelDepths;
-    static std::vector<int> wallPixelDepthRunStarts;
-    gFirstPersonPreviewWallPixelDepthSpans.resize(gTileWindowWidth);
-    for (std::vector<TileFirstPersonWallPixelDepthSpan>& spans :
-         gFirstPersonPreviewWallPixelDepthSpans) {
-        spans.clear();
-    }
-    if (wallPixelDepths.size()
-        == static_cast<size_t>(gTileWindowWidth) * gTileWindowHeight) {
-        previousWallPixelDepths.assign(
-            gTileWindowWidth, std::numeric_limits<double>::infinity());
-        wallPixelDepthRunStarts.assign(gTileWindowWidth, 0);
-        for (int y = 0; y < gTileWindowHeight; y++) {
-            const size_t rowOffset = static_cast<size_t>(y) * gTileWindowWidth;
-            for (int x = 0; x < gTileWindowWidth; x++) {
-                const double depth = wallPixelDepths[rowOffset + x];
-                if (depth == previousWallPixelDepths[x]) {
-                    continue;
-                }
-
-                if (std::isfinite(previousWallPixelDepths[x])) {
-                    gFirstPersonPreviewWallPixelDepthSpans[x].push_back({
-                        wallPixelDepthRunStarts[x],
-                        y,
-                        previousWallPixelDepths[x],
-                    });
-                }
-                previousWallPixelDepths[x] = depth;
-                wallPixelDepthRunStarts[x] = y;
+        // Only scan the vertical range touched by walls, while this column's
+        // depths are still hot in cache. Sky/floor-only columns have no runs.
+        int runStart = depthTop;
+        while (runStart < depthBottom) {
+            const double depth = wallPixelDepths[columnOffset + runStart];
+            int runEnd = runStart + 1;
+            while (runEnd < depthBottom && wallPixelDepths[columnOffset + runEnd] == depth) {
+                runEnd++;
             }
-        }
-        for (int x = 0; x < gTileWindowWidth; x++) {
-            if (std::isfinite(previousWallPixelDepths[x])) {
-                gFirstPersonPreviewWallPixelDepthSpans[x].push_back({
-                    wallPixelDepthRunStarts[x],
-                    gTileWindowHeight,
-                    previousWallPixelDepths[x],
-                });
+            if (std::isfinite(depth)) {
+                depthSpans.push_back({ runStart, runEnd, depth });
             }
+            runStart = runEnd;
         }
     }
 
@@ -2184,7 +2167,7 @@ static void tileRenderFirstPersonPreview()
                      blockX++) {
                     // Partially covered blocks retain the same sample, but
                     // must not overwrite wall pixels drawn earlier.
-                    const size_t depthIndex = static_cast<size_t>(blockY) * gTileWindowWidth + blockX;
+                    const size_t depthIndex = static_cast<size_t>(blockX) * gTileWindowHeight + blockY;
                     if (blockY > floorOcclusionBottoms[blockX]
                         && !std::isfinite(wallPixelDepths[depthIndex])) {
                         gTileWindowBuffer[blockY * gTileWindowPitch + blockX] = color;
@@ -2255,6 +2238,9 @@ static void tileRenderFirstPersonPreview()
     objectVisitAll(tileFirstPersonRenderActor, &actorContext);
     tileFirstPersonRenderTextRenders(&actorContext, textRenders);
     const unsigned int actorEnd = profileFrame ? getTicks() : 0;
+    // Hit targets and wall depths now describe this frame. Resolve the hover
+    // before drawing overlays, without triggering another scene refresh.
+    gameFirstPersonPreviewUpdateHover(false);
     tileFirstPersonDrawMoveMarker(directionX, directionY, gFirstPersonPreviewMoveMarkerTile, COLOR_RED);
     if (!gFirstPersonPreviewCursorCaptured) {
         tileFirstPersonDrawMoveMarker(directionX, directionY, gFirstPersonPreviewHoverTile, COLOR_LIGHT_GREEN_3);
@@ -2496,7 +2482,7 @@ static double tileFirstPersonGetWallDepthAt(
         && gFirstPersonPreviewWallPixelDepths.size()
             == static_cast<size_t>(gTileWindowWidth) * gTileWindowHeight) {
         const double pixelDepth = gFirstPersonPreviewWallPixelDepths[
-            static_cast<size_t>(y) * gTileWindowWidth + x];
+            static_cast<size_t>(x) * gTileWindowHeight + y];
         depth = std::min(depth, pixelDepth);
     }
     if (doorCapDepths != nullptr) {
@@ -3347,7 +3333,7 @@ static bool tileFirstPersonRenderTempleBackwallComposite(
                 if (color == 0) {
                     continue;
                 }
-                const size_t index = static_cast<size_t>(y) * gTileWindowWidth + x;
+                const size_t index = static_cast<size_t>(x) * gTileWindowHeight + y;
                 if ((*context->actorDepthStamps)[index] != context->actorDepthStamp
                     || firstPersonSceneryShouldReplaceDepth(hit.depth,
                         (*context->actorDepths)[index], true)) {
@@ -3490,7 +3476,7 @@ static bool tileFirstPersonRenderArroyoVillageCaveBackdrop(
                 if (color == 0) {
                     continue;
                 }
-                const size_t index = static_cast<size_t>(y) * gTileWindowWidth + x;
+                const size_t index = static_cast<size_t>(x) * gTileWindowHeight + y;
                 if ((*context->actorDepthStamps)[index] != context->actorDepthStamp
                     || hit.depth < (*context->actorDepths)[index]) {
                     (*context->actorDepthStamps)[index] = context->actorDepthStamp;
@@ -3764,7 +3750,7 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
                 if (color == 0) {
                     continue;
                 }
-                const size_t index = static_cast<size_t>(y) * gTileWindowWidth + x;
+                const size_t index = static_cast<size_t>(x) * gTileWindowHeight + y;
                 if (caveBackdropPanel
                     && (*context->caveBackdropPixelStamps)[index]
                         == context->actorDepthStamp) {
@@ -4193,7 +4179,7 @@ static void tileFirstPersonRenderTextRenders(
                 }
 
                 const size_t depthIndex =
-                    static_cast<size_t>(y) * gTileWindowWidth + x;
+                    static_cast<size_t>(x) * gTileWindowHeight + y;
                 const double actorDepth =
                     (*renderContext->actorDepthStamps)[depthIndex]
                             == renderContext->actorDepthStamp
@@ -4872,7 +4858,7 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                             objectType == OBJ_TYPE_CRITTER)) {
                         continue;
                     }
-                    const size_t depthIndex = static_cast<size_t>(y) * gTileWindowWidth + x;
+                    const size_t depthIndex = static_cast<size_t>(x) * gTileWindowHeight + y;
                     if ((*renderContext->actorDepthStamps)[depthIndex]
                         != renderContext->actorDepthStamp) {
                         (*renderContext->actorDepthStamps)[depthIndex] =
@@ -4928,7 +4914,7 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                                     continue;
                                 }
                                 const size_t depthIndex =
-                                    static_cast<size_t>(blockY) * gTileWindowWidth + blockX;
+                                    static_cast<size_t>(blockX) * gTileWindowHeight + blockY;
                                 if ((*renderContext->actorDepthStamps)[depthIndex]
                                     != renderContext->actorDepthStamp) {
                                     (*renderContext->actorDepthStamps)[depthIndex] =
@@ -5029,7 +5015,7 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                     continue;
                 }
 
-                const size_t depthIndex = static_cast<size_t>(y) * gTileWindowWidth + x;
+                const size_t depthIndex = static_cast<size_t>(x) * gTileWindowHeight + y;
                 if ((*renderContext->actorDepthStamps)[depthIndex]
                     != renderContext->actorDepthStamp) {
                     (*renderContext->actorDepthStamps)[depthIndex] =
