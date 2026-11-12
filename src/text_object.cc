@@ -338,10 +338,15 @@ int textObjectsGetCount()
     return gTextObjectsCount;
 }
 
-// Render active text floaters for an owner in a caller-provided view.
-void textObjectsRenderForOwner(Object* object, unsigned char* buffer, int pitch, int width, int height, int centerX, int top)
+// Render active text floaters for an owner through the caller's renderer.
+void textObjectsRenderForOwner(
+    Object* object,
+    TextObjectRenderProc renderProc,
+    void* context,
+    int centerX,
+    int top)
 {
-    if (!gTextObjectsInitialized || object == nullptr || buffer == nullptr || pitch < width || width <= 0 || height <= 0) {
+    if (!gTextObjectsInitialized || object == nullptr || renderProc == nullptr) {
         return;
     }
 
@@ -351,23 +356,8 @@ void textObjectsRenderForOwner(Object* object, unsigned char* buffer, int pitch,
             continue;
         }
 
-        const int left = centerX - textObject->width / 2;
-        const int drawTop = top - textObject->height;
-        const int clippedLeft = std::max(0, left);
-        const int clippedTop = std::max(0, drawTop);
-        const int clippedRight = std::min(width, left + textObject->width);
-        const int clippedBottom = std::min(height, drawTop + textObject->height);
-        if (clippedLeft >= clippedRight || clippedTop >= clippedBottom) {
-            continue;
-        }
-
-        blitBufferToBufferTrans(
-            textObject->data + (clippedTop - drawTop) * textObject->width + clippedLeft - left,
-            clippedRight - clippedLeft,
-            clippedBottom - clippedTop,
-            textObject->width,
-            buffer + clippedTop * pitch + clippedLeft,
-            pitch);
+        renderProc(textObject->data, textObject->width, textObject->height,
+            centerX - textObject->width / 2, top - textObject->height, context);
     }
 }
 

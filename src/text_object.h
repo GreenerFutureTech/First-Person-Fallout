@@ -23,7 +23,19 @@ inline int textObjectAdd(Object* object, char* string, int font, Color color, Co
 }
 
 void textObjectsRenderInRect(Rect* rect);
-void textObjectsRenderForOwner(Object* object, unsigned char* buffer, int pitch, int width, int height, int centerX, int top);
+using TextObjectRenderProc = void (*)(
+    const unsigned char* pixels,
+    int width,
+    int height,
+    int left,
+    int top,
+    void* context);
+void textObjectsRenderForOwner(
+    Object* object,
+    TextObjectRenderProc renderProc,
+    void* context,
+    int centerX,
+    int top);
 int textObjectsGetCount();
 void textObjectsRemoveByOwner(Object* object);
 

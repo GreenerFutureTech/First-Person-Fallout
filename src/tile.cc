@@ -143,6 +143,15 @@ struct TileFirstPersonActorHitTarget {
     int clipBottom = std::numeric_limits<int>::max();
 };
 
+struct TileFirstPersonTextRender {
+    const unsigned char* pixels;
+    int width;
+    int height;
+    int left;
+    int top;
+    double depth;
+};
+
 struct TileFirstPersonDoorHitTarget {
     Object* object;
     double depth;
@@ -207,8 +216,14 @@ struct TileFirstPersonActorRenderContext {
     std::vector<unsigned int>* caveBackdropPixelStamps;
     std::vector<double>* caveBackdropColumnDepths;
     std::vector<TileFirstPersonActorHitTarget>* hitTargets;
+    std::vector<TileFirstPersonTextRender>* textRenders;
     bool templeBackwallCompositeRendered;
     bool arroyoVillageCaveBackdropRendered;
+};
+
+struct TileFirstPersonTextRenderContext {
+    const TileFirstPersonActorRenderContext* actorRenderContext;
+    double depth;
 };
 
 struct TileFirstPersonExitGridRenderContext {
@@ -246,6 +261,16 @@ static void tileFirstPersonResolveWoodGates(
     const std::vector<Object*>& doorObjects);
 static int tileFirstPersonGetRenderHexTile(int tile, int gridWidth);
 static void tileFirstPersonRenderActor(Object* object, void* context);
+static void tileFirstPersonQueueTextRender(
+    const unsigned char* pixels,
+    int width,
+    int height,
+    int left,
+    int top,
+    void* context);
+static void tileFirstPersonRenderTextRenders(
+    const TileFirstPersonActorRenderContext* renderContext,
+    const std::vector<TileFirstPersonTextRender>& textRenders);
 static bool tileFirstPersonIsHiddenScenery(const Object* object);
 static bool tileFirstPersonIsTempleBackwall(const Object* object);
 static void tileFirstPersonFindTempleBackwallBounds(Object* object, void* context);
@@ -1862,8 +1887,8 @@ static void tileRenderFirstPersonPreview()
             side = windowSide;
         }
         if (wallType == 3 || wallType == 4) {
-            const int hexColumn = gHexGridWidth - 1 - mapX;
-            const int doorTile = mapY * gHexGridWidth + hexColumn;
+            const int doorTile = mapY * gHexGridWidth
+                + (gHexGridWidth - 1 - mapX);
             Object* object = objectFindFirstAtLocation(gElevation, doorTile);
             while (object != nullptr) {
                 Proto* proto = nullptr;
@@ -1899,8 +1924,7 @@ static void tileRenderFirstPersonPreview()
                 if (protoGetProto(object, &proto) == 0
                     && FrmId(object).objectType() == OBJ_TYPE_SCENERY
                     && proto->scenery.type == SCENERY_TYPE_DOOR
-                    && (object->data.scenery.door.openFlags & DOOR_FLAG_OPEN) == 0
-                    && (object->flags & OBJECT_OPEN_DOOR) == OBJECT_NONE) {
+                    && (object->data.scenery.door.openFlags & DOOR_FLAG_OPEN) == 0) {
                     gFirstPersonPreviewDoorHitTargets.push_back({ object, windowDistance, x });
                     break;
                 }
@@ -2144,6 +2168,7 @@ static void tileRenderFirstPersonPreview()
     const double templeBackwallY = tileFirstPersonGetTempleBackwallY(
         gElevation, gMapHeader.enteringTile, &templeBackwallIsoBaseY,
         &hasTempleBackwall, &templePanelLayouts);
+    std::vector<TileFirstPersonTextRender> textRenders;
     TileFirstPersonActorRenderContext actorContext = {
         gElevation,
         templeBackwallY,
@@ -2167,6 +2192,7 @@ static void tileRenderFirstPersonPreview()
         &caveBackdropPixelStamps,
         &caveBackdropColumnDepths,
         &gFirstPersonPreviewActorHitTargets,
+        &textRenders,
         false,
         false,
     };
@@ -2176,6 +2202,7 @@ static void tileRenderFirstPersonPreview()
         tileFirstPersonRenderArroyoVillageCaveBackdrop(&actorContext);
     const unsigned int actorStart = profileFrame ? getTicks() : 0;
     objectVisitAll(tileFirstPersonRenderActor, &actorContext);
+    tileFirstPersonRenderTextRenders(&actorContext, textRenders);
     const unsigned int actorEnd = profileFrame ? getTicks() : 0;
     tileFirstPersonDrawMoveMarker(directionX, directionY, gFirstPersonPreviewMoveMarkerTile, COLOR_RED);
     if (!gFirstPersonPreviewCursorCaptured) {
@@ -2717,11 +2744,9 @@ static void tileFirstPersonGrayboxMarkObject(Object* object, void* context)
         && hasProto
         && proto->scenery.type == SCENERY_TYPE_DOOR;
     const bool doorOpen = isDoor
-        && ((object->data.scenery.door.openFlags & DOOR_FLAG_OPEN) != 0
-            || (object->flags & OBJECT_OPEN_DOOR) != OBJECT_NONE
-            || object->frame != 0);
+        && (object->data.scenery.door.openFlags & DOOR_FLAG_OPEN) != 0;
     if (!halfHeightWall
-        && !doorOpen
+        && !isDoor
         && (object->flags & (OBJECT_NO_BLOCK | OBJECT_LIGHT_THRU)) != OBJECT_NONE) {
         return;
     }
@@ -2829,13 +2854,13 @@ static void tileFirstPersonResolveWoodGates(
         }
 
         const bool doorOpen =
-            (door->data.scenery.door.openFlags & DOOR_FLAG_OPEN) != 0
-            || (door->flags & OBJECT_OPEN_DOOR) != OBJECT_NONE
-            || door->frame != 0;
+            (door->data.scenery.door.openFlags & DOOR_FLAG_OPEN) != 0;
         renderContext->wallCells[gateTile] = doorOpen
-            ? kFirstPersonWoodGateType
+            ? 0
             : kFirstPersonClosedWoodGateType;
-        renderContext->wallMaterials[gateTile] = MATERIAL_TYPE_WOOD;
+        renderContext->wallMaterials[gateTile] = doorOpen
+            ? MATERIAL_TYPE_INVALID
+            : MATERIAL_TYPE_WOOD;
     }
 }
 
@@ -3910,6 +3935,99 @@ static bool tileFirstPersonIsHiddenScenery(const Object* object)
         && object->elevation == kArroyoTempleHiddenSceneryElevation;
 }
 
+static void tileFirstPersonQueueTextRender(
+    const unsigned char* pixels,
+    int width,
+    int height,
+    int left,
+    int top,
+    void* context)
+{
+    const TileFirstPersonTextRenderContext* textContext =
+        static_cast<const TileFirstPersonTextRenderContext*>(context);
+    textContext->actorRenderContext->textRenders->push_back({
+        pixels,
+        width,
+        height,
+        left,
+        top,
+        textContext->depth,
+    });
+}
+
+static void tileFirstPersonRenderTextRenders(
+    const TileFirstPersonActorRenderContext* renderContext,
+    const std::vector<TileFirstPersonTextRender>& textRenders)
+{
+    for (const TileFirstPersonTextRender& textRender : textRenders) {
+        const int left = std::max(0, textRender.left);
+        const int top = std::max(0, textRender.top);
+        const int right = std::min(gTileWindowWidth, textRender.left + textRender.width);
+        const int bottom = std::min(gTileWindowHeight, textRender.top + textRender.height);
+        if (left >= right || top >= bottom) {
+            continue;
+        }
+
+        if (screenIsHardwareAccelerated()) {
+            const SDL_Rect destination = {
+                textRender.left,
+                textRender.top,
+                textRender.width,
+                textRender.height,
+            };
+            for (int y = top; y < bottom; y++) {
+                int runStart = -1;
+                for (int x = left; x <= right; x++) {
+                    const bool visible = x < right
+                        && textRender.depth < tileFirstPersonGetWallDepthAt(
+                            x, y, renderContext->horizonY,
+                            renderContext->wallDepths,
+                            renderContext->wallSillDepths,
+                            renderContext->doorCapDepths);
+                    if (visible && runStart < 0) {
+                        runStart = x;
+                    } else if (!visible && runStart >= 0) {
+                        const SDL_Rect clip = { runStart, y, x - runStart, 1 };
+                        gpuBillboardSubmit(textRender.pixels,
+                            textRender.width, textRender.height,
+                            destination, clip, textRender.depth);
+                        runStart = -1;
+                    }
+                }
+            }
+            continue;
+        }
+
+        for (int y = top; y < bottom; y++) {
+            for (int x = left; x < right; x++) {
+                const int sourceX = x - textRender.left;
+                const int sourceY = y - textRender.top;
+                const unsigned char color =
+                    textRender.pixels[sourceY * textRender.width + sourceX];
+                if (color == 0
+                    || textRender.depth >= tileFirstPersonGetWallDepthAt(
+                        x, y, renderContext->horizonY,
+                        renderContext->wallDepths,
+                        renderContext->wallSillDepths,
+                        renderContext->doorCapDepths)) {
+                    continue;
+                }
+
+                const size_t depthIndex =
+                    static_cast<size_t>(y) * gTileWindowWidth + x;
+                const double actorDepth =
+                    (*renderContext->actorDepthStamps)[depthIndex]
+                            == renderContext->actorDepthStamp
+                    ? (*renderContext->actorDepths)[depthIndex]
+                    : std::numeric_limits<double>::infinity();
+                if (textRender.depth <= actorDepth) {
+                    gTileWindowBuffer[y * gTileWindowPitch + x] = color;
+                }
+            }
+        }
+    }
+}
+
 static void tileFirstPersonRenderActor(Object* object, void* context)
 {
     const TileFirstPersonActorRenderContext* renderContext =
@@ -3957,6 +4075,8 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
     if (templeBackwall) {
         objectY = renderContext->backwallY;
     }
+    const bool isLootableScenery = objectType == OBJ_TYPE_SCENERY
+        && _obj_action_can_use(object);
 
     const double relativeX = objectX - renderContext->cameraX;
     const double relativeY = objectY - renderContext->cameraY;
@@ -3968,6 +4088,10 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         return;
     }
 
+    TileFirstPersonTextRenderContext textRenderContext = {
+        renderContext,
+        transformY,
+    };
 
     const int screenCenterX = static_cast<int>(
         (gTileWindowWidth / 2.0) * (1.0 + transformX / transformY));
@@ -4248,11 +4372,14 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
             : isMediumScenery ? 0.4
             : fallbackHeightScale;
 
-        const double objectWidthScale =
-            isWideScenery ? 1.8
+    const double lootableSceneryScale = isLootableScenery ? 1.75 : 1.0;
+    const double adjustedObjectHeightScale = objectHeightScale * lootableSceneryScale;
+    const double objectWidthScale =
+        (isWideScenery ? 1.8
             : isMediumScenery ? 1.3
-            : fallbackWidthScale;
-    const int projectedActorHeight = std::max(1, static_cast<int>(actorProjectionScale * objectHeightScale));
+            : fallbackWidthScale) * lootableSceneryScale;
+    const int projectedActorHeight = std::max(1, static_cast<int>(
+        actorProjectionScale * adjustedObjectHeightScale));
     const int actorHeight = projectedActorHeight;
     const int projectedActorBottom = renderContext->horizonY
         + static_cast<int>(projectionScale * 0.5);
@@ -4261,7 +4388,7 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         : projectedActorBottom;
 
     const int spriteWidth = std::max(1, static_cast<int>(
-        actorHeight * 0.42 / objectHeightScale * objectWidthScale));
+        actorHeight * 0.42 / adjustedObjectHeightScale * objectWidthScale));
     const int spriteTop = actorBottom - actorHeight;
     const int spriteBottom = actorBottom;
     const int spriteLeft = screenCenterX - spriteWidth / 2;
@@ -4408,12 +4535,8 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
             if (!hasVisibleColumn) {
                 if (objectType != OBJ_TYPE_SCENERY) {
                     textObjectsRenderForOwner(object,
-                        gTileWindowBuffer,
-                        gTileWindowPitch,
-                        gTileWindowWidth,
-                        gTileWindowHeight,
-                        screenCenterX,
-                        artTop - 3);
+                        tileFirstPersonQueueTextRender, &textRenderContext,
+                        screenCenterX, artTop - 3);
                 }
                 return;
             }
@@ -4536,12 +4659,8 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                 std::min(gTileWindowHeight, opaqueBottom));
             if (objectType != OBJ_TYPE_SCENERY) {
                 textObjectsRenderForOwner(object,
-                    gTileWindowBuffer,
-                    gTileWindowPitch,
-                    gTileWindowWidth,
-                    gTileWindowHeight,
-                    screenCenterX,
-                    artTop - 3);
+                    tileFirstPersonQueueTextRender, &textRenderContext,
+                    screenCenterX, artTop - 3);
             }
             return;
         }
@@ -4676,12 +4795,8 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
 
         if (objectType != OBJ_TYPE_SCENERY) {
             textObjectsRenderForOwner(object,
-                gTileWindowBuffer,
-                gTileWindowPitch,
-                gTileWindowWidth,
-                gTileWindowHeight,
-                screenCenterX,
-                artTop - 3);
+                tileFirstPersonQueueTextRender, &textRenderContext,
+                screenCenterX, artTop - 3);
         }
 
         return;
