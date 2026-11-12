@@ -1057,6 +1057,7 @@ void clientViewerLoadAmmo(Object* weapon, Object* ammo, int quantity, bool repla
 void clientViewerSetLootTarget(int netId) { serverStubAbort("clientViewerSetLootTarget"); }
 void clientViewerUnwield(int hand) { serverStubAbort("clientViewerUnwield"); }
 void clientViewerUseItem(int pid) { serverStubAbort("clientViewerUseItem"); }
+void clientViewerUseDoor(int targetNetId) { serverStubAbort("clientViewerUseDoor"); }
 void clientViewerUseItemOn(int targetNetId, int pid) { serverStubAbort("clientViewerUseItemOn"); }
 void clientViewerWield(Object* item, int hand) { serverStubAbort("clientViewerWield"); }
 int gameMouseHighlightActionMenuItemAtIndex(int menuItemIndex) { serverStubAbort("gameMouseHighlightActionMenuItemAtIndex"); }

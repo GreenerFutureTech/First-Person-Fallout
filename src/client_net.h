@@ -234,6 +234,7 @@ void clientViewerUnload(Object* item);
 void clientViewerMovieAck();
 void clientViewerEncounterAnswer(bool accept);
 void clientViewerUseItem(int pid);
+void clientViewerUseDoor(int targetNetId);
 void clientViewerUseItemOn(int targetNetId, int pid);
 void clientViewerArmExplosive(int pid, int seconds);
 void clientViewerLootTake(int containerNetId, int pid, int quantity);

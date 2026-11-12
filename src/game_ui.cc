@@ -1,5 +1,6 @@
 #include "platform/git_version.h"
 #include "character_selector.h"
+#include "client_net.h"
 #include "combat_ai.h"
 #include "content_config.h"
 #include "critter.h"
@@ -234,6 +235,25 @@ static void gameFirstPersonPreviewStartLoot(Object* critter)
     actionLootCritter(gDude, critter);
 }
 
+static bool gameFirstPersonPreviewUseDoor(Object* door)
+{
+    if (door == nullptr) {
+        return false;
+    }
+
+    if (clientViewerActive()) {
+        if (door->netId > 0) {
+            clientViewerUseDoor(door->netId);
+        } else {
+            debugPrint("F11 door use: target has no multiplayer netId\n");
+        }
+        return true;
+    }
+
+    _action_use_an_object(gDude, door);
+    return true;
+}
+
 static bool gameFirstPersonPreviewUseObject(Object* object)
 {
     if (object == nullptr) {
@@ -245,8 +265,7 @@ static bool gameFirstPersonPreviewUseObject(Object* object)
         Proto* proto = nullptr;
         if (protoGetProto(object, &proto) == 0
             && proto->scenery.type == SCENERY_TYPE_DOOR) {
-            _action_use_an_object(gDude, object);
-            return true;
+            return gameFirstPersonPreviewUseDoor(object);
         }
         if (!_obj_action_can_use(object)) {
             return false;
@@ -677,7 +696,7 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                             Object* door = tileFirstPersonPreviewPickDoorAt(mouseX, mouseY);
                             if (door != nullptr) {
                                 gameFirstPersonPreviewLogObject(door);
-                                _action_use_an_object(gDude, door);
+                                gameFirstPersonPreviewUseDoor(door);
                                 handled = true;
                             }
                         }
@@ -748,7 +767,7 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                     Object* door = tileFirstPersonPreviewPickDoorAt(centerX, centerY);
                     if (door != nullptr) {
                         gameFirstPersonPreviewLogObject(door);
-                        _action_use_an_object(gDude, door);
+                        gameFirstPersonPreviewUseDoor(door);
                         handled = true;
                     }
                 }
@@ -817,7 +836,7 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                                         Object* door = tileFirstPersonPreviewPickDoorAt(mouseX, mouseY);
                                         if (door != nullptr) {
                                             gameFirstPersonPreviewLogObject(door);
-                                            _action_use_an_object(gDude, door);
+                                            gameFirstPersonPreviewUseDoor(door);
                                             handled = true;
                                         }
                                     }
@@ -894,7 +913,7 @@ int gameHandleKey(int eventCode, bool isInCombatMode)
                                         Object* door = tileFirstPersonPreviewPickDoorAt(centerX, centerY);
                                         if (door != nullptr) {
                                             gameFirstPersonPreviewLogObject(door);
-                                            _action_use_an_object(gDude, door);
+                                            gameFirstPersonPreviewUseDoor(door);
                                         }
                                     }
                                 }

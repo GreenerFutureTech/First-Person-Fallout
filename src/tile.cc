@@ -1936,7 +1936,8 @@ static void tileRenderFirstPersonPreview()
                 if (protoGetProto(object, &proto) == 0
                     && FrmId(object).objectType() == OBJ_TYPE_SCENERY
                     && proto->scenery.type == SCENERY_TYPE_DOOR
-                    && (object->data.scenery.door.openFlags & DOOR_FLAG_OPEN) == 0) {
+                    && (object->data.scenery.door.openFlags & DOOR_FLAG_OPEN) == 0
+                    && (object->flags & OBJECT_OPEN_DOOR) == OBJECT_NONE) {
                     gFirstPersonPreviewDoorHitTargets.push_back({ object, windowDistance, x });
                     break;
                 }
@@ -2914,7 +2915,8 @@ static void tileFirstPersonGrayboxMarkObject(Object* object, void* context)
         && hasProto
         && proto->scenery.type == SCENERY_TYPE_DOOR;
     const bool doorOpen = isDoor
-        && (object->data.scenery.door.openFlags & DOOR_FLAG_OPEN) != 0;
+        && (((object->data.scenery.door.openFlags & DOOR_FLAG_OPEN) != 0)
+            || (object->flags & OBJECT_OPEN_DOOR) != OBJECT_NONE);
     if (!halfHeightWall
         && !isDoor
         && (object->flags & (OBJECT_NO_BLOCK | OBJECT_LIGHT_THRU)) != OBJECT_NONE) {
@@ -3024,7 +3026,8 @@ static void tileFirstPersonResolveWoodGates(
         }
 
         const bool doorOpen =
-            (door->data.scenery.door.openFlags & DOOR_FLAG_OPEN) != 0;
+            (door->data.scenery.door.openFlags & DOOR_FLAG_OPEN) != 0
+            || (door->flags & OBJECT_OPEN_DOOR) != OBJECT_NONE;
         renderContext->wallCells[gateTile] = doorOpen
             ? 0
             : kFirstPersonClosedWoodGateType;

@@ -1543,6 +1543,8 @@ private:
             debugPrint("client_net: blob crc32 mismatch\n");
             return;
         }
+        debugPrint("client_net: applying map blob map=%d elevation=%d bytes=%zu mapBytes=%u dudeBytes=%u actors=%d\n",
+            _blobMapIndex, _blobElevation, _blob.size(), _blobMapLen, _blobDudeLen, _blobActorCount);
 
         // Load the blob straight from memory (no scratch file), through the SAME
         // sequence as the S1 loader (main.cc F2_CLIENT_BLOB_IN): adopt the server
@@ -1597,8 +1599,11 @@ private:
         if (rd == nullptr) { debugPrint("client_net: cannot open blob memory stream\n"); return; }
 
         mapSetViewerLoad(true);
+        debugPrint("client_net: calling mapLoad for map=%d elevation=%d\n", _blobMapIndex, _blobElevation);
         int loadRc = mapLoad(rd);
         mapSetViewerLoad(false);
+        debugPrint("client_net: mapLoad returned rc=%d map=%d elevation=%d\n",
+            loadRc, gMapHeader.index, gElevation);
         if (loadRc == -1) {
             debugPrint("client_net: blob map load failed\n");
             fileClose(rd);
@@ -1608,6 +1613,7 @@ private:
             debugPrint("client_net: blob dude load failed\n");
             return; // _obj_load_dude closed the stream on its error path
         }
+        debugPrint("client_net: blob dude loaded\n");
 
         // Re-seed the registry from THIS blob (cleared above, before mapLoad).
         // Slot 0 is the local gDude object, which is NO_REMOVE and made once at
@@ -1649,6 +1655,7 @@ private:
                 return;
             }
         }
+        debugPrint("client_net: blob actors loaded count=%d\n", _blobActorCount);
 
         // The sheets ride at the tail, from slot 0 — AFTER the registry is
         // populated, because the block is applied by slot. Fail loud: a sheet
@@ -1660,11 +1667,13 @@ private:
             fileClose(rd);
             return;
         }
+        debugPrint("client_net: blob sheets loaded\n");
         fileClose(rd);
 
         _map_fix_critter_combat_data();
         objectAssignAllNetIds();
         scriptsDisable();
+        debugPrint("client_net: blob netIds assigned and scripts disabled\n");
 
         seedNetMap();
 
@@ -2474,7 +2483,14 @@ private:
                     clientApplyPose(obj, fid);
                 }
             }
-            if (hasFlags) objectApplyWireFlags(obj, flags);
+            if (hasFlags) {
+                const bool doorOpenChanged =
+                    ((obj->flags ^ flags) & OBJECT_OPEN_DOOR) != OBJECT_NONE;
+                objectApplyWireFlags(obj, flags);
+                if (doorOpenChanged && tileFirstPersonPreviewIsEnabled()) {
+                    tileFirstPersonPreviewRefresh();
+                }
+            }
             if (hasRot) {
                 // A gliding critter's authoritative end-facing is DEFERRED onto its glide
                 // (applied when the glide drains) so a parked / mid-glide sprite doesn't
@@ -5612,6 +5628,17 @@ void clientViewerUseItem(int pid)
     }
     char cmd[32];
     snprintf(cmd, sizeof(cmd), "useitem %d", pid);
+    gViewerConn->sendLine(cmd);
+}
+
+// USE a scenery door through the authoritative multiplayer interaction path.
+void clientViewerUseDoor(int targetNetId)
+{
+    if (gViewerConn == nullptr) {
+        return;
+    }
+    char cmd[32];
+    snprintf(cmd, sizeof(cmd), "usedoor %d", targetNetId);
     gViewerConn->sendLine(cmd);
 }
 
