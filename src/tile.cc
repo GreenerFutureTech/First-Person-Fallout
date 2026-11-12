@@ -4170,7 +4170,6 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         || sceneryProtoId == SceneryProtoTypeId::RocksAlt9
         || sceneryProtoId == static_cast<SceneryProtoTypeId>(91)
         || sceneryProtoId == static_cast<SceneryProtoTypeId>(429)
-        || sceneryProtoId == static_cast<SceneryProtoTypeId>(430)
         || sceneryProtoId == static_cast<SceneryProtoTypeId>(432)
 
         || sceneryProtoId == SceneryProtoTypeId::Unknown1;
