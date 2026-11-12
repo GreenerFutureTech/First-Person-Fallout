@@ -37,7 +37,8 @@ namespace fallout {
 //
 // Version 5 recursively includes each carried item's nested inventory in inventory
 // deltas, so carried containers can be updated authoritatively during play.
-constexpr unsigned short kWireVersion = 5;
+// Version 6 adds instance state and per-inventory-item data.flags.
+constexpr unsigned short kWireVersion = 6;
 
 constexpr int kMaxWireInventoryDepth = 16;
 

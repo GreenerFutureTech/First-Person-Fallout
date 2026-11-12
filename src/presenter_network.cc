@@ -559,6 +559,11 @@ public:
         // bit order, so a new field appends. See OBJECT_DELTA_PID for why a pid is not
         // the constant it looks like.
         if (changedFields & OBJECT_DELTA_PID) putI32(obj->pid);
+        if (changedFields & OBJECT_DELTA_INSTANCE) {
+            putI32(obj->data.flags);
+            putI32(obj->data.item.weapon.ammoQuantity);
+            putI32(obj->data.item.weapon.ammoTypePid);
+        }
         endEvent();
     }
 
@@ -1463,6 +1468,7 @@ private:
             // full. This is the live-delta half; the join blob already carries ammo.
             putI32(item != nullptr ? item->data.item.weapon.ammoQuantity : 0);
             putI32(item != nullptr ? item->data.item.weapon.ammoTypePid : 0);
+            putI32(item != nullptr ? item->data.flags : 0);
             if (item != nullptr && itemGetType(const_cast<Object*>(item)) == ITEM_TYPE_CONTAINER
                 && depth < kMaxWireInventoryDepth) {
                 putInventory(item, depth + 1);

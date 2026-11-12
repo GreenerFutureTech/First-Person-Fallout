@@ -109,7 +109,7 @@ class Obj:
                  "fid", "frame", "rotation", "flags",
                  "light_distance", "light_intensity",
                  "hp", "radiation", "poison", "ap", "combat_results",
-                 "inv")
+                 "inv", "instance_flags", "instance_value", "instance_aux")
 
     def __init__(self, tile, elev, pid=None):
         self.tile = tile
@@ -132,6 +132,7 @@ class Obj:
         self.poison = None
         self.ap = None
         self.combat_results = None
+        self.instance_flags = self.instance_value = self.instance_aux = None
         self.inv = None  # list of (netId, pid, qty, flags) from the last inventory delta
 
 
@@ -292,7 +293,7 @@ def reconstruct_binary(stream_path):
     if r.take(4) != NETSTREAM_MAGIC:
         raise ValueError("not a netstream (bad magic)")
     version = r.u16()
-    if version not in (1, 2, 3, 4):
+    if version not in (1, 2, 3, 4, 5, 6):
         raise ValueError(f"unsupported netstream version {version}")
     # v2 appends an i32 sessionId: over a socket it is the receiving client's own
     # id (the one per-client field in the protocol); in a FILE log it is 0. Either
@@ -402,17 +403,25 @@ def reconstruct_binary(stream_path):
                 if mask & D_COMBAT_RESULTS:
                     o.combat_results = body.i32()
                 if mask & D_INVENTORY:
-                    n = body.u16()
-                    items = []
-                    for _i in range(n):
-                        it_net = body.i32()
-                        it_pid = body.i32()
-                        it_qty = body.i32()
-                        it_flags = body.i32() & 0xFFFFFFFF
-                        body.i32()  # ammoQuantity -- folded into no audit field
-                        body.i32()  # ammoTypePid
-                        items.append((it_net, it_pid, it_qty, it_flags))
-                    o.inv = items
+                    def read_inventory(depth=0):
+                        if depth > 16:
+                            raise ValueError("inventory nesting exceeds protocol limit")
+                        items = []
+                        for _i in range(body.u16()):
+                            it_net = body.i32()
+                            it_pid = body.i32()
+                            it_qty = body.i32()
+                            it_flags = body.i32() & 0xFFFFFFFF
+                            if version >= 3:
+                                body.i32()  # ammoQuantity
+                                body.i32()  # ammoTypePid
+                            if version >= 6:
+                                body.i32()  # item data.flags
+                            if version >= 5:
+                                read_inventory(depth + 1)
+                            items.append((it_net, it_pid, it_qty, it_flags))
+                        return items
+                    o.inv = read_inventory()
                 if mask & D_FRAME:
                     o.frame = body.i32()
                 if mask & D_LIGHT:
@@ -420,6 +429,10 @@ def reconstruct_binary(stream_path):
                     o.light_intensity = body.i32()
                 if mask & D_PID:
                     o.pid = body.i32()
+                if mask & (1 << 12):
+                    o.instance_flags = body.i32()
+                    o.instance_value = body.i32()
+                    o.instance_aux = body.i32()
             elif etype == E_STATE_AUDIT:
                 is_final = body.u8()
                 n = body.u16()
