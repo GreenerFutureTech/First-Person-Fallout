@@ -70,7 +70,7 @@ void gameExit();
 // Processes first-person camera input and cursor-mode controls.
 // This is also called while combat AI animations are running.
 void gameHandleFirstPersonPreviewInput(int eventCode);
-void gameFirstPersonPreviewUpdateHover();
+void gameFirstPersonPreviewUpdateHover(bool requestRefresh = true);
 void gameToggleFirstPersonPreview();
 int gameHandleKey(int eventCode, bool isInCombatMode);
 void gameUiDisable(int allowScrolling);

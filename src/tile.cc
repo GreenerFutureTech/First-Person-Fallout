@@ -171,6 +171,12 @@ struct TileFirstPersonDoorCapSpan {
     double depth = std::numeric_limits<double>::infinity();
 };
 
+struct TileFirstPersonWallPixelDepthSpan {
+    int top;
+    int bottom;
+    double depth;
+};
+
 struct TileFirstPersonTransparentWallLayer {
     unsigned char type;
     MaterialType material;
@@ -338,6 +344,8 @@ static bool gFirstPersonPreviewTopologyEnabled = false;
 static bool gFirstPersonPreviewTopologyRendering = false;
 static int gFirstPersonPreviewTopologyPosition = -1;
 static int gFirstPersonPreviewTopologyZoom = 0;
+static std::vector<double> gFirstPersonPreviewWallPixelDepths;
+static std::vector<std::vector<TileFirstPersonWallPixelDepthSpan>> gFirstPersonPreviewWallPixelDepthSpans;
 static constexpr int kFirstPersonWallTextureSize = 64;
 static constexpr unsigned char kFirstPersonTransparentWoodWallType = 7;
 static constexpr unsigned char kFirstPersonWoodGateType = 6;
@@ -1560,10 +1568,10 @@ static void tileRenderFirstPersonPreview()
     wallDepths.assign(gTileWindowWidth, std::numeric_limits<double>::infinity());
     static std::vector<double> wallSillDepths;
     wallSillDepths.assign(gTileWindowWidth, std::numeric_limits<double>::infinity());
-    static std::vector<double> wallPixelDepths;
-    wallPixelDepths.assign(
+    gFirstPersonPreviewWallPixelDepths.assign(
         static_cast<size_t>(gTileWindowWidth) * gTileWindowHeight,
         std::numeric_limits<double>::infinity());
+    std::vector<double>& wallPixelDepths = gFirstPersonPreviewWallPixelDepths;
     static std::vector<std::vector<TileFirstPersonTransparentWallLayer>> transparentWallLayers;
     transparentWallLayers.resize(gTileWindowWidth);
     static std::vector<TileFirstPersonDoorCapSpan> doorCapDepths;
@@ -1643,6 +1651,7 @@ static void tileRenderFirstPersonPreview()
         MaterialType windowMaterial = MATERIAL_TYPE_INVALID;
         TileFirstPersonWallOrientation windowOrientation = TILE_FIRST_PERSON_WALL_ORIENTATION_CELL;
         double windowDistance = std::numeric_limits<double>::infinity();
+        double windowSillDistance = std::numeric_limits<double>::infinity();
         int windowCellTile = -1;
         int windowSide = 0;
         bool windowGateClosed = false;
@@ -1680,6 +1689,9 @@ static void tileRenderFirstPersonPreview()
                 windowCellTile = cellTile;
                 windowSide = wallSide;
                 windowGateClosed = type == kFirstPersonWoodGateType;
+            }
+            if (type == 2 && distance < windowSillDistance) {
+                windowSillDistance = distance;
             }
         };
         while (mapX >= 0 && mapX < gHexGridWidth
@@ -1879,7 +1891,7 @@ static void tileRenderFirstPersonPreview()
         }
 
         wallDepths[x] = wallDistance;
-        wallSillDepths[x] = windowDistance;
+        wallSillDepths[x] = windowSillDistance;
         if (wallDistance == std::numeric_limits<double>::infinity()) {
             wallType = windowType;
             wallMaterial = windowMaterial;
@@ -1957,11 +1969,7 @@ static void tileRenderFirstPersonPreview()
             }
             const double hitWorldX = cameraX + rayDirectionX * distance;
             const double hitWorldY = cameraY + rayDirectionY * distance;
-            const double wallCoordinate = orientation == TILE_FIRST_PERSON_WALL_ORIENTATION_NORTH_SOUTH
-                    ? hitWorldY
-                    : orientation == TILE_FIRST_PERSON_WALL_ORIENTATION_EAST_WEST
-                    ? hitWorldX
-                    : wallSide == 0 ? hitWorldY : hitWorldX;
+            const double wallCoordinate = wallSide == 0 ? hitWorldY : hitWorldX;
             int textureX = static_cast<int>(floor(wallCoordinate * kFirstPersonWallTextureSize))
                 % kFirstPersonWallTextureSize;
             if (textureX < 0) {
@@ -2074,6 +2082,48 @@ static void tileRenderFirstPersonPreview()
         if (doorCapDistance != std::numeric_limits<double>::infinity()) {
             renderWall(5, MATERIAL_TYPE_INVALID, doorCapDistance,
                 doorCapOrientation, doorCapSide);
+        }
+    }
+
+    static std::vector<double> previousWallPixelDepths;
+    static std::vector<int> wallPixelDepthRunStarts;
+    gFirstPersonPreviewWallPixelDepthSpans.resize(gTileWindowWidth);
+    for (std::vector<TileFirstPersonWallPixelDepthSpan>& spans :
+         gFirstPersonPreviewWallPixelDepthSpans) {
+        spans.clear();
+    }
+    if (wallPixelDepths.size()
+        == static_cast<size_t>(gTileWindowWidth) * gTileWindowHeight) {
+        previousWallPixelDepths.assign(
+            gTileWindowWidth, std::numeric_limits<double>::infinity());
+        wallPixelDepthRunStarts.assign(gTileWindowWidth, 0);
+        for (int y = 0; y < gTileWindowHeight; y++) {
+            const size_t rowOffset = static_cast<size_t>(y) * gTileWindowWidth;
+            for (int x = 0; x < gTileWindowWidth; x++) {
+                const double depth = wallPixelDepths[rowOffset + x];
+                if (depth == previousWallPixelDepths[x]) {
+                    continue;
+                }
+
+                if (std::isfinite(previousWallPixelDepths[x])) {
+                    gFirstPersonPreviewWallPixelDepthSpans[x].push_back({
+                        wallPixelDepthRunStarts[x],
+                        y,
+                        previousWallPixelDepths[x],
+                    });
+                }
+                previousWallPixelDepths[x] = depth;
+                wallPixelDepthRunStarts[x] = y;
+            }
+        }
+        for (int x = 0; x < gTileWindowWidth; x++) {
+            if (std::isfinite(previousWallPixelDepths[x])) {
+                gFirstPersonPreviewWallPixelDepthSpans[x].push_back({
+                    wallPixelDepthRunStarts[x],
+                    gTileWindowHeight,
+                    previousWallPixelDepths[x],
+                });
+            }
         }
     }
 
@@ -2433,11 +2483,21 @@ static double tileFirstPersonGetWallDepthAt(
     int horizonY,
     const std::vector<double>* wallDepths,
     const std::vector<double>* wallSillDepths,
-    const std::vector<TileFirstPersonDoorCapSpan>* doorCapDepths)
+    const std::vector<TileFirstPersonDoorCapSpan>* doorCapDepths,
+    bool usePixelWallDepthOnly = false)
 {
-    double depth = y < horizonY
-        ? (*wallDepths)[x]
-        : std::min((*wallDepths)[x], (*wallSillDepths)[x]);
+    double depth = usePixelWallDepthOnly
+        ? std::numeric_limits<double>::infinity()
+        : y < horizonY
+            ? (*wallDepths)[x]
+            : std::min((*wallDepths)[x], (*wallSillDepths)[x]);
+    if (x >= 0 && x < gTileWindowWidth && y >= 0 && y < gTileWindowHeight
+        && gFirstPersonPreviewWallPixelDepths.size()
+            == static_cast<size_t>(gTileWindowWidth) * gTileWindowHeight) {
+        const double pixelDepth = gFirstPersonPreviewWallPixelDepths[
+            static_cast<size_t>(y) * gTileWindowWidth + x];
+        depth = std::min(depth, pixelDepth);
+    }
     if (doorCapDepths != nullptr) {
         const TileFirstPersonDoorCapSpan& cap = (*doorCapDepths)[x];
         if (y >= cap.top && y < cap.bottom) {
@@ -2445,6 +2505,116 @@ static double tileFirstPersonGetWallDepthAt(
         }
     }
     return depth;
+}
+
+static bool tileFirstPersonAddWallPixelOcclusionBands(
+    int x,
+    int top,
+    int bottom,
+    double objectDepth,
+    BillboardClipBands* bands)
+{
+    if (bands == nullptr || x < 0 || x >= gTileWindowWidth) {
+        return false;
+    }
+
+    top = std::max(0, top);
+    bottom = std::min(gTileWindowHeight, bottom);
+    if (top >= bottom) {
+        return false;
+    }
+
+    if (x >= static_cast<int>(gFirstPersonPreviewWallPixelDepthSpans.size())) {
+        return false;
+    }
+
+    const std::vector<TileFirstPersonWallPixelDepthSpan>& spans =
+        gFirstPersonPreviewWallPixelDepthSpans[x];
+    auto span = std::lower_bound(spans.begin(), spans.end(), top,
+        [](const TileFirstPersonWallPixelDepthSpan& candidate, int y) {
+            return candidate.bottom <= y;
+        });
+    bool hasOcclusion = false;
+    for (; span != spans.end() && span->top < bottom; ++span) {
+        if (objectDepth >= span->depth) {
+            bands->addOccluder(std::max(top, span->top), std::min(bottom, span->bottom));
+            hasOcclusion = true;
+        }
+    }
+    return hasOcclusion;
+}
+
+static bool tileFirstPersonHasVisibleWallPixel(
+    int x,
+    int top,
+    int bottom,
+    double objectDepth,
+    int horizonY,
+    const std::vector<double>* wallDepths,
+    const std::vector<double>* wallSillDepths,
+    const std::vector<TileFirstPersonDoorCapSpan>* doorCapDepths,
+    bool usePixelWallDepthOnly = false)
+{
+    if (x < 0 || x >= gTileWindowWidth
+        || x >= static_cast<int>(gFirstPersonPreviewWallPixelDepthSpans.size())) {
+        return false;
+    }
+
+    top = std::max(0, top);
+    bottom = std::min(gTileWindowHeight, bottom);
+    if (top >= bottom) {
+        return false;
+    }
+
+    const std::vector<TileFirstPersonWallPixelDepthSpan>& spans =
+        gFirstPersonPreviewWallPixelDepthSpans[x];
+    auto span = std::lower_bound(spans.begin(), spans.end(), top,
+        [](const TileFirstPersonWallPixelDepthSpan& candidate, int y) {
+            return candidate.bottom <= y;
+        });
+    const TileFirstPersonDoorCapSpan* doorCap = doorCapDepths != nullptr
+        ? &(*doorCapDepths)[x]
+        : nullptr;
+
+    int y = top;
+    while (y < bottom) {
+        int nextY = bottom;
+        double wallDepth = usePixelWallDepthOnly
+            ? std::numeric_limits<double>::infinity()
+            : y < horizonY
+                ? (*wallDepths)[x]
+                : std::min((*wallDepths)[x], (*wallSillDepths)[x]);
+
+        if (y < horizonY) {
+            nextY = std::min(nextY, horizonY);
+        }
+        if (doorCap != nullptr) {
+            if (doorCap->top > y) {
+                nextY = std::min(nextY, doorCap->top);
+            } else if (doorCap->bottom > y) {
+                wallDepth = std::min(wallDepth, doorCap->depth);
+                nextY = std::min(nextY, doorCap->bottom);
+            }
+        }
+        while (span != spans.end() && span->bottom <= y) {
+            ++span;
+        }
+        if (span != spans.end()) {
+            if (span->top > y) {
+                nextY = std::min(nextY, span->top);
+            } else {
+                wallDepth = std::min(wallDepth, span->depth);
+                nextY = std::min(nextY, span->bottom);
+            }
+        }
+
+        if (objectDepth < wallDepth) {
+            return true;
+        }
+        y = nextY;
+    }
+
+    return false;
 }
 
 static void tileFirstPersonRenderExitGridMarker(
@@ -3124,6 +3294,8 @@ static bool tileFirstPersonRenderTempleBackwallComposite(
             const auto& cap = (*context->doorCapDepths)[x];
             bands.addOccluder(cap.top, cap.bottom);
         }
+        tileFirstPersonAddWallPixelOcclusionBands(
+            x, firstY, lastY, hit.depth, &bands);
         bands.addOccluder(firstPersonSceneryFloorOcclusionTop(
                               hit.depth, context->horizonY, gTileWindowHeight),
             lastY);
@@ -3279,6 +3451,8 @@ static bool tileFirstPersonRenderArroyoVillageCaveBackdrop(
             const auto& cap = (*context->doorCapDepths)[x];
             bands.addOccluder(cap.top, cap.bottom);
         }
+        tileFirstPersonAddWallPixelOcclusionBands(
+            x, firstY, lastY, hit.depth, &bands);
         bands.addOccluder(firstPersonSceneryFloorOcclusionTop(
                               hit.depth, context->horizonY, gTileWindowHeight),
             lastY);
@@ -3539,6 +3713,8 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
             const auto& cap = (*context->doorCapDepths)[x];
             bands.addOccluder(cap.top, cap.bottom);
         }
+        tileFirstPersonAddWallPixelOcclusionBands(
+            x, firstY, lastY, hit.depth, &bands);
         if (templeBackwall) {
             bands.addOccluder(firstPersonSceneryFloorOcclusionTop(
                                   hit.depth, context->horizonY, gTileWindowHeight),
@@ -4510,23 +4686,12 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
             bool hasVisibleColumn = false;
             const int clippedOpaqueTop = std::max(0, opaqueTop);
             const int clippedOpaqueBottom = std::min(gTileWindowHeight, opaqueBottom);
-            // Within each horizon band, wall depth is constant vertically and
-            // a door cap is one contiguous interval. If neither endpoint is
-            // visible, the entire band is hidden; no per-pixel scan is needed.
-            const auto bandVisible = [&](int x, int top, int bottom) {
-                return top < bottom
-                    && (transformY < tileFirstPersonGetWallDepthAt(x, top,
-                            renderContext->horizonY, renderContext->wallDepths,
-                            renderContext->wallSillDepths, renderContext->doorCapDepths)
-                        || transformY < tileFirstPersonGetWallDepthAt(x, bottom - 1,
-                            renderContext->horizonY, renderContext->wallDepths,
-                            renderContext->wallSillDepths, renderContext->doorCapDepths));
-            };
             for (int x = firstOpaqueColumn; x < lastColumn; x++) {
-                hasVisibleColumn = bandVisible(x, clippedOpaqueTop,
-                                       std::min(clippedOpaqueBottom, renderContext->horizonY))
-                    || bandVisible(x, std::max(clippedOpaqueTop, renderContext->horizonY),
-                        clippedOpaqueBottom);
+                hasVisibleColumn = tileFirstPersonHasVisibleWallPixel(
+                    x, clippedOpaqueTop, clippedOpaqueBottom, transformY,
+                    renderContext->horizonY, renderContext->wallDepths,
+                    renderContext->wallSillDepths, renderContext->doorCapDepths,
+                    objectType == OBJ_TYPE_CRITTER);
                 if (hasVisibleColumn) {
                     break;
                 }
@@ -4544,7 +4709,7 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                 if (top >= bottom) {
                     return;
                 }
-                bool overlapsDoorCap = false;
+                bool needsDetailedClipping = false;
                 static BillboardClipBands clipBands;
                 clipBands.reset(top, bottom);
                 if (renderContext->doorCapDepths != nullptr) {
@@ -4552,12 +4717,17 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                         const TileFirstPersonDoorCapSpan& cap = (*renderContext->doorCapDepths)[x];
                         if (cap.top < cap.bottom && cap.top < bottom && cap.bottom > top
                             && transformY >= cap.depth) {
-                            overlapsDoorCap = true;
+                            needsDetailedClipping = true;
                             clipBands.addOccluder(cap.top, cap.bottom);
                         }
                     }
                 }
-                if (!overlapsDoorCap) {
+                for (int x = firstOpaqueColumn; x < lastColumn; x++) {
+                    needsDetailedClipping = tileFirstPersonAddWallPixelOcclusionBands(
+                        x, top, bottom, transformY, &clipBands)
+                        || needsDetailedClipping;
+                }
+                if (!needsDetailedClipping) {
                     // Each call stays on one side of the horizon. Visibility
                     // therefore depends only on x; merge adjacent columns into
                     // full-height clips without allocating vectors per row.
@@ -4565,10 +4735,16 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                     bool inRun = false;
                     for (int x = firstOpaqueColumn; x <= lastColumn; x++) {
                         const bool visible = x < lastColumn
-                            && transformY < (top < renderContext->horizonY
-                                    ? (*renderContext->wallDepths)[x]
-                                    : std::min((*renderContext->wallDepths)[x],
-                                          (*renderContext->wallSillDepths)[x]));
+                            && transformY < (objectType == OBJ_TYPE_CRITTER
+                                    ? tileFirstPersonGetWallDepthAt(
+                                        x, top, renderContext->horizonY,
+                                        renderContext->wallDepths,
+                                        renderContext->wallSillDepths,
+                                        renderContext->doorCapDepths, true)
+                                    : top < renderContext->horizonY
+                                        ? (*renderContext->wallDepths)[x]
+                                        : std::min((*renderContext->wallDepths)[x],
+                                              (*renderContext->wallSillDepths)[x]));
                         if (visible && !inRun) {
                             runStart = x;
                             inRun = true;
@@ -4585,8 +4761,8 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                     }
                     return;
                 }
-                // Depth is unchanged between cap edges. Scan each distinct
-                // band once instead of repeating the same work on every row.
+                // Scan each distinct depth band once instead of repeating the
+                // same work on every row.
                 const std::vector<int>& boundaries = clipBands.boundaries();
                 static std::vector<SDL_Rect> activeClips;
                 static std::vector<SDL_Rect> nextClips;
@@ -4622,7 +4798,8 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                                 renderContext->horizonY,
                                 renderContext->wallDepths,
                                 renderContext->wallSillDepths,
-                                renderContext->doorCapDepths);
+                                renderContext->doorCapDepths,
+                                objectType == OBJ_TYPE_CRITTER);
                         if (nextVisible && !inRun) {
                             runStart = x;
                             inRun = true;
@@ -4689,7 +4866,8 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                             renderContext->horizonY,
                             renderContext->wallDepths,
                             renderContext->wallSillDepths,
-                            renderContext->doorCapDepths)) {
+                            renderContext->doorCapDepths,
+                            objectType == OBJ_TYPE_CRITTER)) {
                         continue;
                     }
                     const size_t depthIndex = static_cast<size_t>(y) * gTileWindowWidth + x;
@@ -4743,7 +4921,8 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                                         renderContext->horizonY,
                                         renderContext->wallDepths,
                                         renderContext->wallSillDepths,
-                                        renderContext->doorCapDepths)) {
+                                        renderContext->doorCapDepths,
+                                        objectType == OBJ_TYPE_CRITTER)) {
                                     continue;
                                 }
                                 const size_t depthIndex =
@@ -4776,10 +4955,12 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
             const int clippedTop = std::max(0, opaqueTop);
             const int clippedBottom = std::min(gTileWindowHeight, opaqueBottom);
             const int horizon = renderContext->horizonY;
-            if (transformY < (*renderContext->wallDepths)[x]) {
+            if (objectType == OBJ_TYPE_CRITTER
+                || transformY < (*renderContext->wallDepths)[x]) {
                 renderColumnRange(clippedTop, std::min(clippedBottom, horizon));
             }
-            if (transformY < std::min((*renderContext->wallDepths)[x],
+            if (objectType == OBJ_TYPE_CRITTER
+                || transformY < std::min((*renderContext->wallDepths)[x],
                     (*renderContext->wallSillDepths)[x])) {
                 renderColumnRange(std::max(clippedTop, horizon), clippedBottom);
             }
@@ -4825,7 +5006,8 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                         renderContext->horizonY,
                         renderContext->wallDepths,
                         renderContext->wallSillDepths,
-                        renderContext->doorCapDepths)) {
+                        renderContext->doorCapDepths,
+                        objectType == OBJ_TYPE_CRITTER)) {
                     continue;
                 }
                 const double normalizedY = (y - spriteTop) / static_cast<double>(actorHeight);
@@ -6150,14 +6332,16 @@ void tileFirstPersonPreviewSetMoveMarkerTile(int tile)
     }
 }
 
-void tileFirstPersonPreviewSetHoverTile(int tile)
+void tileFirstPersonPreviewSetHoverTile(int tile, bool requestRefresh)
 {
     if (!gFirstPersonPreviewEnabled || !tileIsValid(tile)) {
         tile = -1;
     }
     if (gFirstPersonPreviewHoverTile != tile) {
         gFirstPersonPreviewHoverTile = tile;
-        tileFirstPersonPreviewRequestRefresh();
+        if (requestRefresh) {
+            tileFirstPersonPreviewRequestRefresh();
+        }
     }
 }
 

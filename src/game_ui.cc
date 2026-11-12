@@ -178,7 +178,7 @@ void gameHandleFirstPersonPreviewInput(int eventCode)
     }
 }
 
-void gameFirstPersonPreviewUpdateHover()
+void gameFirstPersonPreviewUpdateHover(bool requestRefresh)
 {
     int hoverTile = -1;
     if (tileFirstPersonPreviewIsEnabled() && !tileFirstPersonPreviewIsCursorCaptured()) {
@@ -194,7 +194,7 @@ void gameFirstPersonPreviewUpdateHover()
             hoverTile = tileFirstPersonPreviewPickGroundTileAt(mouseX - rect.left, mouseY - rect.top);
         }
     }
-    tileFirstPersonPreviewSetHoverTile(hoverTile);
+    tileFirstPersonPreviewSetHoverTile(hoverTile, requestRefresh);
 }
 
 void gameToggleFirstPersonPreview()

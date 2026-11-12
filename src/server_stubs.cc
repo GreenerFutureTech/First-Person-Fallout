@@ -738,7 +738,7 @@ void directDrawSetPalette(unsigned char* palette) { }
 void directDrawSetPaletteInRange(unsigned char* palette, int start, int count) { }
 void firstPersonSkyRender(unsigned char* buffer, int width, int height, int pitch, int horizonY, double yaw, double fieldOfViewScale, int ambientIntensityIndex, FirstPersonSkyType skyType) { }
 void gameHandleFirstPersonPreviewInput(int eventCode) { }
-void gameFirstPersonPreviewUpdateHover() { }
+void gameFirstPersonPreviewUpdateHover(bool) { }
 Object* gameMouseGetObjectUnderCursor(ObjectType objectType, bool includeDude, MapElevation elevation) { return nullptr; }
 Object* gameMouseGetObjectUnderCursor(int objectType, bool includeDude, int elevation) { return nullptr; }
 void gameMouseSetMode(GameMouseMode mode) { }
