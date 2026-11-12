@@ -105,6 +105,7 @@ struct TileFirstPersonGrayboxRenderContext {
     unsigned char* wallCells;
     unsigned char* wallOrientations;
     MaterialType* wallMaterials;
+    std::vector<Object*>* doorObjects;
     std::vector<int>* exitGridTiles;
     const std::vector<int>* templeWallAreaLandmarkTiles;
 };
@@ -153,8 +154,8 @@ struct TileFirstPersonObjectHitTarget {
     double depth;
 };
 
-// Ray traversal retains at most one door cap per column. Bottom is exclusive,
-// matching billboard clip rectangles; an empty span contributes no occlusion.
+// Ray traversal retains one open-door depth span per column. Bottom is
+// exclusive, matching billboard clip rectangles; an empty span contributes no occlusion.
 struct TileFirstPersonDoorCapSpan {
     int top = 0;
     int bottom = 0;
@@ -231,6 +232,10 @@ static void tileFirstPersonFindTempleWallAreaLandmark(Object* object, void* cont
 static void tileFirstPersonMarkTempleBlockedAreaWalls(
     const TileFirstPersonGrayboxRenderContext* renderContext);
 static void tileFirstPersonGrayboxMarkObject(Object* object, void* context);
+static void tileFirstPersonResolveWoodGates(
+    const TileFirstPersonGrayboxRenderContext* renderContext,
+    const std::vector<Object*>& doorObjects);
+static int tileFirstPersonGetRenderHexTile(int tile, int gridWidth);
 static void tileFirstPersonRenderActor(Object* object, void* context);
 static bool tileFirstPersonIsHiddenScenery(const Object* object);
 static bool tileFirstPersonIsTempleBackwall(const Object* object);
@@ -300,11 +305,19 @@ static bool gFirstPersonPreviewTopologyRendering = false;
 static int gFirstPersonPreviewTopologyPosition = -1;
 static int gFirstPersonPreviewTopologyZoom = 0;
 static constexpr int kFirstPersonWallTextureSize = 64;
+static constexpr unsigned char kFirstPersonTransparentWoodWallType = 7;
+static constexpr unsigned char kFirstPersonWoodGateType = 6;
+static constexpr unsigned char kFirstPersonClosedWoodGateType = 8;
 static std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize> gFirstPersonStoneWallTexture;
 static std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize> gFirstPersonCaveWallTexture;
 static std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize> gFirstPersonDoorWallTexture;
 static std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize> gFirstPersonImportedStoneWallTexture;
 static std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize> gFirstPersonLeatherWallTexture;
+static std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize> gFirstPersonMetalWallTexture;
+static std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize> gFirstPersonWoodWallTexture;
+static std::array<unsigned char, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize> gFirstPersonWoodWallTextureAlpha;
+static std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize> gFirstPersonGateTexture;
+static std::array<unsigned char, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize> gFirstPersonGateTextureAlpha;
 static bool gFirstPersonWallTexturesInitialized = false;
 static double gFirstPersonPreviewYaw = 0.0;
 static double gFirstPersonPreviewPitch = 0.0;
@@ -332,6 +345,8 @@ static std::vector<unsigned char> gFirstPersonPreviewWallCells;
 static std::vector<unsigned char> gFirstPersonPreviewWallOrientations;
 static std::vector<MaterialType> gFirstPersonPreviewWallMaterials;
 static int gFirstPersonPreviewCenterRayWallTile = -1;
+static unsigned char gFirstPersonPreviewCenterRayWallType = 0;
+static MaterialType gFirstPersonPreviewCenterRayWallMaterial = MATERIAL_TYPE_INVALID;
 static std::vector<int> gFirstPersonPreviewExitGridTiles;
 static std::vector<TileFirstPersonTopologyMarker> gFirstPersonPreviewTopologyMarkers;
 static unsigned int gFirstPersonPreviewProfileFrames = 0;
@@ -933,6 +948,31 @@ static void tileFirstPersonInitializeWallTextures()
     };
     const Color woodEdge = _colorTable[rgb555(0x2A1E18)];
     const Color woodHighlight = _colorTable[rgb555(0x806040)];
+    const Color fenceWoodColors[] = {
+        _colorTable[rgb555(0x62432D)],
+        _colorTable[rgb555(0x805737)],
+        _colorTable[rgb555(0x9B6F43)],
+        _colorTable[rgb555(0xB1824D)],
+        _colorTable[rgb555(0xC39660)],
+    };
+    const Color fenceWoodEdge = _colorTable[rgb555(0x45301F)];
+    const Color fenceWoodGrain = _colorTable[rgb555(0x3A281B)];
+    const Color fenceWoodHighlight = _colorTable[rgb555(0xD0A36A)];
+    const Color fenceWoodNail = _colorTable[rgb555(0xB89A66)];
+
+    const Color metalRibColors[] = {
+        _colorTable[rgb555(0x302723)],
+        _colorTable[rgb555(0x49352D)],
+        _colorTable[rgb555(0x624638)],
+        _colorTable[rgb555(0x775946)],
+        _colorTable[rgb555(0x694A3B)],
+        _colorTable[rgb555(0x533A30)],
+        _colorTable[rgb555(0x3D2F28)],
+        _colorTable[rgb555(0x302723)],
+    };
+    const Color metalSeam = _colorTable[rgb555(0x241E1B)];
+    const Color metalRust = _colorTable[rgb555(0x84533D)];
+    const Color metalScratch = _colorTable[rgb555(0x9A7557)];
 
     for (size_t index = 0; index < gFirstPersonImportedStoneWallTexture.size(); index++) {
         gFirstPersonImportedStoneWallTexture[index] = _colorTable[kFirstPersonStoneWallTextureRgb555[index]];
@@ -951,6 +991,121 @@ static void tileFirstPersonInitializeWallTextures()
             const int stoneBase = (blockSeed
                 + static_cast<int>(tileFirstPersonTextureNoise(blockX, course, 29) % 3)) % 5;
             const size_t index = static_cast<size_t>(y) * kFirstPersonWallTextureSize + x;
+            const unsigned int metalNoise = tileFirstPersonTextureNoise(x, y, 83);
+            Color metalColor = metalRibColors[x & 7];
+            if ((metalNoise & 63) == 0) {
+                metalColor = metalRust;
+            } else if ((metalNoise & 127) == 1) {
+                metalColor = metalSeam;
+            } else if ((metalNoise & 255) == 2) {
+                metalColor = metalScratch;
+            }
+            if (x % 32 == 0 || x % 32 == 31) {
+                metalColor = metalSeam;
+            }
+            if (x % 32 == 3 && (y % 16 == 4 || y % 16 == 12)) {
+                metalColor = metalScratch;
+            }
+            gFirstPersonMetalWallTexture[index] = metalColor;
+
+            const int woodPhaseY = (y + 1) & 7;
+            const bool woodGap = woodPhaseY < 2;
+            gFirstPersonWoodWallTextureAlpha[index] = woodGap ? 0 : 255;
+            if (woodGap) {
+                gFirstPersonWoodWallTexture[index] = fenceWoodEdge;
+            } else {
+                const int woodBoard = y / 8;
+                const int boardY = woodPhaseY - 2;
+                const unsigned int grainNoise = tileFirstPersonTextureNoise(x / 4, woodBoard, 211);
+                const int darkGrainRow = 1
+                    + static_cast<int>(tileFirstPersonTextureNoise(woodBoard, 0, 223) % 4);
+                const int lightGrainRow = 1
+                    + static_cast<int>(tileFirstPersonTextureNoise(woodBoard, 1, 227) % 4);
+                const int woodShade = (woodBoard
+                    + static_cast<int>(tileFirstPersonTextureNoise(woodBoard, 0, 149) & 1)) % 5;
+                Color woodColor = fenceWoodColors[woodShade];
+                if (boardY == 0) {
+                    woodColor = fenceWoodHighlight;
+                } else if (boardY == 5) {
+                    woodColor = fenceWoodEdge;
+                } else if (boardY == darkGrainRow && (grainNoise & 3) != 0) {
+                    woodColor = fenceWoodGrain;
+                } else if (boardY == lightGrainRow && (grainNoise & 3) == 0) {
+                    woodColor = fenceWoodHighlight;
+                } else if ((grainNoise & 31) == 0) {
+                    woodColor = fenceWoodGrain;
+                }
+
+                if (woodBoard % 3 == 1) {
+                    const int knotX = 10 + (woodBoard * 23) % 40;
+                    if (boardY == 2 && x >= knotX - 1 && x <= knotX + 1) {
+                        woodColor = fenceWoodGrain;
+                    } else if ((boardY == 1 || boardY == 3)
+                        && x >= knotX - 2 && x <= knotX + 2) {
+                        woodColor = fenceWoodHighlight;
+                    }
+                }
+
+                const int jointX = (woodBoard & 1) != 0 ? 16 : 32;
+                if (x == jointX && boardY > 0 && boardY < 5) {
+                    woodColor = fenceWoodGrain;
+                } else if (x == jointX + 1 && boardY > 0 && boardY < 5) {
+                    woodColor = fenceWoodHighlight;
+                }
+
+                const int nailX = (woodBoard & 1) != 0 ? 40 : 8;
+                if (boardY == 2 && (x == nailX || x == nailX + 1)) {
+                    woodColor = fenceWoodNail;
+                }
+
+                gFirstPersonWoodWallTexture[index] = woodColor;
+            }
+
+            const bool gateHorizontalRail = y < 7 || y >= 57 || (y >= 29 && y < 35);
+            const bool gateVerticalPost = x < 7 || x >= 57;
+            const bool gateDiagonalA = x >= 7 && x < 57 && std::abs(y - x) <= 2;
+            const bool gateDiagonalB = x >= 7 && x < 57 && std::abs(x + y - 63) <= 2;
+            const bool gateBoard = gateHorizontalRail || gateVerticalPost
+                || gateDiagonalA || gateDiagonalB;
+            gFirstPersonGateTextureAlpha[index] = gateBoard ? 255 : 0;
+            if (gateBoard) {
+                int member;
+                int grainPosition;
+                int across;
+                if (gateHorizontalRail) {
+                    member = 0;
+                    grainPosition = x;
+                    across = y < 7 ? y - 3 : y < 35 ? y - 31 : y - 60;
+                } else if (gateVerticalPost) {
+                    member = 1;
+                    grainPosition = y;
+                    across = x < 7 ? x - 3 : x - 60;
+                } else if (gateDiagonalA) {
+                    member = 2;
+                    grainPosition = x + y;
+                    across = y - x;
+                } else {
+                    member = 3;
+                    grainPosition = x - y;
+                    across = x + y - 63;
+                }
+
+                const unsigned int gateNoise = tileFirstPersonTextureNoise(
+                    grainPosition / 4, member * 11 + across + 32, 239);
+                const int gateShade = static_cast<int>(
+                    tileFirstPersonTextureNoise(grainPosition / 8, member, 241) % 5);
+                Color gateColor = fenceWoodColors[gateShade];
+                if (std::abs(across) >= 2) {
+                    gateColor = fenceWoodEdge;
+                } else if ((gateNoise & 31) == 0) {
+                    gateColor = fenceWoodGrain;
+                } else if ((gateNoise & 63) == 1) {
+                    gateColor = fenceWoodHighlight;
+                }
+                gFirstPersonGateTexture[index] = gateColor;
+            } else {
+                gFirstPersonGateTexture[index] = fenceWoodEdge;
+            }
 
             const int caveCourse = y / 16;
             const int caveLocalY = y % 16;
@@ -1009,6 +1164,27 @@ static void tileFirstPersonInitializeWallTextures()
                 gFirstPersonDoorWallTexture[index] = woodColors[woodBase];
             }
         }
+    }
+
+    for (int coordinate = 0; coordinate < kFirstPersonWallTextureSize; coordinate++) {
+        gFirstPersonMetalWallTexture[coordinate * kFirstPersonWallTextureSize
+            + kFirstPersonWallTextureSize - 1] =
+            gFirstPersonMetalWallTexture[coordinate * kFirstPersonWallTextureSize];
+        gFirstPersonMetalWallTexture[(kFirstPersonWallTextureSize - 1)
+                * kFirstPersonWallTextureSize + coordinate] =
+            gFirstPersonMetalWallTexture[coordinate];
+        gFirstPersonWoodWallTexture[coordinate * kFirstPersonWallTextureSize
+            + kFirstPersonWallTextureSize - 1] =
+            gFirstPersonWoodWallTexture[coordinate * kFirstPersonWallTextureSize];
+        gFirstPersonWoodWallTextureAlpha[coordinate * kFirstPersonWallTextureSize
+            + kFirstPersonWallTextureSize - 1] =
+            gFirstPersonWoodWallTextureAlpha[coordinate * kFirstPersonWallTextureSize];
+        gFirstPersonWoodWallTexture[(kFirstPersonWallTextureSize - 1)
+                * kFirstPersonWallTextureSize + coordinate] =
+            gFirstPersonWoodWallTexture[coordinate];
+        gFirstPersonWoodWallTextureAlpha[(kFirstPersonWallTextureSize - 1)
+                * kFirstPersonWallTextureSize + coordinate] =
+            gFirstPersonWoodWallTextureAlpha[coordinate];
     }
 
     gFirstPersonWallTexturesInitialized = true;
@@ -1168,6 +1344,7 @@ static void tileRenderFirstPersonPreview()
             templeFirePitsCached = true;
         }
     }
+    std::vector<Object*> doorObjects;
     TileFirstPersonGrayboxRenderContext context = {
         gElevation,
         gHexGridWidth,
@@ -1175,10 +1352,12 @@ static void tileRenderFirstPersonPreview()
         gFirstPersonPreviewWallCells.data(),
         gFirstPersonPreviewWallOrientations.data(),
         gFirstPersonPreviewWallMaterials.data(),
+        &doorObjects,
         &gFirstPersonPreviewExitGridTiles,
         gMapHeader.index == MAP_ARROYO_TEMPLE ? &templeWallAreaLandmarkTiles : nullptr,
     };
     objectVisitAll(tileFirstPersonGrayboxMarkObject, &context);
+    tileFirstPersonResolveWoodGates(&context, doorObjects);
     if (gMapHeader.index == MAP_ARROYO_TEMPLE) {
         tileFirstPersonMarkTempleBlockedAreaWalls(&context);
     }
@@ -1384,6 +1563,8 @@ static void tileRenderFirstPersonPreview()
     static std::vector<int> floorOcclusionBottoms;
     floorOcclusionBottoms.assign(gTileWindowWidth, horizonY);
     gFirstPersonPreviewCenterRayWallTile = -1;
+    gFirstPersonPreviewCenterRayWallType = 0;
+    gFirstPersonPreviewCenterRayWallMaterial = MATERIAL_TYPE_INVALID;
 
     const unsigned int wallStart = profileFrame ? getTicks() : 0;
     for (int x = 0; x < gTileWindowWidth; x++) {
@@ -1417,14 +1598,19 @@ static void tileRenderFirstPersonPreview()
         MaterialType wallMaterial = MATERIAL_TYPE_INVALID;
         TileFirstPersonWallOrientation wallOrientation = TILE_FIRST_PERSON_WALL_ORIENTATION_CELL;
         double wallDistance = std::numeric_limits<double>::infinity();
+        int wallCellTile = -1;
+        unsigned char wallHitType = 0;
         unsigned char windowType = 0;
         MaterialType windowMaterial = MATERIAL_TYPE_INVALID;
         TileFirstPersonWallOrientation windowOrientation = TILE_FIRST_PERSON_WALL_ORIENTATION_CELL;
         double windowDistance = std::numeric_limits<double>::infinity();
+        int windowCellTile = -1;
         int windowSide = 0;
+        bool windowGateClosed = false;
         double doorCapDistance = std::numeric_limits<double>::infinity();
         TileFirstPersonWallOrientation doorCapOrientation =
             TILE_FIRST_PERSON_WALL_ORIENTATION_CELL;
+        int doorCapCellTile = -1;
         int doorCapSide = 0;
         double cellEntryDistance = 0.0;
         while (mapX >= 0 && mapX < gHexGridWidth
@@ -1438,26 +1624,41 @@ static void tileRenderFirstPersonPreview()
                         gFirstPersonPreviewWallOrientations[cellIndex]);
                 if (wallOrientation == TILE_FIRST_PERSON_WALL_ORIENTATION_CELL) {
                     const double hitDistance = std::max(0.1, cellEntryDistance / 2.0);
-                    if (wallType == 2) {
+                    if (wallType == 2
+                        || (wallType == 1 && cellMaterial == MATERIAL_TYPE_WOOD)
+                        || wallType == kFirstPersonWoodGateType
+                        || wallType == kFirstPersonClosedWoodGateType) {
                         if (windowDistance == std::numeric_limits<double>::infinity()) {
-                            windowType = wallType;
+                            windowType = wallType == 1
+                                ? kFirstPersonTransparentWoodWallType
+                                : wallType == kFirstPersonClosedWoodGateType
+                                    ? kFirstPersonWoodGateType
+                                    : wallType;
                             windowMaterial = cellMaterial;
                             windowOrientation = wallOrientation;
                             windowDistance = hitDistance;
+                            windowCellTile = mapY * gHexGridWidth
+                                + (gHexGridWidth - 1 - mapX);
                             windowSide = side;
+                            windowGateClosed =
+                                wallType == kFirstPersonClosedWoodGateType;
                         }
                     } else if (wallType == 5) {
                         if (doorCapDistance == std::numeric_limits<double>::infinity()) {
                             doorCapDistance = hitDistance;
                             doorCapOrientation = wallOrientation;
+                            doorCapCellTile = mapY * gHexGridWidth
+                                + (gHexGridWidth - 1 - mapX);
                             doorCapSide = side;
                         }
                     } else {
                         wallMaterial = cellMaterial;
                         wallDistance = hitDistance;
+                        wallHitType = wallType;
+                        wallCellTile = mapY * gHexGridWidth
+                            + (gHexGridWidth - 1 - mapX);
                         if (x == gTileWindowWidth / 2) {
-                            gFirstPersonPreviewCenterRayWallTile =
-                                mapY * gHexGridWidth + (gHexGridWidth - 1 - mapX);
+                            gFirstPersonPreviewCenterRayWallTile = wallCellTile;
                         }
                         break;
                     }
@@ -1517,20 +1718,33 @@ static void tileRenderFirstPersonPreview()
                     && wallExitDistance >= clippedWallEntryDistance - kIntersectionEpsilon
                     && clippedWallEntryDistance <= cellExitDistance + kIntersectionEpsilon) {
                     const double hitDistance = std::max(0.1, clippedWallEntryDistance / 2.0);
-                    if (wallType == 2) {
+                    if (wallType == 2
+                        || (wallType == 1 && cellMaterial == MATERIAL_TYPE_WOOD)
+                        || wallType == kFirstPersonWoodGateType
+                        || wallType == kFirstPersonClosedWoodGateType) {
                         if (windowDistance == std::numeric_limits<double>::infinity()) {
-                            windowType = wallType;
+                            windowType = wallType == 1
+                                ? kFirstPersonTransparentWoodWallType
+                                : wallType == kFirstPersonClosedWoodGateType
+                                    ? kFirstPersonWoodGateType
+                                    : wallType;
                             windowMaterial = cellMaterial;
                             windowOrientation = wallOrientation;
                             windowDistance = hitDistance;
+                            windowCellTile = mapY * gHexGridWidth
+                                + (gHexGridWidth - 1 - mapX);
                             windowSide = wallEntryDistance >= cellEntryDistance - kIntersectionEpsilon
                                 ? nearX > nearY ? 0 : 1
                                 : side;
+                            windowGateClosed =
+                                wallType == kFirstPersonClosedWoodGateType;
                         }
                     } else if (wallType == 5) {
                         if (doorCapDistance == std::numeric_limits<double>::infinity()) {
                             doorCapDistance = hitDistance;
                             doorCapOrientation = wallOrientation;
+                            doorCapCellTile = mapY * gHexGridWidth
+                                + (gHexGridWidth - 1 - mapX);
                             doorCapSide = wallEntryDistance >= cellEntryDistance - kIntersectionEpsilon
                                 ? nearX > nearY ? 0 : 1
                                 : side;
@@ -1538,9 +1752,11 @@ static void tileRenderFirstPersonPreview()
                     } else {
                         wallMaterial = cellMaterial;
                         wallDistance = hitDistance;
+                        wallHitType = wallType;
+                        wallCellTile = mapY * gHexGridWidth
+                            + (gHexGridWidth - 1 - mapX);
                         if (x == gTileWindowWidth / 2) {
-                            gFirstPersonPreviewCenterRayWallTile =
-                                mapY * gHexGridWidth + (gHexGridWidth - 1 - mapX);
+                            gFirstPersonPreviewCenterRayWallTile = wallCellTile;
                         }
                         if (wallEntryDistance >= cellEntryDistance - kIntersectionEpsilon) {
                             side = nearX > nearY ? 0 : 1;
@@ -1566,6 +1782,33 @@ static void tileRenderFirstPersonPreview()
                 break;
             }
 
+        }
+
+        if (x == gTileWindowWidth / 2) {
+            double closestDistance = std::numeric_limits<double>::infinity();
+            if (wallDistance < closestDistance) {
+                closestDistance = wallDistance;
+                gFirstPersonPreviewCenterRayWallTile = wallCellTile;
+                gFirstPersonPreviewCenterRayWallType = wallHitType;
+                gFirstPersonPreviewCenterRayWallMaterial = wallMaterial;
+            }
+            if (windowDistance < closestDistance) {
+                closestDistance = windowDistance;
+                gFirstPersonPreviewCenterRayWallTile = windowCellTile;
+                gFirstPersonPreviewCenterRayWallType = windowType;
+                gFirstPersonPreviewCenterRayWallMaterial = windowMaterial;
+            }
+            if (doorCapDistance < closestDistance) {
+                gFirstPersonPreviewCenterRayWallTile = doorCapCellTile;
+                gFirstPersonPreviewCenterRayWallType = 5;
+                const int renderHexTile = tileFirstPersonGetRenderHexTile(
+                    doorCapCellTile, gHexGridWidth);
+                gFirstPersonPreviewCenterRayWallMaterial = renderHexTile >= 0
+                        && renderHexTile < static_cast<int>(
+                            gFirstPersonPreviewWallMaterials.size())
+                    ? gFirstPersonPreviewWallMaterials[renderHexTile]
+                    : MATERIAL_TYPE_INVALID;
+            }
         }
 
         if (wallDistance == std::numeric_limits<double>::infinity()
@@ -1614,10 +1857,26 @@ static void tileRenderFirstPersonPreview()
                 object = objectFindNextAtLocation();
             }
         }
+        if (windowGateClosed && windowCellTile >= 0) {
+            Object* object = objectFindFirstAtLocation(gElevation, windowCellTile);
+            while (object != nullptr) {
+                Proto* proto = nullptr;
+                if (protoGetProto(object, &proto) == 0
+                    && FrmId(object).objectType() == OBJ_TYPE_SCENERY
+                    && proto->scenery.type == SCENERY_TYPE_DOOR
+                    && (object->data.scenery.door.openFlags & DOOR_FLAG_OPEN) == 0
+                    && (object->flags & OBJECT_OPEN_DOOR) == OBJECT_NONE) {
+                    gFirstPersonPreviewDoorHitTargets.push_back({ object, windowDistance, x });
+                    break;
+                }
+                object = objectFindNextAtLocation();
+            }
+        }
         const auto renderWall = [&](unsigned char type, MaterialType material, double distance,
                                     TileFirstPersonWallOrientation orientation, int wallSide) {
             const double projectedWallHeight = gTileWindowHeight / distance;
             const bool halfHeightWall = type == 2;
+            const bool gatePanel = type == kFirstPersonWoodGateType;
             const double wallHeight = halfHeightWall
                 ? std::max(1.0, projectedWallHeight / 2.0)
                 : projectedWallHeight * 2.0;
@@ -1626,12 +1885,16 @@ static void tileRenderFirstPersonPreview()
                 ? horizonY
                 : floorY - wallHeight;
             const double doorSplitY = unclippedWallTop + wallHeight / 2.0;
-            const int wallTop = std::max(0,
-                static_cast<int>(ceil(unclippedWallTop)));
+            const int wallTop = std::max(0, static_cast<int>(ceil(
+                gatePanel ? doorSplitY : unclippedWallTop)));
             const int wallBottom = std::min(gTileWindowHeight - 1,
                 static_cast<int>(floor(type == 5 ? doorSplitY : floorY)));
             if (wallTop <= horizonY + 1 && wallBottom >= horizonY + 1) {
-                floorOcclusionBottoms[x] = std::max(floorOcclusionBottoms[x], wallBottom);
+                if (material == MATERIAL_TYPE_WOOD) {
+                    floorOcclusionBottoms[x] = horizonY;
+                } else {
+                    floorOcclusionBottoms[x] = std::max(floorOcclusionBottoms[x], wallBottom);
+                }
             }
             const double hitWorldX = cameraX + rayDirectionX * distance;
             const double hitWorldY = cameraY + rayDirectionY * distance;
@@ -1659,26 +1922,47 @@ static void tileRenderFirstPersonPreview()
             const int distanceShade = std::min(48, static_cast<int>(distance * 7.0));
             const int light = std::max(48, faceShade - distanceShade)
                 * ambientIntensity / LIGHT_INTENSITY_MAX;
-            const int wallRenderStep = type == 3 || type == 5 ? 1 : 2;
-            if (type == 5 && wallTop <= wallBottom) {
+            const int wallRenderStep = type == 3 || type == 5 || gatePanel
+                    || material == MATERIAL_TYPE_WOOD
+                ? 1
+                : 2;
+            if ((type == 5 || gatePanel) && wallTop <= wallBottom) {
                 hasDoorCaps = true;
-                doorCapDepths[x] = { wallTop, wallBottom + 1, distance };
+                TileFirstPersonDoorCapSpan& cap = doorCapDepths[x];
+                if (!std::isfinite(cap.depth)) {
+                    cap = { wallTop, wallBottom + 1, distance };
+                } else {
+                    cap.top = std::min(cap.top, wallTop);
+                    cap.bottom = std::max(cap.bottom, wallBottom + 1);
+                    cap.depth = std::min(cap.depth, distance);
+                }
             }
             for (int y = wallTop; y <= wallBottom; y += wallRenderStep) {
                 const bool brickTexture = type != 3 || y < doorSplitY;
                 const bool stoneWall = brickTexture && material == MATERIAL_TYPE_STONE;
                 const bool leatherWall = brickTexture && material == MATERIAL_TYPE_LEATHER;
-                const auto& texture = brickTexture
+                const bool metalWall = brickTexture && material == MATERIAL_TYPE_METAL;
+                const bool woodWall = brickTexture && material == MATERIAL_TYPE_WOOD;
+                const bool gateTexture = gatePanel;
+                const auto& texture = gateTexture
+                    ? gFirstPersonGateTexture
+                    : brickTexture
                     ? stoneWall
                         ? gFirstPersonImportedStoneWallTexture
                         : leatherWall
                             ? gFirstPersonLeatherWallTexture
-                            : gFirstPersonStoneWallTexture
+                            : metalWall
+                                ? gFirstPersonMetalWallTexture
+                                : woodWall
+                                    ? gFirstPersonWoodWallTexture
+                                    : gFirstPersonStoneWallTexture
                     : gFirstPersonDoorWallTexture;
                 const double textureOffset = type == 3 && !brickTexture
                     ? y - doorSplitY
-                    : y - unclippedWallTop;
-                const double textureScaleHeight = type == 3 || type == 5
+                    : gatePanel
+                        ? y - doorSplitY
+                        : y - unclippedWallTop;
+                const double textureScaleHeight = type == 3 || type == 5 || gatePanel
                     ? std::max(1.0, wallHeight / 2.0)
                     : textureHeight;
                 int textureY = static_cast<int>(
@@ -1686,7 +1970,13 @@ static void tileRenderFirstPersonPreview()
                 textureY %= kFirstPersonWallTextureSize;
                 const int textureIndex = textureY * kFirstPersonWallTextureSize
                     + (leatherWall ? leatherTextureX : textureX);
-                const Color texel = brickTexture && useCaveWallTexture && !stoneWall && !leatherWall
+                if ((gateTexture && gFirstPersonGateTextureAlpha[textureIndex] == 0)
+                    || (woodWall && !gateTexture
+                        && gFirstPersonWoodWallTextureAlpha[textureIndex] == 0)) {
+                    continue;
+                }
+                const Color texel = brickTexture && useCaveWallTexture
+                        && !stoneWall && !leatherWall && !metalWall && !woodWall
                     ? gFirstPersonCaveWallTexture[textureIndex]
                     : texture[textureIndex];
                 const unsigned char color = intensityColorTable[texel][light];
@@ -1775,7 +2065,9 @@ static void tileRenderFirstPersonPreview()
                      blockX++) {
                     // Partially covered blocks retain the same sample, but
                     // must not overwrite wall pixels drawn earlier.
-                    if (blockY > floorOcclusionBottoms[blockX]) {
+                    const size_t depthIndex = static_cast<size_t>(blockY) * gTileWindowWidth + blockX;
+                    if (blockY > floorOcclusionBottoms[blockX]
+                        && !std::isfinite(wallPixelDepths[depthIndex])) {
                         gTileWindowBuffer[blockY * gTileWindowPitch + blockX] = color;
                     }
                 }
@@ -2438,10 +2730,68 @@ static void tileFirstPersonGrayboxMarkObject(Object* object, void* context)
     if (cellWallType == 0 || wallType == 3 || wallType == 5) {
         cellWallType = wallType;
         renderContext->wallOrientations[renderHexTile] = wallOrientation;
-        renderContext->wallMaterials[renderHexTile] =
-            objectType == OBJ_TYPE_WALL && hasProto
+        renderContext->wallMaterials[renderHexTile] = objectType == OBJ_TYPE_WALL && hasProto
             ? proto->wall.material
             : MATERIAL_TYPE_INVALID;
+        if (isDoor && renderContext->doorObjects != nullptr) {
+            renderContext->doorObjects->push_back(object);
+        }
+    }
+}
+
+static void tileFirstPersonResolveWoodGates(
+    const TileFirstPersonGrayboxRenderContext* renderContext,
+    const std::vector<Object*>& doorObjects)
+{
+    if (renderContext->gridWidth <= 0) {
+        return;
+    }
+
+    for (Object* door : doorObjects) {
+        if (door == nullptr) {
+            continue;
+        }
+
+        const int gateTile = tileFirstPersonGetRenderHexTile(
+            door->tile, renderContext->gridWidth);
+        if (gateTile < 0 || gateTile >= gHexGridSize) {
+            continue;
+        }
+        const unsigned char wallType = renderContext->wallCells[gateTile];
+        if (wallType != 3 && wallType != 5) {
+            continue;
+        }
+
+        int woodWallNeighbors = 0;
+        for (Rotation rotation = ROTATION_FIRST;
+             rotation < ROTATION_COUNT;
+             rotation++) {
+            const int neighborTile = tileGetTileInDirection(door->tile, rotation, 1);
+            if (!tileIsValid(neighborTile)) {
+                continue;
+            }
+            const int renderNeighbor = tileFirstPersonGetRenderHexTile(
+                neighborTile, renderContext->gridWidth);
+            if (renderNeighbor >= 0
+                && renderNeighbor < gHexGridSize
+                && (renderContext->wallCells[renderNeighbor] == 1
+                    || renderContext->wallCells[renderNeighbor] == 2)
+                && renderContext->wallMaterials[renderNeighbor] == MATERIAL_TYPE_WOOD) {
+                woodWallNeighbors++;
+            }
+        }
+        if (woodWallNeighbors < 2) {
+            continue;
+        }
+
+        const bool doorOpen =
+            (door->data.scenery.door.openFlags & DOOR_FLAG_OPEN) != 0
+            || (door->flags & OBJECT_OPEN_DOOR) != OBJECT_NONE
+            || door->frame != 0;
+        renderContext->wallCells[gateTile] = doorOpen
+            ? kFirstPersonWoodGateType
+            : kFirstPersonClosedWoodGateType;
+        renderContext->wallMaterials[gateTile] = MATERIAL_TYPE_WOOD;
     }
 }
 
@@ -5045,39 +5395,32 @@ static void tileRenderFirstPersonTopology()
             return "Unknown";
         }
     };
-    const auto rayHitMaterial = [&]() {
-        if (!tileIsValid(gFirstPersonPreviewCenterRayWallTile)) {
-            return "Unknown";
-        }
 
+    int rayHitProtoId = -1;
+    if (tileIsValid(gFirstPersonPreviewCenterRayWallTile)) {
         Object* object = objectFindFirstAtLocation(
             gElevation, gFirstPersonPreviewCenterRayWallTile);
         while (object != nullptr) {
             Proto* proto = nullptr;
-            if (protoGetProto(object, &proto) == 0) {
-                const ObjectType objectType = FrmId(object).objectType();
-                if (objectType == OBJ_TYPE_WALL) {
-                    return materialName(proto->wall.material);
-                }
-                if (objectType == OBJ_TYPE_SCENERY
-                    && proto->scenery.type == SCENERY_TYPE_DOOR) {
-                    return materialName(proto->scenery.material);
-                }
+            if (FrmId(object).objectType() == OBJ_TYPE_WALL
+                && protoGetProto(object, &proto) == 0
+                && proto->wall.material == gFirstPersonPreviewCenterRayWallMaterial) {
+                rayHitProtoId = ProtoId(object).protoId();
+                break;
             }
             object = objectFindNextAtLocation();
         }
-        return "Unknown";
-    };
+    }
 
     char rayHitLabel[64];
     if (gHexGridWidth > 0 && tileIsValid(gFirstPersonPreviewCenterRayWallTile)) {
-        std::snprintf(rayHitLabel, sizeof(rayHitLabel), "Ray hit: %d (row %d, col %d), mat: %s",
+        std::snprintf(rayHitLabel, sizeof(rayHitLabel), "Ray tile:%d c%d %s p%d",
             gFirstPersonPreviewCenterRayWallTile,
-            gFirstPersonPreviewCenterRayWallTile / gHexGridWidth,
-            gFirstPersonPreviewCenterRayWallTile % gHexGridWidth,
-            rayHitMaterial());
+            static_cast<int>(gFirstPersonPreviewCenterRayWallType),
+            materialName(gFirstPersonPreviewCenterRayWallMaterial),
+            rayHitProtoId);
     } else {
-        std::snprintf(rayHitLabel, sizeof(rayHitLabel), "Ray hit: none, mat: Unknown");
+        std::snprintf(rayHitLabel, sizeof(rayHitLabel), "Ray hit: none");
     }
     const int labelHeight = std::max(1, fontGetLineHeight());
     const int labelTop = std::max(0, gTileWindowHeight - labelHeight - 2);
