@@ -233,10 +233,10 @@ void clientViewerUnload(Object* item);
 // ends the cutscene for the whole room by design (game_movie.h).
 void clientViewerMovieAck();
 void clientViewerEncounterAnswer(bool accept);
-void clientViewerUseItem(int pid);
+void clientViewerUseItem(int itemNetId);
 void clientViewerUseDoor(int targetNetId);
-void clientViewerUseItemOn(int targetNetId, int pid);
-void clientViewerArmExplosive(int pid, int seconds);
+void clientViewerUseItemOn(int targetNetId, int itemNetId);
+void clientViewerArmExplosive(int itemNetId, int seconds);
 void clientViewerLootTake(int containerNetId, int pid, int quantity);
 void clientViewerLootPut(int containerNetId, int pid, int quantity);
 void clientViewerLootTakeAll(int containerNetId);

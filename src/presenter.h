@@ -92,6 +92,8 @@ enum ObjectDeltaField {
     // what the object is. It fixed itself on a map reload, which is exactly the
     // signature of state that only the blob carries.
     OBJECT_DELTA_PID = 1 << 11,
+    // Multiplayer instance state: data.flags plus the two non-critter union scalars.
+    OBJECT_DELTA_INSTANCE = 1 << 12,
 };
 
 // Bits for Presenter::worldDelta (MP_PROTOCOL.md §2 worldDelta). Global sim

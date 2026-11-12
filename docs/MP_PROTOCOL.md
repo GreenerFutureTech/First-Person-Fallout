@@ -1,5 +1,19 @@
 # MP_PROTOCOL — the dedicated-server wire protocol (P5-B)
 
+### Current wire version: 6
+
+Client and server builds must match. The frame header is unchanged from v4.
+Version 5 added recursively encoded carried-container contents. Version 6 adds:
+
+- Each inventory row: `i32 data.flags` after `ammoTypePid`, before the nested inventory count.
+- `OBJECT_DELTA_INSTANCE` (bit 12): `i32 data.flags`, `i32 instanceValue`, `i32 instanceAux`, appended after the PID field. For items the scalars carry ammo/charges/key data; for scenery they preserve the first two instance union fields, including door OPEN/LOCKED/JAMMED state.
+- New owners receive a full inventory delta, including empty inventories.
+
+The viewer defers a door's OPEN presentation through the existing replay flags lifecycle. Item and lock state are authoritative; client commands name selected carried instances with `useitemid`, `useitemonid` and `useitem_armexplosiveid`. `handuse` is a separate priced combat action. Legacy PID commands remain server-side compatibility paths.
+
+Combat loot transfers require a current-turn server grant for that target; `lootclose` revokes it. Elevator offers expire on origin/session/map mismatch or timeout; `elevcancel` revokes them. Merchant-table barter withdrawals use `bunoffer_npc` to preserve the selected side.
+
+
 Status: **DESIGN + IN PROGRESS.** This is the design of record for the outbound
 state/event stream of the Fallout 2 CE dedicated server (REWRITE_PLAN Phase 5,
 the "P5" track). It supersedes ARCHITECTURE.md's premise that "serialize the

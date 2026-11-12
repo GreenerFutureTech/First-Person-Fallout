@@ -47,6 +47,9 @@ struct ObjectShadow {
     // are Object*s NOT in the world tile list, so objectFindFirst never returns
     // them; this fingerprint is how all their changes become observable.
     unsigned int inventoryHash;
+    int instanceFlags;
+    int instanceValue;
+    int instanceAux;
 };
 
 // murmur3 fmix32 finalizer — avalanches a 32-bit value so a per-item hash is
@@ -88,7 +91,8 @@ static unsigned int objectInventoryHashAt(const Object* obj, int depth)
         const Object* item = entry->item;
         unsigned int itemHash = (unsigned int)item->pid * 2654435761u
             + (unsigned int)entry->quantity * 2246822519u
-            + item->flags * 40503u;
+            + item->flags * 40503u
+            + (serverDedicatedActive() ? static_cast<unsigned int>(item->data.flags) * 97u : 0u);
         // Intra-item union fields — guarded on OBJ_TYPE_ITEM so data.item is the
         // valid union arm. An inventory only ever holds items today (itemAdd), so
         // the guard is always true and byte-identical; it hardens against a future
@@ -168,6 +172,12 @@ static ObjectShadow objectCaptureShadow(Object* obj)
     // data.inventory is a always-live field (not in the type union), valid for
     // critters AND containers (loot) — mirrors state_dump's unconditional dump.
     shadow.inventoryHash = objectInventoryHash(obj);
+    // Only the multiplayer server emits the extended instance payload.
+    if (serverDedicatedActive() && !objectIsCritter(obj)) {
+        shadow.instanceFlags = obj->data.flags;
+        shadow.instanceValue = obj->data.item.weapon.ammoQuantity;
+        shadow.instanceAux = obj->data.item.weapon.ammoTypePid;
+    }
     if (objectIsCritter(obj)) {
         shadow.hp = obj->data.critter.hp;
         shadow.radiation = obj->data.critter.radiation;
@@ -192,6 +202,11 @@ static unsigned int objectDiffShadow(const ObjectShadow& before, const ObjectSha
     // should mask to a syncable-flags subset to avoid wire noise (review 2026-07-13).
     if (before.flags != after.flags) mask |= OBJECT_DELTA_FLAGS;
     if (before.inventoryHash != after.inventoryHash) mask |= OBJECT_DELTA_INVENTORY;
+    if (serverDedicatedActive() && !isCritter
+        && (before.pid != after.pid || before.instanceFlags != after.instanceFlags
+            || before.instanceValue != after.instanceValue || before.instanceAux != after.instanceAux)) {
+        mask |= OBJECT_DELTA_INSTANCE;
+    }
     if (isCritter) {
         if (before.hp != after.hp) mask |= OBJECT_DELTA_HP;
         if (before.radiation != after.radiation) mask |= OBJECT_DELTA_RADIATION;
@@ -299,6 +314,10 @@ void objectDeltaScan()
                 // netstream position profile is unchanged.
                 unsigned int mask = OBJECT_DELTA_PID | OBJECT_DELTA_FID | OBJECT_DELTA_FRAME
                     | OBJECT_DELTA_LIGHT | OBJECT_DELTA_ROTATION | OBJECT_DELTA_FLAGS;
+                if (serverDedicatedActive()) {
+                    mask |= OBJECT_DELTA_INVENTORY;
+                    if (!objectIsCritter(obj)) mask |= OBJECT_DELTA_INSTANCE;
+                }
                 if (objectIsCritter(obj)) {
                     mask |= OBJECT_DELTA_HP | OBJECT_DELTA_RADIATION | OBJECT_DELTA_POISON
                         | OBJECT_DELTA_AP | OBJECT_DELTA_COMBAT_RESULTS;

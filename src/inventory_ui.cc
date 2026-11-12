@@ -2200,6 +2200,17 @@ static void _inven_pickup(int buttonCode, int indexOffset)
                 }
             }
         }
+        if (!handledListDrop && !pickUpFromSlot && _curr_stack > 0
+            && mouseHitTestInWindow(gInventoryWindow, inventoryLayout.bodyViewX,
+                INVENTORY_PC_BODY_VIEW_Y, inventoryLayout.bodyViewX + INVENTORY_BODY_VIEW_WIDTH,
+                INVENTORY_PC_BODY_VIEW_Y + INVENTORY_BODY_VIEW_HEIGHT)) {
+            int quantity = count > 1
+                ? inventoryQuantitySelect(INVENTORY_WINDOW_TYPE_MOVE_ITEMS, item, count) : 1;
+            if (quantity > 0) {
+                clientViewerPutInContainer(_stack[_curr_stack - 1], item, quantity);
+            }
+            handledListDrop = true;
+        }
         if (!handledListDrop && pickUpFromSlot && (immediate || inList)) {
             int hand = itemSlot == &gInventoryArmor ? HAND_COUNT : (itemSlot == &gInventoryLeftHandItem ? HAND_LEFT : HAND_RIGHT);
             clientViewerUnwield(hand);
@@ -2531,7 +2542,7 @@ void inventoryOpenUseItemOn(Object* targetObj)
                                 // the outcome streams back (Slice 2 reconcile). netId 0 =
                                 // an unsynced target → drop the pick, just close.
                                 if (targetObj->netId > 0) {
-                                    clientViewerUseItemOn(targetObj->netId, inventoryItem->item->pid);
+                                    clientViewerUseItemOn(targetObj->netId, inventoryItem->item->netId);
                                 }
                             } else {
                                 // Ledger H-2: AP gate + debit extracted to core
@@ -3342,24 +3353,39 @@ static void inventoryWindowOpenContextMenu(int keyCode, int inventoryWindowType)
     if (clientViewerActive() && actionMenuItem != GAME_MOUSE_ACTION_MENU_ITEM_LOOK) {
         switch (actionMenuItem) {
         case GAME_MOUSE_ACTION_MENU_ITEM_DROP:
-            if (owner == gDude) {
+            if (owner == gDude || inventoryWindowType == INVENTORY_WINDOW_TYPE_NORMAL) {
                 int amount = inventoryViewerDropQuantity(item, itemSlot, quantity);
                 if (amount != -1) clientViewerDrop(item, amount);
             }
             break;
         case GAME_MOUSE_ACTION_MENU_ITEM_USE:
-            if (owner != gDude) {
+            if (itemType == ITEM_TYPE_CONTAINER) {
+                // Navigation is local UI only. Use the selected object directly:
+                // hand-slot keycodes are not inventory-list indices.
+                if (inventoryWindowType == INVENTORY_WINDOW_TYPE_NORMAL && _curr_stack < 9) {
+                    ++_curr_stack;
+                    _stack[_curr_stack] = item;
+                    _stack_offset[_curr_stack] = 0;
+                    _inven_dude = item;
+                    _pud = &item->data.inventory;
+                    _adjust_fid();
+                    _display_body(FrmId::Empty(), inventoryWindowType);
+                    _display_inventory(0, -1, inventoryWindowType);
+                }
+                break;
+            }
+            if (owner != gDude && inventoryWindowType != INVENTORY_WINDOW_TYPE_NORMAL) {
                 break;
             }
             if (explosiveIsExplosive(item)) {
                 int seconds = inventorySetTimer(item);
-                if (seconds != -1) clientViewerArmExplosive(item->pid, seconds);
+                if (seconds != -1) clientViewerArmExplosive(item->netId, seconds);
             } else if (itemType != ITEM_TYPE_CONTAINER) {
-                clientViewerUseItem(item->pid);
+                clientViewerUseItem(item->netId);
             }
             break;
         case GAME_MOUSE_ACTION_MENU_ITEM_UNLOAD:
-            if (owner == gDude) {
+            if (owner == gDude || inventoryWindowType == INVENTORY_WINDOW_TYPE_NORMAL) {
                 clientViewerUnload(item);
             }
             break;
@@ -3629,7 +3655,7 @@ int inventoryOpenLooting(Object* looter, Object* target)
     // Left/Right instead cycles the active right-side party target.
     Object* const playerObj = _inven_dude;
     FrmId savedDudeFrmId = gInventoryWindowDudeFrmId;
-    bool switchActivePartyTarget = settings.qol.party_loot_and_barter
+    bool switchActivePartyTarget = !clientViewerActive() && settings.qol.party_loot_and_barter
         && _gIsSteal
         && objectIsPartyMember(target);
     std::vector<Object*> partyTargets;
@@ -3639,7 +3665,7 @@ int inventoryOpenLooting(Object* looter, Object* target)
                 partyTargets.push_back(pm);
             }
         }
-    } else if (settings.qol.party_loot_and_barter && (!_gIsSteal || objectIsPartyMember(target))) {
+    } else if (!clientViewerActive() && settings.qol.party_loot_and_barter && (!_gIsSteal || objectIsPartyMember(target))) {
         partyTargets.push_back(_inven_dude);
         for (Object* pm : get_all_party_members_objects(false)) {
             if (pm != gDude && pm != target) {
@@ -4438,6 +4464,23 @@ static InventoryMoveResult _move_inventory(Object* item, int slotIndex, Object* 
 
     InventoryMoveResult result = INVENTORY_MOVE_RESULT_FAILED;
 
+    if (clientViewerActive() && _gIsSteal) {
+        // Rolls and transfers belong to the server's steal session, including
+        // failures. Never run the singleplayer skill roll against the mirror.
+        if (clientStealActive() && clientStealIsDriver()
+            && (immediate || inventoryLootMouseHitTestScroller(isPlanting))) {
+            int amount = quantity > 1 && !immediate
+                ? inventoryQuantitySelect(INVENTORY_WINDOW_TYPE_MOVE_ITEMS, item, quantity)
+                : quantity;
+            if (amount > 0) {
+                clientViewerStealVerb(isPlanting ? "splant" : "stake", item->pid, amount);
+                result = INVENTORY_MOVE_RESULT_SUCCESS;
+            }
+        }
+        inventorySetCursor(INVENTORY_WINDOW_CURSOR_HAND);
+        return result;
+    }
+
     if (isPlanting) {
         if (!immediate && tryEquipPartyItem(item, true)) {
             result = INVENTORY_MOVE_RESULT_SUCCESS;
@@ -4660,7 +4703,7 @@ static void barterMoveFromTable(Object* item, int quantity, int slotIndex, Objec
                 if (clientBarterIsDriver()) {
                     // Viewer driver: pulling a good back off the merchant's buy table
                     // (see the bunoffer note above -- one verb, both tables).
-                    clientViewerBarterVerb("bunoffer", item->pid, quantityToMove);
+                    clientViewerBarterVerb("bunoffer_npc", item->pid, quantityToMove);
                 } else if (itemMoveForce(sourceTable, npc, item, quantityToMove) == -1) {
                     // You cannot pick that up. You are at your maximum weight capacity.
                     messageListItem.num = 25;
@@ -4919,7 +4962,7 @@ void barterProcessUI(int win, Object* barterer, Object* playerTable, Object* bar
     const FrmId savedDudeFrmId = gInventoryWindowDudeFrmId;
 
     std::vector<Object*> partyTargets = { _inven_dude };
-    if (settings.qol.party_loot_and_barter) {
+    if (!clientViewerActive() && settings.qol.party_loot_and_barter) {
         for (Object* pm : get_all_party_members_objects(false)) {
             if (pm != gDude && pm != barterer) {
                 partyTargets.push_back(pm);
@@ -5054,6 +5097,11 @@ void barterProcessUI(int win, Object* barterer, Object* playerTable, Object* bar
                 from = barterer;
                 to = bartererTable;
                 item = _barter_find_item_by_pid(barterer, intent.pid);
+                break;
+            case BARTER_INTENT_UNOFFER_NPC_ITEM:
+                item = _barter_find_item_by_pid(bartererTable, intent.pid);
+                from = bartererTable;
+                to = barterer;
                 break;
             case BARTER_INTENT_UNOFFER_ITEM:
                 item = _barter_find_item_by_pid(playerTable, intent.pid);
@@ -6820,7 +6868,7 @@ static void inventoryScrollerHandleInput(const InventoryScroller& scroller, int 
 
 static bool hasPartySlots()
 {
-    return inventoryLootLayout.columns == 2
+    return !clientViewerActive() && inventoryLootLayout.columns == 2
         && _gIsSteal
         && _target_curr_stack == 0
         && partyTargetEquipped != nullptr
