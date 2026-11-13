@@ -27,12 +27,13 @@ cmake --build build-win -j"$(nproc)" --target f2_server fallout2-ce
 ```
 
 On Windows, the root-level PowerShell helper configures the default CMake
-generator when needed and builds both executables:
+generator when needed and builds both executables. It defaults to Release, matching
+the client and server launcher defaults:
 
 ```powershell
 .\build-coop.ps1
-# Optional: choose configuration/build directory
-.\build-coop.ps1 -Configuration Release -BuildDirectory build-release
+# Optional: choose a different configuration/build directory
+.\build-coop.ps1 -Configuration Debug -BuildDirectory build-debug
 ```
 
 The script does not copy or replace files in a game installation. Run the

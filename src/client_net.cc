@@ -183,6 +183,7 @@ enum : unsigned char {
     EVENT_SNAPSHOT_BLOB_BEGIN = 24,
     EVENT_SNAPSHOT_BLOB_CHUNK = 25,
     EVENT_SNAPSHOT_BLOB_END = 26,
+    EVENT_DOOR_STATE = 28, // authoritative open/closed state + presentation target
     EVENT_PRES_SEQ = 31, // recorded presentation command stream — replay through the real reg_anim
     EVENT_DIALOG_NODE = 32, // dialog node — render the gdialog window seeded from the wire (Stage 3)
     EVENT_DIALOG_END = 33, // dialog ended — tear the window down (Stage 3)
@@ -1064,6 +1065,7 @@ public:
         case EVENT_COMBAT_EXIT: onCombatExit(r); break;
         case EVENT_TURN_START: onTurnStart(r); break;
         case EVENT_ATTACK_RESULT: onAttackResult(r); break;
+        case EVENT_DOOR_STATE: onDoorState(r); break;
         case EVENT_PRES_SEQ: onPresSeq(r); break;
         case EVENT_CONSOLE: onConsole(r); break;
         case EVENT_FLOAT_TEXT: onFloatText(r); break;
@@ -2489,7 +2491,7 @@ private:
                     ((obj->flags ^ flags) & OBJECT_OPEN_DOOR) != OBJECT_NONE;
                 objectApplyWireFlags(obj, flags);
                 if (doorOpenChanged && tileFirstPersonPreviewIsEnabled()) {
-                    tileFirstPersonPreviewRefresh();
+                    tileFirstPersonPreviewRequestRefresh();
                 }
             }
             if (hasRot) {
@@ -3713,6 +3715,41 @@ private:
                 (int)opCount, _seqRefsOk, _seqRefsDropped, _seqTransients);
         }
 }
+
+    void onDoorState(Reader& r)
+    {
+        const int netId = r.i32();
+        const bool opening = r.u8() != 0;
+        const int targetFrame = r.i32();
+        if (r.overflow() || !clientViewerActive()) {
+            return;
+        }
+
+        Object* door = lookup(netId);
+        Proto* proto = nullptr;
+        if (door == nullptr
+            || FrmId(door).objectType() != OBJ_TYPE_SCENERY
+            || protoGetProto(door, &proto) != 0
+            || proto == nullptr
+            || proto->scenery.type != SCENERY_TYPE_DOOR) {
+            debugPrint("client_net: doorState for invalid door netId=%d\n", netId);
+            return;
+        }
+
+        if (opening) {
+            door->data.scenery.door.openFlags |= DOOR_FLAG_OPEN;
+            door->flags |= OBJECT_OPEN_DOOR;
+        } else {
+            door->data.scenery.door.openFlags &= ~DOOR_FLAG_OPEN;
+            door->flags &= ~OBJECT_OPEN_DOOR;
+        }
+
+        if (getenv("F2_TRACE_EVENTS") != nullptr) {
+            fprintf(stderr, "[door] RECV net=%d opening=%d targetFrame=%d\n",
+                netId, opening ? 1 : 0, targetFrame);
+        }
+        tileFirstPersonPreviewRequestRefresh();
+    }
 
     // Decode EVENT_PRES_SEQ: buffer the ops, reserve live participants NOW (decode
     // time), then play immediately (out of combat) or queue in wire order (in combat,

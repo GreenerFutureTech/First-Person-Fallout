@@ -1173,6 +1173,28 @@ static void viewerPollPendingLoot(ClientConnection& conn)
     }
 }
 
+static void viewerSendSceneryUse(ClientConnection& conn, Object* target)
+{
+    if (target == nullptr || target->netId <= 0) {
+        return;
+    }
+
+    char cmd[48];
+    snprintf(cmd, sizeof(cmd), "use %d", target->netId);
+    conn.sendLine(cmd);
+}
+
+static bool viewerIsDoor(Object* target)
+{
+    if (target == nullptr || FrmId(target).objectType() != OBJ_TYPE_SCENERY) {
+        return false;
+    }
+
+    Proto* proto = nullptr;
+    return protoGetProto(target, &proto) == 0
+        && proto->scenery.type == SCENERY_TYPE_DOOR;
+}
+
 static void viewerSendActionMenuVerb(ClientConnection& conn, int menuItem, Object* target)
 {
     char cmd[48];
@@ -1181,8 +1203,7 @@ static void viewerSendActionMenuVerb(ClientConnection& conn, int menuItem, Objec
         // Vanilla USE forks on target type: scenery=use, item=pickup-or-loot, critter=loot.
         switch (FrmId(target).objectType()) {
         case OBJ_TYPE_SCENERY:
-            snprintf(cmd, sizeof(cmd), "use %d", target->netId);
-            conn.sendLine(cmd);
+            viewerSendSceneryUse(conn, target);
             break;
         case OBJ_TYPE_ITEM:
             // A container ITEM opens the loot screen (walk-then-open); any other item
@@ -1287,11 +1308,11 @@ static void viewerSendPrimaryVerb(ClientConnection& conn, Object* target)
         break;
     case OBJ_TYPE_SCENERY:
         if (_obj_action_can_use(target)) {
-            snprintf(cmd, sizeof(cmd), "use %d", target->netId);
+            viewerSendSceneryUse(conn, target);
         } else {
             snprintf(cmd, sizeof(cmd), "look %d", target->netId);
+            conn.sendLine(cmd);
         }
-        conn.sendLine(cmd);
         break;
     case OBJ_TYPE_CRITTER:
         if (target == gDude) {
@@ -1340,17 +1361,25 @@ static bool viewerHandleFirstPersonClick(ClientConnection& conn, int screenX, in
         gameMouseSetMode(GAME_MOUSE_MODE_MOVE);
         return sent;
     }
+
     if (conn.inCombat() && mode == GAME_MOUSE_MODE_CROSSHAIR) {
-        Object* target = tileFirstPersonPreviewPickCritterAt(screenX, screenY);
-        if (target == nullptr) {
-            target = tileFirstPersonPreviewPickDoorAt(screenX, screenY);
+        Object* critter = tileFirstPersonPreviewPickCritterAt(screenX, screenY);
+        if (critter != nullptr) {
+            if (!critterIsDead(critter)) {
+                _combat_attack_this(critter);
+                sent = clientViewerTakeAttackCommitted();
+            }
+            return sent;
         }
-        if (target != nullptr) {
-            _combat_attack_this(target);
+
+        Object* door = tileFirstPersonPreviewPickDoorAt(screenX, screenY);
+        if (door != nullptr) {
+            _combat_attack_this(door);
             sent = clientViewerTakeAttackCommitted();
         }
         return sent;
     }
+
     Object* critter = tileFirstPersonPreviewPickCritterAt(screenX, screenY);
     if (critter != nullptr) {
         if (critterIsDead(critter)) {
@@ -1371,6 +1400,13 @@ static bool viewerHandleFirstPersonClick(ClientConnection& conn, int screenX, in
         }
     }
 
+    Object* door = tileFirstPersonPreviewPickDoorAt(screenX, screenY);
+    if (door != nullptr && door->netId > 0) {
+        viewerSendSceneryUse(conn, door);
+        sent = true;
+        return sent;
+    }
+
     Object* object = tileFirstPersonPreviewPickObjectAt(screenX, screenY);
     if (object != nullptr && object->netId > 0) {
         const ObjectType objectType = FrmId(object).objectType();
@@ -1379,15 +1415,6 @@ static bool viewerHandleFirstPersonClick(ClientConnection& conn, int screenX, in
             sent = true;
             return sent;
         }
-    }
-
-    Object* door = tileFirstPersonPreviewPickDoorAt(screenX, screenY);
-    if (door != nullptr && door->netId > 0) {
-        char cmd[48];
-        snprintf(cmd, sizeof(cmd), "use %d", door->netId);
-        conn.sendLine(cmd);
-        sent = true;
-        return sent;
     }
 
     if (!tileFirstPersonPreviewIsCursorCaptured()) {
@@ -1416,10 +1443,10 @@ static Object* viewerPickFirstPersonActionTargetAt(int screenX, int screenY)
 {
     Object* target = tileFirstPersonPreviewPickCritterAt(screenX, screenY);
     if (target == nullptr) {
-        target = tileFirstPersonPreviewPickObjectAt(screenX, screenY);
+        target = tileFirstPersonPreviewPickDoorAt(screenX, screenY);
     }
     if (target == nullptr) {
-        target = tileFirstPersonPreviewPickDoorAt(screenX, screenY);
+        target = tileFirstPersonPreviewPickObjectAt(screenX, screenY);
     }
     return target;
 }
@@ -1435,7 +1462,21 @@ static void viewerShowFirstPersonActionMenu(
     }
 
     int actionMenuItems[GAME_MOUSE_ACTION_MENU_ITEM_COUNT];
-    const int count = gameMouseBuildActionMenu(target, actionMenuItems);
+    int count = gameMouseBuildActionMenu(target, actionMenuItems);
+    if (viewerIsDoor(target)) {
+        bool hasUseAction = false;
+        for (int index = 0; index < count; index++) {
+            hasUseAction = hasUseAction
+                || actionMenuItems[index] == GAME_MOUSE_ACTION_MENU_ITEM_USE;
+        }
+        if (!hasUseAction && count < GAME_MOUSE_ACTION_MENU_ITEM_COUNT - 1) {
+            for (int index = count; index > 0; index--) {
+                actionMenuItems[index] = actionMenuItems[index - 1];
+            }
+            actionMenuItems[0] = GAME_MOUSE_ACTION_MENU_ITEM_USE;
+            count++;
+        }
+    }
     const bool relativeModeWasEnabled = mouseDeviceUsesRelativeMode();
     if (relativeModeWasEnabled && !mouseDeviceSetRelativeModeForced(false)) {
         debugPrint("F11 action menu: failed to release relative mouse mode: %s\n", SDL_GetError());
@@ -1970,8 +2011,10 @@ static int mainClientViewer(const char* connectSpec)
             if (gViewerFirstPersonLeftClickStartTime != 0
                 && !leftButtonDown
                 && (keyCode == -1 || keyCode == -2)) {
-                if (!gViewerFirstPersonActionMenuShown && !oocBusy
-                    && (!conn.inCombat() || (conn.myTurn() && !combatBusy))
+                if (!gViewerFirstPersonActionMenuShown
+                    && (conn.inCombat()
+                            ? (conn.myTurn() && !combatBusy)
+                            : !oocBusy)
                     && !clientDialogActive() && !clientSayActive()
                     && windowGetAtPoint(clickX, clickY) == gIsoWindow) {
                     bool sent = viewerHandleFirstPersonClick(conn, clickX, clickY);

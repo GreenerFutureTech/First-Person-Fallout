@@ -21,11 +21,10 @@ namespace {
 // The v1 command vocabulary is tiny "verb arg arg2"; 1 KB is generous.
 constexpr size_t kMaxInbuf = 1024;
 
-// Bound a single blocking send so one client that has stopped draining its
-// socket cannot freeze the single-threaded serve loop forever. On timeout the
-// send fails → writeAll fails → the client is dropped.
-// (v2 hardening: fully non-blocking outbound with a per-client backpressure
-// queue; for v1 connect-at-start viewers a bounded stall-then-drop suffices.)
+// Keep a slow viewer's queued stream bounded without blocking the simulation.
+constexpr size_t kMaxClientOutqBytes = 64u * 1024u * 1024u;
+constexpr size_t kMaxSendBytesPerPump = 1u * 1024u * 1024u;
+// Used for the small blocking preamble and the final closeAll flush only.
 constexpr int kSendTimeoutSec = 5;
 
 // Monotonic wall clock in ms — the outbox schedule's time base (§8.6). Anchored to
@@ -189,13 +188,18 @@ bool SocketByteSink::acceptClients(int minClients)
         // without waiting to coalesce (latency over throughput).
         netSetNoDelay(fd);
 
-        // Bound blocking sends (see kSendTimeoutSec): a client that stops reading
-        // must not hang the serve loop — the send fails and we drop it instead.
+        // Bound the preamble write and the eventual closeAll flush. Live frame
+        // sends become non-blocking after the preamble.
         netSetSendTimeout(fd, kSendTimeoutSec);
 
         int sessionId = _nextSessionId++;
         if (!writeClientPreamble(fd, sessionId)) {
             fprintf(stderr, "f2_server: client dropped on preamble write\n");
+            netCloseSocket(fd);
+            continue;
+        }
+        if (!netSetNonBlocking(fd, true)) {
+            fprintf(stderr, "f2_server: client dropped: cannot set non-blocking mode\n");
             netCloseSocket(fd);
             continue;
         }
@@ -240,15 +244,24 @@ int SocketByteSink::acceptPending()
         }
 
         // Winsock children inherit the listener's non-blocking mode (POSIX ones
-        // do not); writeAll's bounded BLOCKING sends need blocking sockets, so
-        // force the mode rather than inherit it.
-        netSetNonBlocking(fd, false);
+        // do not); use blocking mode for the bounded preamble write, then switch
+        // to non-blocking once the session is registered.
+        if (!netSetNonBlocking(fd, false)) {
+            fprintf(stderr, "f2_server: joiner dropped: cannot set blocking mode for preamble\n");
+            netCloseSocket(fd);
+            continue;
+        }
         netSetNoDelay(fd);
         netSetSendTimeout(fd, kSendTimeoutSec);
 
         int sessionId = _nextSessionId++;
         if (!writeClientPreamble(fd, sessionId)) {
             fprintf(stderr, "f2_server: joiner dropped on preamble write\n");
+            netCloseSocket(fd);
+            continue;
+        }
+        if (!netSetNonBlocking(fd, true)) {
+            fprintf(stderr, "f2_server: joiner dropped: cannot set non-blocking mode\n");
             netCloseSocket(fd);
             continue;
         }
@@ -294,6 +307,7 @@ void SocketByteSink::write(const void* data, unsigned int size)
         fwrite(buf->data(), 1, buf->size(), _tee);
     }
     for (Client& c : _clients) {
+        c.queuedBytes += buf->size();
         c.outq.push_back(QueuedFrame { buf, WireFrameMeta {}, 0 });
     }
     pump();
@@ -326,6 +340,7 @@ void SocketByteSink::writeFrame(const unsigned char* header, unsigned int header
     const long long now = nowMs();
     for (Client& c : _clients) {
         QueuedFrame qf { buf, meta, 0, 0 };
+        c.queuedBytes += buf->size();
         if (paced) {
             // release = max(now, previous frame's release + its cost). The frame
             // itself releases at that time; ITS cost defers the NEXT frame. max(now)
@@ -342,35 +357,67 @@ void SocketByteSink::writeFrame(const unsigned char* header, unsigned int header
 
 void SocketByteSink::pump()
 {
-    // Drain each client's queue toward its socket, compacting dropped clients in
-    // place (same safe index-walk the old broadcast used). A frame is sent only once
-    // its releaseAtMs has passed (0 = due now, the unpaced default); the queue is FIFO
-    // and release times are monotonic per client, so the first not-due frame stops the
-    // client's drain this pass. Due frames use the bounded blocking writeAll.
+    // Drain each client's queue toward its socket without blocking the simulation.
+    // A frame is sent only once its releaseAtMs has passed (0 = due now, the unpaced
+    // default); partial sends remain at the head until the next pump. Queue growth
+    // is bounded for clients that stay stalled.
     const long long now = nowMs();
     size_t out = 0;
     for (size_t i = 0; i < _clients.size(); i++) {
         Client& c = _clients[i];
         bool alive = true;
+        int sendError = 0;
+        bool zeroWrite = false;
+        size_t sentThisPump = 0;
         while (!c.outq.empty()) {
             QueuedFrame& qf = c.outq.front();
             if (qf.releaseAtMs > now) {
                 break; // not due yet; later frames are scheduled no earlier
             }
             const std::vector<unsigned char>& b = *qf.bytes;
-            if (!writeAll(c.fd, b.data() + qf.sent, b.size() - qf.sent)) {
+            long n = netSend(c.fd, b.data() + qf.sent, b.size() - qf.sent);
+            if (n > 0) {
+                qf.sent += (size_t)n;
+                c.queuedBytes -= (size_t)n;
+                sentThisPump += (size_t)n;
+                if (qf.sent == b.size()) {
+                    c.outq.pop_front();
+                }
+                if (sentThisPump >= kMaxSendBytesPerPump) {
+                    break;
+                }
+                continue;
+            }
+            if (n == 0) {
                 alive = false;
+                zeroWrite = true;
                 break;
             }
-            c.outq.pop_front();
+            int err = netLastError();
+            if (netErrorInterrupted(err)) {
+                continue;
+            }
+            if (netErrorWouldBlock(err)) {
+                break;
+            }
+            sendError = err;
+            alive = false;
+            break;
         }
-        if (alive) {
+        if (alive && c.queuedBytes <= kMaxClientOutqBytes) {
             if (out != i) {
                 _clients[out] = std::move(_clients[i]);
             }
             out++;
         } else {
-            fprintf(stderr, "f2_server: client dropped on write: %s\n", netErrorString(netLastError()));
+            if (sendError != 0) {
+                fprintf(stderr, "f2_server: client dropped on write: %s\n", netErrorString(sendError));
+            } else if (zeroWrite) {
+                fprintf(stderr, "f2_server: client dropped on write: send returned 0\n");
+            } else {
+                fprintf(stderr, "f2_server: client dropped on outbound backlog: %zu bytes queued\n",
+                    c.queuedBytes);
+            }
             netCloseSocket(_clients[i].fd);
         }
     }
@@ -528,10 +575,12 @@ void SocketByteSink::flush()
 void SocketByteSink::closeAll()
 {
     // Best-effort flush of any HELD frames before closing, so a paced shutdown doesn't
-    // truncate a client's capture below the tee (§8.6 trap 3). Ignore the release gate
-    // (we're leaving) and failures; bounded by writeAll's send timeout per client. A
-    // no-op when unpaced (queues drained immediately) or already empty.
+    // truncate a client's capture below the tee (§8.6 trap 3). Restore blocking mode
+    // only for this final bounded flush; live sends are non-blocking.
     for (Client& client : _clients) {
+        if (!netSetNonBlocking(client.fd, false)) {
+            continue;
+        }
         while (!client.outq.empty()) {
             QueuedFrame& qf = client.outq.front();
             const std::vector<unsigned char>& b = *qf.bytes;

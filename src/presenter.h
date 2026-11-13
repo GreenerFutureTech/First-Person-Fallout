@@ -503,14 +503,12 @@ public:
 
     // A door (or openable scenery) opened/closed on a server-driven path
     // (proto_instance.cc _obj_use_door / objectOpenClose serverLoopActive branch).
-    // PRESENTATION only: the open/closed STATE (OBJECT_OPEN_DOOR flag + blocking/LOS)
-    // rides objectDelta, but the door's art FRAME does NOT, so without this cue the
-    // door snaps between closed/open art and critters appear to warp through it. The
-    // viewer replays the vanilla frame slide (ANIM_STAND forward/reversed + door sfx)
-    // and holds a crossing critter's glide until it finishes. `opening` = the door is
-    // opening (else closing); `targetFrame` = the terminal art frame (last for open,
-    // 0 for closed) for a fallback snap if the replay can't build. No-op here →
-    // byte-identical on every non-network path.
+    // Door open/closed state echo plus presentation cue for the multiplayer viewer.
+    // The state also rides objectDelta; this echo keeps the F11 wall grid in sync.
+    // The viewer replays the vanilla frame slide (ANIM_STAND forward/reversed + door
+    // sfx) and holds a crossing critter's glide until it finishes. `opening` = the
+    // door is opening (else closing); `targetFrame` = terminal art frame (last for
+    // open, 0 for closed). No-op here → byte-identical on every non-network path.
     virtual void doorState(Object* door, bool opening, int targetFrame) {}
 
     // A dialog node is being presented (game_dialog.cc _gdProcess server barrier,

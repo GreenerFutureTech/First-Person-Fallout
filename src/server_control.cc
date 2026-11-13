@@ -338,6 +338,7 @@ struct PendingInteraction {
     int targetPid;
     int arg;         // skill id for kInteractSkill; item pid for
                      // kInteractUseItemOn; unused otherwise
+    bool doorWasOpen; // open state when the use intent started
     int beatsLeft;   // pathing backstop; hitting 0 drops with "cannot get there"
 };
 
@@ -431,6 +432,20 @@ static bool interactionRuleSatisfied(int verb, Object* actor, Object* target)
     return objectGetDistanceBetween(actor, target) <= 1;
 }
 
+static bool interactionDoorIsOpen(Object* target)
+{
+    if (target == nullptr || ProtoId(target->pid).objectType() != OBJ_TYPE_SCENERY) {
+        return false;
+    }
+
+    Proto* proto = nullptr;
+    if (protoGetProto(target, &proto) != 0 || proto->scenery.type != SCENERY_TYPE_DOOR) {
+        return false;
+    }
+
+    return (target->data.scenery.door.openFlags & DOOR_FLAG_OPEN) != 0;
+}
+
 // Allow-list the untrusted wire skill id to the eight skilldex skills the vanilla
 // USE_SKILL menu offers (game_mouse.cc skilldex switch) before it reaches
 // actionUseSkill → the skill tables (INTERACTION_UX_DESIGN.md §2.5). Rejects any
@@ -500,7 +515,7 @@ static bool serverControlUseHandItem(Object* actor, int netId)
     return true;
 }
 
-static void interactionFire(int verb, Object* actor, Object* target, int arg)
+static void interactionFire(int verb, Object* actor, Object* target, int arg, bool doorWasOpen)
 {
     // ►► The outcome USED TO BE ENTIRELY SILENT — no line on success, none on
     // failure — so "the latch fired and actionPickUp declined" looked exactly like
@@ -510,6 +525,16 @@ static void interactionFire(int verb, Object* actor, Object* target, int arg)
     int rc = 0;
     switch (verb) {
     case kInteractUse:
+        if (doorWasOpen != interactionDoorIsOpen(target)) {
+            // Movement toggles blocking doors itself. If that changed the target
+            // while this use intent approached, don't toggle it a second time.
+            if (checkSceneryUseActionPointCost(actor, target) == -1) {
+                rc = -1;
+            }
+            fprintf(stderr, "f2_server: interact FIRE use netId=%d door changed during approach rc=%d\n",
+                target->netId, rc);
+            break;
+        }
         rc = _action_use_an_object(actor, target); // scenery: routes doors/ladders/stairs
         fprintf(stderr, "f2_server: interact FIRE use netId=%d rc=%d actorTile=%d targetTile=%d\n",
             target->netId, rc, actor->tile, target->tile);
@@ -891,6 +916,7 @@ bool serverControlRunCombatInteract(Object* actor, int verb, int targetNetId, in
         return false;
     }
 
+    bool doorWasOpen = interactionDoorIsOpen(target);
     if (!interactionRuleSatisfied(verb, actor, target)) {
         // AP-limited approach. No run variant: vanilla's in-combat branches all
         // register a WALK regardless of distance (actions.cc:1486, 1607, 1368) —
@@ -920,7 +946,7 @@ bool serverControlRunCombatInteract(Object* actor, int verb, int targetNetId, in
     }
 
     interactionEmitGesture(verb, actor, target);
-    interactionFire(verb, actor, target, arg);
+    interactionFire(verb, actor, target, arg, doorWasOpen);
     fprintf(stderr, "f2_server: combat interact verb=%d netId=%d fired\n", verb, targetNetId);
     return true;
 }
@@ -934,6 +960,7 @@ static void serverControlArmInteraction(int sessionId, Object* actor, int verb, 
     if (actor == nullptr) {
         return;
     }
+    bool doorWasOpen = interactionDoorIsOpen(target);
     // IN COMBAT this does not arm anything and does not act now: the action
     // belongs to the issuer's turn, which may be several turns away. Queue it
     // stamped with their slot and let the pump run it (the callback above). The
@@ -962,7 +989,7 @@ static void serverControlArmInteraction(int sessionId, Object* actor, int verb, 
         reg_anim_clear(actor); // stop any prior in-flight approach walk (vanilla
                                // cancels the prior sequence before a new action)
         interactionEmitGesture(verb, actor, target);
-        interactionFire(verb, actor, target, arg);
+        interactionFire(verb, actor, target, arg, doorWasOpen);
         return;
     }
     // Register the approach through the same public entry points mv uses; under
@@ -988,6 +1015,7 @@ static void serverControlArmInteraction(int sessionId, Object* actor, int verb, 
     pending.targetId = target->id;
     pending.targetPid = target->pid;
     pending.arg = arg;
+    pending.doorWasOpen = doorWasOpen;
     pending.beatsLeft = kInteractionBeatsCap;
     fprintf(stderr, "f2_server: control interact verb=%d netId=%d armed (approach, session %d)\n",
         verb, target->netId, sessionId);
@@ -1131,7 +1159,7 @@ void serverControlAdvancePending()
         if (interactionRuleSatisfied(pending.verb, actor, target)) {
             gPendingBySession.erase(sessionId); // CONSUME before firing (re-entrancy, §2.5)
             interactionEmitGesture(pending.verb, actor, target);
-            interactionFire(pending.verb, actor, target, pending.arg);
+            interactionFire(pending.verb, actor, target, pending.arg, pending.doorWasOpen);
             continue;
         }
         if (!serverAnimWalkInFlightFor(actor)) {

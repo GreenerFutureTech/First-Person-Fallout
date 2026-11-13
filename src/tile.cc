@@ -24,6 +24,7 @@
 #include "animation.h"
 #include "billboard_clip_bands.h"
 #include "combat.h"
+#include "client_net.h"
 #include "color.h"
 #include "critter.h"
 #include "debug.h"
@@ -261,6 +262,9 @@ static void tileFirstPersonFindArroyoVillageCaveExitGrid(Object* object, void* c
 static void tileFirstPersonFindTempleWallAreaLandmark(Object* object, void* context);
 static void tileFirstPersonMarkTempleBlockedAreaWalls(
     const TileFirstPersonGrayboxRenderContext* renderContext);
+static void tileFirstPersonMarkDoorFlankWalls(
+    const TileFirstPersonGrayboxRenderContext* renderContext);
+static bool tileFirstPersonDoorIsOpen(Object* door);
 static void tileFirstPersonGrayboxMarkObject(Object* object, void* context);
 static void tileFirstPersonResolveWoodGates(
     const TileFirstPersonGrayboxRenderContext* renderContext,
@@ -1404,6 +1408,7 @@ static void tileRenderFirstPersonPreview()
     if (gMapHeader.index == MAP_ARROYO_TEMPLE) {
         tileFirstPersonMarkTempleBlockedAreaWalls(&context);
     }
+    tileFirstPersonMarkDoorFlankWalls(&context);
     std::sort(gFirstPersonPreviewExitGridTiles.begin(), gFirstPersonPreviewExitGridTiles.end());
     gFirstPersonPreviewExitGridTiles.erase(
         std::unique(gFirstPersonPreviewExitGridTiles.begin(), gFirstPersonPreviewExitGridTiles.end()),
@@ -1612,6 +1617,7 @@ static void tileRenderFirstPersonPreview()
     gFirstPersonPreviewCenterRayWallMaterial = MATERIAL_TYPE_INVALID;
 
     const unsigned int wallStart = profileFrame ? getTicks() : 0;
+    unsigned int wallDepthSpanCount = 0;
     for (int x = 0; x < gTileWindowWidth; x++) {
         std::vector<TileFirstPersonTransparentWallLayer>& transparentLayers =
             transparentWallLayers[x];
@@ -1917,8 +1923,7 @@ static void tileRenderFirstPersonPreview()
                     if (wallType == 3
                         && FrmId(object).objectType() == OBJ_TYPE_SCENERY
                         && proto->scenery.type == SCENERY_TYPE_DOOR
-                        && (object->data.scenery.door.openFlags & DOOR_FLAG_OPEN) == 0
-                        && (object->flags & OBJECT_OPEN_DOOR) == OBJECT_NONE) {
+                        && !tileFirstPersonDoorIsOpen(object)) {
                         canInteract = true;
                     } else if (wallType == 4) {
                         const ObjectType objectType = FrmId(object).objectType();
@@ -1944,8 +1949,7 @@ static void tileRenderFirstPersonPreview()
                 if (protoGetProto(object, &proto) == 0
                     && FrmId(object).objectType() == OBJ_TYPE_SCENERY
                     && proto->scenery.type == SCENERY_TYPE_DOOR
-                    && (object->data.scenery.door.openFlags & DOOR_FLAG_OPEN) == 0
-                    && (object->flags & OBJECT_OPEN_DOOR) == OBJECT_NONE) {
+                    && !tileFirstPersonDoorIsOpen(object)) {
                     gFirstPersonPreviewDoorHitTargets.push_back({ object, windowDistance, x });
                     break;
                 }
@@ -2015,59 +2019,87 @@ static void tileRenderFirstPersonPreview()
             }
             depthTop = std::min(depthTop, wallTop);
             depthBottom = std::max(depthBottom, wallBottom + 1);
-            for (int y = wallTop; y <= wallBottom; y += wallRenderStep) {
-                const bool brickTexture = type != 3 || y < doorSplitY;
-                const bool stoneWall = brickTexture && material == MATERIAL_TYPE_STONE;
-                const bool leatherWall = brickTexture && material == MATERIAL_TYPE_LEATHER;
-                const bool metalWall = brickTexture && material == MATERIAL_TYPE_METAL;
-                const bool woodWall = brickTexture && material == MATERIAL_TYPE_WOOD;
-                const bool gateTexture = gatePanel;
-                const auto& texture = gateTexture
-                    ? gFirstPersonGateTexture
-                    : brickTexture
-                    ? stoneWall
-                        ? gFirstPersonImportedStoneWallTexture
-                        : leatherWall
-                            ? gFirstPersonLeatherWallTexture
-                            : metalWall
-                                ? gFirstPersonMetalWallTexture
-                                : woodWall
-                                    ? gFirstPersonWoodWallTexture
-                                    : gFirstPersonStoneWallTexture
-                    : gFirstPersonDoorWallTexture;
-                const double textureOffset = type == 3 && !brickTexture
-                    ? y - doorSplitY
-                    : gatePanel
-                        ? y - doorSplitY
-                        : y - unclippedWallTop;
+            if (material == MATERIAL_TYPE_WOOD && type != 3 && type != 5 && !gatePanel
+                && wallBottom - wallTop + 1 >= kFirstPersonWallTextureSize) {
+                std::array<unsigned char, kFirstPersonWallTextureSize> woodColors;
+                std::array<unsigned char, kFirstPersonWallTextureSize> woodOpaque;
+                for (int textureY = 0; textureY < kFirstPersonWallTextureSize; textureY++) {
+                    const int textureIndex = textureY * kFirstPersonWallTextureSize + textureX;
+                    woodOpaque[textureY] =
+                        gFirstPersonWoodWallTextureAlpha[textureIndex] != 0;
+                    woodColors[textureY] = intensityColorTable[
+                        gFirstPersonWoodWallTexture[textureIndex]][light];
+                }
+
+                for (int y = wallTop; y <= wallBottom; y++) {
+                    const int textureY = static_cast<int>(
+                        (y - unclippedWallTop) * kFirstPersonWallTextureSize / textureHeight)
+                        % kFirstPersonWallTextureSize;
+                    if (!woodOpaque[textureY]) {
+                        continue;
+                    }
+
+                    const size_t depthIndex = static_cast<size_t>(x) * gTileWindowHeight + y;
+                    if (distance < wallPixelDepths[depthIndex]) {
+                        wallPixelDepths[depthIndex] = distance;
+                        gTileWindowBuffer[y * gTileWindowPitch + x] = woodColors[textureY];
+                    }
+                }
+            } else {
                 const double textureScaleHeight = type == 3 || type == 5 || gatePanel
                     ? std::max(1.0, wallHeight / 2.0)
                     : textureHeight;
-                int textureY = static_cast<int>(
-                    textureOffset * kFirstPersonWallTextureSize / textureScaleHeight);
-                textureY %= kFirstPersonWallTextureSize;
-                const int textureIndex = textureY * kFirstPersonWallTextureSize
-                    + (leatherWall ? leatherTextureX : textureX);
-                if ((gateTexture && gFirstPersonGateTextureAlpha[textureIndex] == 0)
-                    || (woodWall && !gateTexture
-                        && gFirstPersonWoodWallTextureAlpha[textureIndex] == 0)) {
-                    continue;
-                }
-                const Color texel = brickTexture && useCaveWallTexture
-                        && !stoneWall && !leatherWall && !metalWall && !woodWall
-                    ? gFirstPersonCaveWallTexture[textureIndex]
-                    : texture[textureIndex];
-                const unsigned char color = intensityColorTable[texel][light];
-                const size_t depthIndex = static_cast<size_t>(x) * gTileWindowHeight + y;
-                if (distance < wallPixelDepths[depthIndex]) {
-                    wallPixelDepths[depthIndex] = distance;
-                    gTileWindowBuffer[y * gTileWindowPitch + x] = color;
-                }
-                if (wallRenderStep == 2 && y + 1 <= wallBottom) {
-                    const size_t nextDepthIndex = depthIndex + 1;
-                    if (distance < wallPixelDepths[nextDepthIndex]) {
-                        wallPixelDepths[nextDepthIndex] = distance;
-                        gTileWindowBuffer[(y + 1) * gTileWindowPitch + x] = color;
+                for (int y = wallTop; y <= wallBottom; y += wallRenderStep) {
+                    const bool brickTexture = type != 3 || y < doorSplitY;
+                    const bool stoneWall = brickTexture && material == MATERIAL_TYPE_STONE;
+                    const bool leatherWall = brickTexture && material == MATERIAL_TYPE_LEATHER;
+                    const bool metalWall = brickTexture && material == MATERIAL_TYPE_METAL;
+                    const bool woodWall = brickTexture && material == MATERIAL_TYPE_WOOD;
+                    const bool gateTexture = gatePanel;
+                    const auto& texture = gateTexture
+                        ? gFirstPersonGateTexture
+                        : brickTexture
+                        ? stoneWall
+                            ? gFirstPersonImportedStoneWallTexture
+                            : leatherWall
+                                ? gFirstPersonLeatherWallTexture
+                                : metalWall
+                                    ? gFirstPersonMetalWallTexture
+                                    : woodWall
+                                        ? gFirstPersonWoodWallTexture
+                                        : gFirstPersonStoneWallTexture
+                        : gFirstPersonDoorWallTexture;
+                    const double textureOffset = type == 3 && !brickTexture
+                        ? y - doorSplitY
+                        : gatePanel
+                            ? y - doorSplitY
+                            : y - unclippedWallTop;
+                    int textureY = static_cast<int>(
+                        textureOffset * kFirstPersonWallTextureSize / textureScaleHeight);
+                    textureY %= kFirstPersonWallTextureSize;
+                    const int textureIndex = textureY * kFirstPersonWallTextureSize
+                        + (leatherWall ? leatherTextureX : textureX);
+                    if ((gateTexture && gFirstPersonGateTextureAlpha[textureIndex] == 0)
+                        || (woodWall && !gateTexture
+                            && gFirstPersonWoodWallTextureAlpha[textureIndex] == 0)) {
+                        continue;
+                    }
+                    const Color texel = brickTexture && useCaveWallTexture
+                            && !stoneWall && !leatherWall && !metalWall && !woodWall
+                        ? gFirstPersonCaveWallTexture[textureIndex]
+                        : texture[textureIndex];
+                    const unsigned char color = intensityColorTable[texel][light];
+                    const size_t depthIndex = static_cast<size_t>(x) * gTileWindowHeight + y;
+                    if (distance < wallPixelDepths[depthIndex]) {
+                        wallPixelDepths[depthIndex] = distance;
+                        gTileWindowBuffer[y * gTileWindowPitch + x] = color;
+                    }
+                    if (wallRenderStep == 2 && y + 1 <= wallBottom) {
+                        const size_t nextDepthIndex = depthIndex + 1;
+                        if (distance < wallPixelDepths[nextDepthIndex]) {
+                            wallPixelDepths[nextDepthIndex] = distance;
+                            gTileWindowBuffer[(y + 1) * gTileWindowPitch + x] = color;
+                        }
                     }
                 }
             }
@@ -2109,8 +2141,14 @@ static void tileRenderFirstPersonPreview()
             }
             runStart = runEnd;
         }
+        if (profileFrame) {
+            wallDepthSpanCount += static_cast<unsigned int>(depthSpans.size());
+        }
     }
 
+    if (profileFrame) {
+        gpuBillboardSetWallDepthSpanCount(wallDepthSpanCount);
+    }
     const unsigned int wallEnd = profileFrame ? getTicks() : 0;
 
     const unsigned int floorStart = profileFrame ? getTicks() : 0;
@@ -2311,8 +2349,7 @@ static void tileFirstPersonSnapshotTopologyObject(Object* object, void* context)
         && hasProto
         && proto->scenery.type == SCENERY_TYPE_DOOR;
     const bool openDoor = isDoor
-        && (((object->data.scenery.door.openFlags & DOOR_FLAG_OPEN) != 0)
-            || (object->flags & OBJECT_OPEN_DOOR) != OBJECT_NONE);
+        && tileFirstPersonDoorIsOpen(object);
 
     Color color = COLOR_LIGHT_GREY;
     switch (objectType) {
@@ -2854,6 +2891,190 @@ static void tileFirstPersonMarkTempleBlockedAreaWalls(
             renderContext->wallCells[renderHexTile] = 2;
         }
     }
+
+}
+
+static void tileFirstPersonMarkDoorFlankWalls(
+    const TileFirstPersonGrayboxRenderContext* renderContext)
+{
+    if (renderContext->doorObjects == nullptr || renderContext->gridWidth <= 0) {
+        return;
+    }
+
+    struct DoorFlankWall {
+        int tile;
+        int direction;
+        int distance;
+        unsigned char type;
+        TileFirstPersonWallOrientation orientation;
+        MaterialType material;
+    };
+
+    for (Object* door : *renderContext->doorObjects) {
+        if (door == nullptr || door->elevation != renderContext->elevation) {
+            continue;
+        }
+        if ((door->flags & OBJECT_MULTIHEX) == OBJECT_NONE
+            && gMapHeader.index != MAP_ARROYO_TEMPLE) {
+            continue;
+        }
+
+        if (gMapHeader.index == MAP_ARROYO_TEMPLE) {
+            // Temple's map places blocking wall objects on the door flanks;
+            // their positions are more reliable than the door's rotation.
+            for (int rotation = ROTATION_FIRST; rotation < ROTATION_COUNT; rotation++) {
+                const int tile = tileGetTileInDirection(
+                    door->tile, static_cast<Rotation>(rotation), 1);
+                const int renderTile = tileFirstPersonGetRenderHexTile(
+                    tile, renderContext->gridWidth);
+                if (renderTile >= 0
+                    && renderContext->wallCells[renderTile] == 2
+                    && renderContext->wallMaterials[renderTile] != MATERIAL_TYPE_INVALID) {
+                    renderContext->wallCells[renderTile] = 1;
+                }
+            }
+            continue;
+        }
+
+        const int doorRotation = rotationIsValid(door->rotation)
+            ? door->rotation
+            : ROTATION_E;
+        const int flankDirections[2] = {
+            doorRotation % (ROTATION_COUNT / 2),
+            doorRotation % (ROTATION_COUNT / 2) + ROTATION_COUNT / 2,
+        };
+        DoorFlankWall flankWalls[2] = {};
+        for (int side = 0; side < 2; side++) {
+            for (int distance = 1; distance <= 4; distance++) {
+                const int tile = tileGetTileInDirection(
+                    door->tile, static_cast<Rotation>(flankDirections[side]), distance);
+                if (!tileIsValid(tile)) {
+                    break;
+                }
+                const int renderTile = tileFirstPersonGetRenderHexTile(
+                    tile, renderContext->gridWidth);
+                if (renderTile < 0) {
+                    break;
+                }
+                const unsigned char type = renderContext->wallCells[renderTile];
+                if (type != 1 && type != 2) {
+                    continue;
+                }
+                flankWalls[side] = {
+                    tile,
+                    flankDirections[side],
+                    distance,
+                    type,
+                    static_cast<TileFirstPersonWallOrientation>(
+                        renderContext->wallOrientations[renderTile]),
+                    renderContext->wallMaterials[renderTile],
+                };
+                break;
+            }
+        }
+
+        const bool hasFlankWallPair =
+            flankWalls[0].distance != 0 && flankWalls[1].distance != 0;
+        const bool hasAlignedFlankWallPair = hasFlankWallPair
+            && flankWalls[0].distance == flankWalls[1].distance;
+        if (hasFlankWallPair && !hasAlignedFlankWallPair) {
+            continue;
+        }
+
+        int flankRenderTiles[2];
+        for (int side = 0; side < 2; side++) {
+            const int tile = tileGetTileInDirection(
+                door->tile, static_cast<Rotation>(flankDirections[side]), 1);
+            flankRenderTiles[side] = tileFirstPersonGetRenderHexTile(
+                tile, renderContext->gridWidth);
+        }
+        if (flankRenderTiles[0] < 0 || flankRenderTiles[1] < 0
+            || (!hasFlankWallPair
+                && (renderContext->wallCells[flankRenderTiles[0]] != 0
+                    || renderContext->wallCells[flankRenderTiles[1]] != 0))) {
+            continue;
+        }
+
+        MaterialType flankMaterial = MATERIAL_TYPE_STONE;
+        if (!hasAlignedFlankWallPair) {
+            for (int rotation = ROTATION_FIRST;
+                 rotation < ROTATION_COUNT && flankMaterial == MATERIAL_TYPE_STONE;
+                 rotation++) {
+                for (int searchDistance = 1; searchDistance <= 4; searchDistance++) {
+                    const int nearbyTile = tileGetTileInDirection(
+                        door->tile, static_cast<Rotation>(rotation), searchDistance);
+                    if (!tileIsValid(nearbyTile)) {
+                        break;
+                    }
+                    const int nearbyRenderTile = tileFirstPersonGetRenderHexTile(
+                        nearbyTile, renderContext->gridWidth);
+                    if (nearbyRenderTile < 0) {
+                        break;
+                    }
+                    const unsigned char nearbyType =
+                        renderContext->wallCells[nearbyRenderTile];
+                    if ((nearbyType == 1 || nearbyType == 2)
+                        && renderContext->wallMaterials[nearbyRenderTile]
+                            != MATERIAL_TYPE_INVALID) {
+                        flankMaterial = renderContext->wallMaterials[nearbyRenderTile];
+                        break;
+                    }
+                }
+            }
+        }
+        for (int side = 0; side < 2; side++) {
+            const int renderTile = flankRenderTiles[side];
+            if (renderContext->wallCells[renderTile] != 0) {
+                continue;
+            }
+            if (hasAlignedFlankWallPair) {
+                renderContext->wallCells[renderTile] = flankWalls[side].type;
+                renderContext->wallOrientations[renderTile] = flankWalls[side].orientation;
+                renderContext->wallMaterials[renderTile] = flankWalls[side].material;
+            } else {
+                renderContext->wallCells[renderTile] = 1;
+                renderContext->wallOrientations[renderTile] =
+                    TILE_FIRST_PERSON_WALL_ORIENTATION_CELL;
+                renderContext->wallMaterials[renderTile] = flankMaterial;
+            }
+        }
+    }
+}
+
+static bool tileFirstPersonDoorIsOpen(Object* door)
+{
+    const bool openFlagsSet = (door->data.scenery.door.openFlags & DOOR_FLAG_OPEN) != 0
+        || (door->flags & OBJECT_OPEN_DOOR) != OBJECT_NONE;
+    if (!clientViewerActive()) {
+        return openFlagsSet;
+    }
+
+    static std::unordered_map<unsigned int, int> openFramesByFid;
+    const auto cached = openFramesByFid.find(door->fid);
+    if (cached != openFramesByFid.end()) {
+        if (cached->second <= 0) {
+            return openFlagsSet;
+        }
+        return openFlagsSet
+            ? door->frame >= cached->second
+            : door->frame > 0;
+    }
+
+    CacheEntry* cacheHandle = nullptr;
+    Art* art = artLock(FrmId(door), &cacheHandle);
+    if (art == nullptr) {
+        return openFlagsSet;
+    }
+
+    const int openFrame = artGetFrameCount(art) - 1;
+    artUnlock(cacheHandle);
+    openFramesByFid.emplace(door->fid, openFrame);
+    if (openFrame <= 0) {
+        return openFlagsSet;
+    }
+    return openFlagsSet
+        ? door->frame >= openFrame
+        : door->frame > 0;
 }
 
 static void tileFirstPersonGrayboxMarkObject(Object* object, void* context)
@@ -2901,8 +3122,7 @@ static void tileFirstPersonGrayboxMarkObject(Object* object, void* context)
         && hasProto
         && proto->scenery.type == SCENERY_TYPE_DOOR;
     const bool doorOpen = isDoor
-        && (((object->data.scenery.door.openFlags & DOOR_FLAG_OPEN) != 0)
-            || (object->flags & OBJECT_OPEN_DOOR) != OBJECT_NONE);
+        && tileFirstPersonDoorIsOpen(object);
     if (!halfHeightWall
         && !isDoor
         && (object->flags & (OBJECT_NO_BLOCK | OBJECT_LIGHT_THRU)) != OBJECT_NONE) {
@@ -2939,16 +3159,16 @@ static void tileFirstPersonGrayboxMarkObject(Object* object, void* context)
     } else if (isDoor) {
         // Some door objects do not keep the generic pass-through object
         // flags in sync with their authoritative door state.
-        if (doorOpen) {
-            wallType = 5;
-        } else {
-            wallType = 3;
-        }
+        wallType = doorOpen ? 5 : 3;
     } else {
         // Scenery is rendered as a billboard from its FRM below. Do not turn
         // it into a solid graybox wall, otherwise trees and other scenery
         // obscure their own textures.
         return;
+    }
+
+    if (isDoor && renderContext->doorObjects != nullptr) {
+        renderContext->doorObjects->push_back(object);
     }
 
     // Fallout's object grid stores X in reverse order. Convert it to the
@@ -2960,9 +3180,6 @@ static void tileFirstPersonGrayboxMarkObject(Object* object, void* context)
         renderContext->wallMaterials[renderHexTile] = objectType == OBJ_TYPE_WALL && hasProto
             ? proto->wall.material
             : MATERIAL_TYPE_INVALID;
-        if (isDoor && renderContext->doorObjects != nullptr) {
-            renderContext->doorObjects->push_back(object);
-        }
     }
 }
 
@@ -2983,6 +3200,13 @@ static void tileFirstPersonResolveWoodGates(
             door->tile, renderContext->gridWidth);
         if (gateTile < 0 || gateTile >= gHexGridSize) {
             continue;
+        }
+        const bool doorOpen = tileFirstPersonDoorIsOpen(door);
+        if (doorOpen && clientViewerActive()) {
+            renderContext->wallCells[gateTile] = 0;
+            renderContext->wallMaterials[gateTile] = MATERIAL_TYPE_INVALID;
+            renderContext->wallOrientations[gateTile] =
+                TILE_FIRST_PERSON_WALL_ORIENTATION_CELL;
         }
         const unsigned char wallType = renderContext->wallCells[gateTile];
         if (wallType != 3 && wallType != 5) {
@@ -3011,9 +3235,6 @@ static void tileFirstPersonResolveWoodGates(
             continue;
         }
 
-        const bool doorOpen =
-            (door->data.scenery.door.openFlags & DOOR_FLAG_OPEN) != 0
-            || (door->flags & OBJECT_OPEN_DOOR) != OBJECT_NONE;
         renderContext->wallCells[gateTile] = doorOpen
             ? 0
             : kFirstPersonClosedWoodGateType;
@@ -3503,11 +3724,14 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
     if (arroyoVillageMonument && !arroyoVillageMonumentComposite) {
         return true;
     }
+    const int protoId = ProtoId(object).protoId();
     constexpr double kArroyoMonumentScale = 0.25;
     Proto* proto = nullptr;
     if (protoGetProto(object, &proto) != 0
         || (!templeBackwall && !arroyoVillageMonument
-            && proto->scenery.type != SCENERY_TYPE_GENERIC)) {
+            && (proto->scenery.type != SCENERY_TYPE_GENERIC
+                || protoId == static_cast<int>(SceneryProtoTypeId::Desk)
+                || protoId == static_cast<int>(SceneryProtoTypeId::DeskAlt)))) {
         return false;
     }
     const Rotation rotation = rotationIsValid(object->rotation) ? object->rotation : ROTATION_NE;
@@ -4374,9 +4598,6 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         || sceneryProtoId == SceneryProtoTypeId::TableAlt12
         || sceneryProtoId == SceneryProtoTypeId::TableAlt13
 
-
-        || sceneryProtoId == SceneryProtoTypeId::Desk
-        || sceneryProtoId == SceneryProtoTypeId::DeskAlt
 
         || sceneryProtoId == SceneryProtoTypeId::Brace
         || sceneryProtoId == SceneryProtoTypeId::BraceAlt
@@ -5879,8 +6100,7 @@ static void tileFirstPersonTopologyMarkObject(Object* object, void* context)
         break;
     case OBJ_TYPE_SCENERY:
         if (hasProto && proto->scenery.type == SCENERY_TYPE_DOOR) {
-            const bool doorOpen = (object->data.scenery.door.openFlags & DOOR_FLAG_OPEN) != 0
-                || (object->flags & OBJECT_OPEN_DOOR) != OBJECT_NONE;
+            const bool doorOpen = tileFirstPersonDoorIsOpen(object);
             markerColor = doorOpen || (object->flags & OBJECT_NO_BLOCK) != OBJECT_NONE
                 ? COLOR_LIGHT_GREEN_3
                 : COLOR_LIGHT_RED;
@@ -5989,8 +6209,7 @@ static void tileFirstPersonTopologyMarkObject(Object* object, void* context)
     // is apparent in the topology view.
     const bool openDoor = objectType == OBJ_TYPE_SCENERY && hasProto
         && proto->scenery.type == SCENERY_TYPE_DOOR
-        && ((object->data.scenery.door.openFlags & DOOR_FLAG_OPEN) != 0
-            || (object->flags & OBJECT_OPEN_DOOR) != OBJECT_NONE);
+        && tileFirstPersonDoorIsOpen(object);
     const bool halfHeightWall = objectType == OBJ_TYPE_WALL
         && (object->flags & OBJECT_NO_BLOCK) == OBJECT_NONE
         && (object->flags & (OBJECT_TRANS_GLASS | OBJECT_TRANS_WALL | OBJECT_LIGHT_THRU)) != OBJECT_NONE;
@@ -6074,8 +6293,12 @@ static Object* tileFirstPersonPreviewPickCritterAtPosition(int x, int y)
 
     Object* pickedObject = nullptr;
     double pickedDepth = std::numeric_limits<double>::infinity();
+    Object* pickedLivingCritter = nullptr;
+    double pickedLivingCritterDepth = std::numeric_limits<double>::infinity();
     Object* fallbackObject = nullptr;
     double fallbackDepth = std::numeric_limits<double>::infinity();
+    Object* fallbackLivingCritter = nullptr;
+    double fallbackLivingCritterDepth = std::numeric_limits<double>::infinity();
     for (const TileFirstPersonActorHitTarget& target : gFirstPersonPreviewActorHitTargets) {
         if (FrmId(target.object).objectType() != OBJ_TYPE_CRITTER) {
             continue;
@@ -6091,8 +6314,10 @@ static Object* tileFirstPersonPreviewPickCritterAtPosition(int x, int y)
             fallbackObject = target.object;
             fallbackDepth = target.depth;
         }
-        if (target.depth >= pickedDepth) {
-            continue;
+        const bool livingCritter = !critterIsDead(target.object);
+        if (livingCritter && target.depth < fallbackLivingCritterDepth) {
+            fallbackLivingCritter = target.object;
+            fallbackLivingCritterDepth = target.depth;
         }
 
         FrmImage image;
@@ -6111,11 +6336,23 @@ static Object* tileFirstPersonPreviewPickCritterAtPosition(int x, int y)
             }
         }
 
-        pickedObject = target.object;
-        pickedDepth = target.depth;
+        if (target.depth < pickedDepth) {
+            pickedObject = target.object;
+            pickedDepth = target.depth;
+        }
+        if (livingCritter && target.depth < pickedLivingCritterDepth) {
+            pickedLivingCritter = target.object;
+            pickedLivingCritterDepth = target.depth;
+        }
     }
 
-    return pickedObject != nullptr ? pickedObject : fallbackObject;
+    if (pickedLivingCritter != nullptr) {
+        return pickedLivingCritter;
+    }
+    if (pickedObject != nullptr) {
+        return pickedObject;
+    }
+    return fallbackLivingCritter != nullptr ? fallbackLivingCritter : fallbackObject;
 }
 
 Object* tileFirstPersonPreviewPickCritter()
@@ -6236,7 +6473,7 @@ Object* tileFirstPersonPreviewPickDoorAt(int screenX, int screenY)
     double pickedDepth = std::numeric_limits<double>::infinity();
     for (const TileFirstPersonDoorHitTarget& target : gFirstPersonPreviewDoorHitTargets) {
         const int xDistance = target.screenX > x ? target.screenX - x : x - target.screenX;
-        if (xDistance > 4
+        if (xDistance > 12
             || xDistance > pickedXDistance
             || (xDistance == pickedXDistance && target.depth >= pickedDepth)) {
             continue;

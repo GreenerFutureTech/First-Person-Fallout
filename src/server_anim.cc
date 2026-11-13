@@ -402,12 +402,14 @@ static bool serverAnimStepOnce(Object* owner, int rotation, int durMs, bool run)
     Object* obstacle = _obj_blocking_at(owner, nextTile, owner->elevation);
     if (obstacle != nullptr) {
         if (canUseDoor(owner, obstacle)) {
-            objectUseDoor(owner, obstacle, false);
-            // The door's USE script ran synchronously and can do anything —
-            // including destroying the walker itself. Never touch `owner`
-            // again without re-proving it is still in the world.
-            if (!serverWalkOwnerAlive(owner)) {
-                return false;
+            if ((obstacle->data.scenery.door.openFlags & DOOR_FLAG_OPEN) == 0) {
+                objectUseDoor(owner, obstacle, false);
+                // The door's USE script ran synchronously and can do anything —
+                // including destroying the walker itself. Never touch `owner`
+                // again without re-proving it is still in the world.
+                if (!serverWalkOwnerAlive(owner)) {
+                    return false;
+                }
             }
         } else {
             return false;

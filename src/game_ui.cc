@@ -255,6 +255,13 @@ static bool gameFirstPersonPreviewUseDoor(Object* door)
     return true;
 }
 
+static bool gameFirstPersonPreviewIsDeskScenery(Object* object)
+{
+    const SceneryProtoTypeId protoId = ProtoId(object).protoId<SceneryProtoTypeId>();
+    return protoId == SceneryProtoTypeId::Desk
+        || protoId == SceneryProtoTypeId::DeskAlt;
+}
+
 static bool gameFirstPersonPreviewUseObject(Object* object)
 {
     if (object == nullptr) {
@@ -264,23 +271,26 @@ static bool gameFirstPersonPreviewUseObject(Object* object)
     const ObjectType objectType = FrmId(object).objectType();
     if (objectType == OBJ_TYPE_SCENERY) {
         Proto* proto = nullptr;
-        if (protoGetProto(object, &proto) == 0
-            && proto->scenery.type == SCENERY_TYPE_DOOR) {
+        if (protoGetProto(object, &proto) != 0) {
+            return false;
+        }
+        if (proto->scenery.type == SCENERY_TYPE_DOOR) {
             return gameFirstPersonPreviewUseDoor(object);
+        }
+        if (gameFirstPersonPreviewIsDeskScenery(object)) {
+            if (objectExamine(gDude, object) == -1) {
+                objectLookAt(gDude, object);
+            }
+            return true;
+        }
+        if (proto->scenery.type != SCENERY_TYPE_GENERIC) {
+            _action_use_an_object(gDude, object);
+            return true;
         }
         if (!_obj_action_can_use(object)) {
             return false;
         }
-        gFirstPersonPreviewLootPending = true;
-        gFirstPersonPreviewLootWindowShown = true;
-        gFirstPersonPreviewLootMouseReleased = gFirstPersonPreviewMouseReleased;
-        inventoryOpenLooting(gDude, object);
-        gFirstPersonPreviewLootPending = false;
-        gFirstPersonPreviewLootWindowShown = false;
-        gameFirstPersonPreviewSetMouseReleased(gFirstPersonPreviewLootMouseReleased);
-        gFirstPersonPreviewActionMenuShown = false;
-        gFirstPersonPreviewLeftClickStartTime = 0;
-        mouseResetButtonState();
+        _action_use_an_object(gDude, object);
         return true;
     }
 
@@ -325,7 +335,9 @@ static bool gameFirstPersonPreviewCanShowObjectMenu(Object* object)
 
     const ObjectType objectType = FrmId(object).objectType();
     return objectType == OBJ_TYPE_ITEM
-        || (objectType == OBJ_TYPE_SCENERY && _obj_action_can_use(object));
+        || (objectType == OBJ_TYPE_SCENERY
+            && (gameFirstPersonPreviewIsDeskScenery(object)
+                || _obj_action_can_use(object)));
 }
 
 static Object* gameFirstPersonPreviewPickActionObjectAt(int screenX, int screenY)
@@ -348,13 +360,10 @@ static void gameFirstPersonPreviewShowActionMenu(Object* targetObj, int mouseX, 
         static_cast<int>(FrmId(targetObj).objectType()), targetObj->pid, mouseX, mouseY,
         waitForClick ? "hotkey" : "long-click");
 
-    GameMouseActionMenuItem menuItems[GAME_MOUSE_ACTION_MENU_ITEM_COUNT - 1];
+    int menuItems[GAME_MOUSE_ACTION_MENU_ITEM_COUNT - 1];
     int menuItemCount = 0;
     const ObjectType objectType = FrmId(targetObj).objectType();
     const bool isCritter = objectType == OBJ_TYPE_CRITTER;
-    const bool canUseSkill = isCritter
-        || objectType == OBJ_TYPE_SCENERY
-        || (objectType == OBJ_TYPE_ITEM && itemGetType(targetObj) == ITEM_TYPE_CONTAINER);
     if (isCritter) {
         if (_obj_action_can_talk_to(targetObj)) {
             if (!isInCombat()) {
@@ -367,19 +376,23 @@ static void gameFirstPersonPreviewShowActionMenu(Object* targetObj, int mouseX, 
             menuItems[menuItemCount++] = GAME_MOUSE_ACTION_MENU_ITEM_USE;
         }
     } else {
-        menuItems[menuItemCount++] = GAME_MOUSE_ACTION_MENU_ITEM_USE;
+        menuItemCount = gameMouseBuildActionMenu(targetObj, menuItems);
+        if (objectType == OBJ_TYPE_SCENERY
+            && gameFirstPersonPreviewIsDeskScenery(targetObj)) {
+            menuItems[0] = GAME_MOUSE_ACTION_MENU_ITEM_LOOK;
+            menuItems[1] = GAME_MOUSE_ACTION_MENU_ITEM_CANCEL;
+            menuItemCount = 2;
+        }
     }
     if (isCritter && actionCheckPush(gDude, targetObj)) {
         menuItems[menuItemCount++] = GAME_MOUSE_ACTION_MENU_ITEM_PUSH;
     }
-    menuItems[menuItemCount++] = GAME_MOUSE_ACTION_MENU_ITEM_LOOK;
     if (isCritter) {
+        menuItems[menuItemCount++] = GAME_MOUSE_ACTION_MENU_ITEM_LOOK;
         menuItems[menuItemCount++] = GAME_MOUSE_ACTION_MENU_ITEM_INVENTORY;
-    }
-    if (canUseSkill) {
         menuItems[menuItemCount++] = GAME_MOUSE_ACTION_MENU_ITEM_USE_SKILL;
+        menuItems[menuItemCount++] = GAME_MOUSE_ACTION_MENU_ITEM_CANCEL;
     }
-    menuItems[menuItemCount++] = GAME_MOUSE_ACTION_MENU_ITEM_CANCEL;
 
     const bool mouseWasReleased = gFirstPersonPreviewMouseReleased;
     const bool relativeModeWasEnabled = mouseDeviceUsesRelativeMode();
@@ -390,13 +403,8 @@ static void gameFirstPersonPreviewShowActionMenu(Object* targetObj, int mouseX, 
     tileFirstPersonPreviewRefresh();
     mouseDeviceSetLogicalPosition(mouseX, mouseY);
     _mouse_set_position(mouseX, mouseY);
-    int menuItemValues[GAME_MOUSE_ACTION_MENU_ITEM_COUNT - 1];
-    for (int index = 0; index < menuItemCount; index++) {
-        menuItemValues[index] = menuItems[index];
-    }
-
     const int selectedActionValue = gameMouseRunActionMenu(
-        mouseX, mouseY, menuItemValues, menuItemCount, waitForClick);
+        mouseX, mouseY, menuItems, menuItemCount, waitForClick);
     debugPrint("F11 action menu: runner returned action=%d\n", selectedActionValue);
     if (selectedActionValue < 0 || selectedActionValue >= GAME_MOUSE_ACTION_MENU_ITEM_COUNT) {
         if (relativeModeWasEnabled) {
@@ -422,7 +430,7 @@ static void gameFirstPersonPreviewShowActionMenu(Object* targetObj, int mouseX, 
             lootStarted = true;
         } else {
             gameFirstPersonPreviewUseObject(targetObj);
-            lootStarted = true;
+            lootStarted = objectType != OBJ_TYPE_SCENERY;
         }
         break;
     case GAME_MOUSE_ACTION_MENU_ITEM_PUSH:

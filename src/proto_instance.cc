@@ -2552,6 +2552,8 @@ void _obj_arm_explosive(Object* explosive, int seconds)
 
 static void doorPresentSlide(Object* door, bool opening, int actorNetId)
 {
+    // Echo the authoritative state explicitly for the viewer's F11 wall geometry.
+    presenter()->doorState(door, opening, door->frame);
     presRecordSectionBegin();
     reg_anim_begin(ANIMATION_REQUEST_RESERVED);
     if (opening) {
