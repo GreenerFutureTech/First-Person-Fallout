@@ -765,6 +765,7 @@ void _dark_translucent_trans_buf_to_buf(unsigned char* src, int srcWidth, int sr
 int _gsound_compute_relative_volume(Object* obj) { return 0; }
 int floatSoundPlay(const char* fileName, Object* speaker) { return -1; }
 void gpuBillboardBeginFrame(unsigned char lightModulation) { }
+void gpuBillboardSetWallDepthSpanCount(unsigned int count) { }
 void gpuBillboardMarkSceneComplete() { }
 void gpuBillboardClear() { }
 void gpuBillboardSubmit(const unsigned char* pixels, int width, int height, const SDL_Rect& destination, const SDL_Rect& clip, double depth) { }

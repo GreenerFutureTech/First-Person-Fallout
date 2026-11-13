@@ -61,6 +61,7 @@ const char* screenGetRendererName();
 bool screenSupportsGpuFirstPersonPass();
 bool screenHasOpenGLContext();
 void gpuBillboardBeginFrame(unsigned char lightModulation);
+void gpuBillboardSetWallDepthSpanCount(unsigned int count);
 void gpuBillboardMarkSceneComplete();
 void gpuBillboardClear();
 void gpuBillboardBeginCursorRestore();

@@ -97,6 +97,52 @@ static std::unordered_map<const unsigned char*, GpuBillboardTexture> gGpuBillboa
 static unsigned char gGpuPalette[256 * 3];
 static uint64_t gGpuPaletteRevision = 0;
 static unsigned char gGpuBillboardLightModulation = 255;
+static uint64_t gGpuBillboardSubmitCount = 0;
+static uint64_t gGpuBillboardMergedSubmitCount = 0;
+static uint64_t gGpuBillboardTextureCacheHits = 0;
+static uint64_t gGpuBillboardTextureCacheMisses = 0;
+static unsigned int gGpuWallDepthSpanCount = 0;
+static uint64_t gGpuPresentationProfileFrames = 0;
+static uint64_t gGpuPresentationProfileBillboardCount = 0;
+static uint64_t gGpuPresentationProfileDrawCalls = 0;
+static uint64_t gGpuPresentationProfileClipChanges = 0;
+static uint64_t gGpuPresentationProfileSubmitCount = 0;
+static uint64_t gGpuPresentationProfileMergedSubmitCount = 0;
+static uint64_t gGpuPresentationProfileTextureCacheHits = 0;
+static uint64_t gGpuPresentationProfileTextureCacheMisses = 0;
+static uint64_t gGpuPresentationProfileWallDepthSpanCount = 0;
+static bool gGpuPresentationProfileActive = false;
+static double gGpuPresentationProfileUploadMs = 0.0;
+static double gGpuPresentationProfileSortMs = 0.0;
+static double gGpuPresentationProfileDrawMs = 0.0;
+static double gGpuPresentationProfilePresentMs = 0.0;
+static double gGpuPresentationProfileTotalMs = 0.0;
+
+static double performanceCounterMilliseconds(Uint64 start, Uint64 end)
+{
+    const Uint64 frequency = SDL_GetPerformanceFrequency();
+    return frequency == 0
+        ? 0.0
+        : static_cast<double>(end - start) * 1000.0 / frequency;
+}
+
+static void resetGpuPresentationProfile()
+{
+    gGpuPresentationProfileFrames = 0;
+    gGpuPresentationProfileBillboardCount = 0;
+    gGpuPresentationProfileDrawCalls = 0;
+    gGpuPresentationProfileClipChanges = 0;
+    gGpuPresentationProfileSubmitCount = 0;
+    gGpuPresentationProfileMergedSubmitCount = 0;
+    gGpuPresentationProfileTextureCacheHits = 0;
+    gGpuPresentationProfileTextureCacheMisses = 0;
+    gGpuPresentationProfileWallDepthSpanCount = 0;
+    gGpuPresentationProfileUploadMs = 0.0;
+    gGpuPresentationProfileSortMs = 0.0;
+    gGpuPresentationProfileDrawMs = 0.0;
+    gGpuPresentationProfilePresentMs = 0.0;
+    gGpuPresentationProfileTotalMs = 0.0;
+}
 
 // TODO: Remove once migration to update-render cycle is completed.
 FpsLimiter sharedFpsLimiter;
@@ -154,6 +200,11 @@ void gpuBillboardBeginFrame(unsigned char lightModulation)
     gGpuOverlayRects.clear();
     gGpuCursorRestoreRects.clear();
     gGpuBillboardLightModulation = lightModulation;
+    gGpuBillboardSubmitCount = 0;
+    gGpuBillboardMergedSubmitCount = 0;
+    gGpuBillboardTextureCacheHits = 0;
+    gGpuBillboardTextureCacheMisses = 0;
+    gGpuWallDepthSpanCount = 0;
     const size_t expectedBillboardCount =
         static_cast<size_t>(std::max(64, screenGetWidth() / 2));
     if (gGpuBillboards.capacity() < expectedBillboardCount) {
@@ -164,6 +215,11 @@ void gpuBillboardBeginFrame(unsigned char lightModulation)
         memcpy(gGpuPalette, palette, sizeof(gGpuPalette));
         gGpuPaletteRevision++;
     }
+}
+
+void gpuBillboardSetWallDepthSpanCount(unsigned int count)
+{
+    gGpuWallDepthSpanCount = count;
 }
 
 void gpuBillboardMarkSceneComplete()
@@ -295,6 +351,14 @@ void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
             cachedTexture = &candidate;
         }
     }
+    if (settings.debug.show_fps) {
+        if (cachedTexture != nullptr) {
+            gGpuBillboardTextureCacheHits++;
+        } else {
+            gGpuBillboardTextureCacheMisses++;
+        }
+        gGpuBillboardSubmitCount++;
+    }
     if (cachedTexture == nullptr) {
         SDL_Texture* texture = SDL_CreateTexture(gSdlRenderer,
             SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, width, height);
@@ -365,6 +429,9 @@ void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
             && previous.clip.x + previous.clip.w == clip.x;
         if (sameBillboard) {
             previous.clip.w += clip.w;
+            if (settings.debug.show_fps) {
+                gGpuBillboardMergedSubmitCount++;
+            }
             return;
         }
     }
@@ -951,19 +1018,36 @@ void renderPresent()
     // Every presentation loop consumes pending F11 work, including combat
     // animation waits and modal loops that never return to the main loop.
     tileFirstPersonPreviewFlushRefresh();
+    const bool profileGpuFrame = settings.debug.show_fps
+        && tileFirstPersonPreviewIsEnabled();
+    if (profileGpuFrame && !gGpuPresentationProfileActive) {
+        resetGpuPresentationProfile();
+        gGpuPresentationProfileActive = true;
+    } else if (!profileGpuFrame && gGpuPresentationProfileActive) {
+        resetGpuPresentationProfile();
+        gGpuPresentationProfileActive = false;
+    }
+    const Uint64 frameStart = profileGpuFrame ? SDL_GetPerformanceCounter() : 0;
+    const Uint64 uploadStart = profileGpuFrame ? SDL_GetPerformanceCounter() : 0;
     SDL_UpdateTexture(gSdlTexture, nullptr, gSdlTextureSurface->pixels, gSdlTextureSurface->pitch);
+    const Uint64 uploadEnd = profileGpuFrame ? SDL_GetPerformanceCounter() : 0;
     SDL_RenderClear(gSdlRenderer);
     SDL_RenderCopy(gSdlRenderer, gSdlTexture, nullptr, nullptr);
     for (const SDL_Rect& restoreRect : gGpuCursorRestoreRects) {
         SDL_RenderCopy(gSdlRenderer, gSdlTexture, &restoreRect, &restoreRect);
     }
     const bool firstPersonPreviewEnabled = tileFirstPersonPreviewIsEnabled();
+    const Uint64 sortStart = profileGpuFrame ? SDL_GetPerformanceCounter() : 0;
     std::stable_sort(gGpuBillboards.begin(), gGpuBillboards.end(),
         [](const GpuBillboard& lhs, const GpuBillboard& rhs) {
             return lhs.depth > rhs.depth;
         });
+    const Uint64 sortEnd = profileGpuFrame ? SDL_GetPerformanceCounter() : 0;
     SDL_Rect activeClip {};
     bool hasActiveClip = false;
+    uint64_t billboardDrawCalls = 0;
+    uint64_t clipChanges = 0;
+    const Uint64 drawStart = profileGpuFrame ? SDL_GetPerformanceCounter() : 0;
     for (const GpuBillboard& billboard : gGpuBillboards) {
         const bool clipChanged = !hasActiveClip
             || activeClip.x != billboard.clip.x
@@ -974,12 +1058,19 @@ void renderPresent()
             SDL_RenderSetClipRect(gSdlRenderer, &billboard.clip);
             activeClip = billboard.clip;
             hasActiveClip = true;
+            if (profileGpuFrame) {
+                clipChanges++;
+            }
         }
         SDL_RenderCopy(gSdlRenderer, billboard.texture, nullptr, &billboard.destination);
+        if (profileGpuFrame) {
+            billboardDrawCalls++;
+        }
     }
     if (hasActiveClip) {
         SDL_RenderSetClipRect(gSdlRenderer, nullptr);
     }
+    const Uint64 drawEnd = profileGpuFrame ? SDL_GetPerformanceCounter() : 0;
     if (firstPersonPreviewEnabled) {
         static std::vector<Rect> visibleWindowRects;
         windowGetVisibleRects(visibleWindowRects, gIsoWindow);
@@ -1006,7 +1097,44 @@ void renderPresent()
     }
     // render movie SDL texture if present
     movieRenderDirectOverlay();
+    const Uint64 presentStart = profileGpuFrame ? SDL_GetPerformanceCounter() : 0;
     SDL_RenderPresent(gSdlRenderer);
+    const Uint64 presentEnd = profileGpuFrame ? SDL_GetPerformanceCounter() : 0;
+    if (profileGpuFrame) {
+        const Uint64 frameEnd = SDL_GetPerformanceCounter();
+        gGpuPresentationProfileFrames++;
+        gGpuPresentationProfileBillboardCount += gGpuBillboards.size();
+        gGpuPresentationProfileDrawCalls += billboardDrawCalls;
+        gGpuPresentationProfileClipChanges += clipChanges;
+        gGpuPresentationProfileSubmitCount += gGpuBillboardSubmitCount;
+        gGpuPresentationProfileMergedSubmitCount += gGpuBillboardMergedSubmitCount;
+        gGpuPresentationProfileTextureCacheHits += gGpuBillboardTextureCacheHits;
+        gGpuPresentationProfileTextureCacheMisses += gGpuBillboardTextureCacheMisses;
+        gGpuPresentationProfileWallDepthSpanCount += gGpuWallDepthSpanCount;
+        gGpuPresentationProfileUploadMs += performanceCounterMilliseconds(uploadStart, uploadEnd);
+        gGpuPresentationProfileSortMs += performanceCounterMilliseconds(sortStart, sortEnd);
+        gGpuPresentationProfileDrawMs += performanceCounterMilliseconds(drawStart, drawEnd);
+        gGpuPresentationProfilePresentMs += performanceCounterMilliseconds(presentStart, presentEnd);
+        gGpuPresentationProfileTotalMs += performanceCounterMilliseconds(frameStart, frameEnd);
+        if (gGpuPresentationProfileFrames >= 60) {
+            const double frameCount = static_cast<double>(gGpuPresentationProfileFrames);
+            debugPrint("F11 GPU avg: spans=%.0f submits=%.0f merged=%.0f queued=%.0f copies=%.0f clips=%.0f cacheHit=%.0f cacheMiss=%.0f upload=%.3f sort=%.3f copyQueue=%.3f present=%.3f total=%.3f ms\n",
+                gGpuPresentationProfileWallDepthSpanCount / frameCount,
+                gGpuPresentationProfileSubmitCount / frameCount,
+                gGpuPresentationProfileMergedSubmitCount / frameCount,
+                gGpuPresentationProfileBillboardCount / frameCount,
+                gGpuPresentationProfileDrawCalls / frameCount,
+                gGpuPresentationProfileClipChanges / frameCount,
+                gGpuPresentationProfileTextureCacheHits / frameCount,
+                gGpuPresentationProfileTextureCacheMisses / frameCount,
+                gGpuPresentationProfileUploadMs / frameCount,
+                gGpuPresentationProfileSortMs / frameCount,
+                gGpuPresentationProfileDrawMs / frameCount,
+                gGpuPresentationProfilePresentMs / frameCount,
+                gGpuPresentationProfileTotalMs / frameCount);
+            resetGpuPresentationProfile();
+        }
+    }
 }
 
 
