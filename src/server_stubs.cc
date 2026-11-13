@@ -1056,6 +1056,11 @@ void clientViewerPutInContainer(Object* container, Object* item, int quantity) {
 void clientViewerLoadAmmo(Object* weapon, Object* ammo, int quantity, bool replaceAmmo) { serverStubAbort("clientViewerLoadAmmo"); }
 void clientViewerSetLootTarget(int netId) { serverStubAbort("clientViewerSetLootTarget"); }
 void clientViewerUnwield(int hand) { serverStubAbort("clientViewerUnwield"); }
+void clientViewerPartyTransfer(int, int, Object*, int) { serverStubAbort("clientViewerPartyTransfer"); }
+void clientViewerPartyEquip(int, int, Object*) { serverStubAbort("clientViewerPartyEquip"); }
+void clientViewerPartyUnequip(int, int, int) { serverStubAbort("clientViewerPartyUnequip"); }
+void clientViewerPartyLoot(int, int, Object*, int, bool) { serverStubAbort("clientViewerPartyLoot"); }
+void clientViewerPartyTakeAll(int, int) { serverStubAbort("clientViewerPartyTakeAll"); }
 void clientViewerUseItem(int pid) { serverStubAbort("clientViewerUseItem"); }
 void clientViewerUseDoor(int targetNetId) { serverStubAbort("clientViewerUseDoor"); }
 void clientViewerUseItemOn(int targetNetId, int pid) { serverStubAbort("clientViewerUseItemOn"); }
@@ -1095,6 +1100,8 @@ void clientViewerBarterVerb(const char* verb, int pid, int quantity) { serverStu
 bool clientStealActive() { serverStubAbort("clientStealActive"); }
 bool clientStealEndPending() { serverStubAbort("clientStealEndPending"); }
 bool clientStealIsDriver() { serverStubAbort("clientStealIsDriver"); }
+Object* clientStealThief() { return nullptr; }
+Object* clientStealTarget() { return nullptr; }
 bool clientStealConsumeDirty() { serverStubAbort("clientStealConsumeDirty"); }
 bool clientStealConsumeCloseRequest() { serverStubAbort("clientStealConsumeCloseRequest"); }
 void clientViewerStealVerb(const char* verb, int pid, int quantity) { serverStubAbort("clientViewerStealVerb"); }

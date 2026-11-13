@@ -242,6 +242,11 @@ void clientViewerLootPut(int containerNetId, int pid, int quantity);
 void clientViewerLootTakeAll(int containerNetId);
 void clientViewerPutInContainer(Object* container, Object* item, int quantity);
 void clientViewerLoadAmmo(Object* weapon, Object* ammo, int quantity, bool replaceAmmo);
+void clientViewerPartyTransfer(int fromNetId, int toNetId, Object* item, int quantity);
+void clientViewerPartyEquip(int targetNetId, int sourceNetId, Object* item);
+void clientViewerPartyUnequip(int targetNetId, int slot, int destinationNetId);
+void clientViewerPartyLoot(int targetNetId, int actorNetId, Object* item, int quantity, bool take);
+void clientViewerPartyTakeAll(int targetNetId, int actorNetId);
 void clientViewerSetLootTarget(int netId);
 bool clientViewerConsumeLootTargetInvDirty();
 

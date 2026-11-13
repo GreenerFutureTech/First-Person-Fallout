@@ -94,6 +94,13 @@ void barterSetServerPump(std::function<bool()> pump);
 // is the server's; this is what it looks like. See the note at the definition.
 void inventoryOpenTradeViewer(Object* merchant, Object* playerTable, Object* merchantTable);
 
+// Multiplayer party inventory authority and UI presentation lifecycle.
+bool inventoryCanManagePartyActor(Object* requester, Object* subject);
+bool inventoryPartyEquip(Object* requester, Object* target, Object* source, Object* item);
+bool inventoryPartyUnequip(Object* target, InvenSlot slot);
+void inventoryViewerRestoreEquipmentForDelta(Object* owner);
+void inventoryViewerDetachEquipmentAfterDelta(Object* owner);
+
 // -- STEAL / PICKPOCKET / PLANT, server-authoritative (co-op) ---------------
 // The dedicated server owns the steal screen the way it owns a trade: it runs
 // the session, rolls the Steal skill for every transfer, and parks the tick

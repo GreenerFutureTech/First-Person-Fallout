@@ -788,6 +788,7 @@ static int gInventoryBarterBackgroundWindow;
 static int partyRightEquippedWeight = 0;
 
 static CritterEquipped* partyTargetEquipped = nullptr;
+static bool gViewerPartyInventoryDirty = false;
 
 static Object* partyBaseTarget = nullptr;
 
@@ -3655,20 +3656,22 @@ int inventoryOpenLooting(Object* looter, Object* target)
     // Left/Right instead cycles the active right-side party target.
     Object* const playerObj = _inven_dude;
     FrmId savedDudeFrmId = gInventoryWindowDudeFrmId;
-    bool switchActivePartyTarget = !clientViewerActive() && settings.qol.party_loot_and_barter
+    bool switchActivePartyTarget = settings.qol.party_loot_and_barter
         && _gIsSteal
         && objectIsPartyMember(target);
     std::vector<Object*> partyTargets;
     if (switchActivePartyTarget) {
         for (Object* pm : get_all_party_members_objects(false)) {
-            if (pm != _inven_dude) {
+            if (pm != _inven_dude && (!clientViewerActive()
+                    || inventoryCanManagePartyActor(looter, pm))) {
                 partyTargets.push_back(pm);
             }
         }
-    } else if (!clientViewerActive() && settings.qol.party_loot_and_barter && (!_gIsSteal || objectIsPartyMember(target))) {
+    } else if (settings.qol.party_loot_and_barter && (!_gIsSteal || objectIsPartyMember(target))) {
         partyTargets.push_back(_inven_dude);
         for (Object* pm : get_all_party_members_objects(false)) {
-            if (pm != gDude && pm != target) {
+            if (pm != gDude && pm != target && (!clientViewerActive()
+                    || inventoryCanManagePartyActor(looter, pm))) {
                 partyTargets.push_back(pm);
             }
         }
@@ -3728,6 +3731,14 @@ int inventoryOpenLooting(Object* looter, Object* target)
         }
 
         int keyCode = inputGetInput();
+        if (clientViewerActive() && clientStealActive()
+            && clientStealTarget() != nullptr && clientStealTarget() != target) {
+            target = clientStealTarget();
+            setLootTarget(target, hiddenBox);
+            refreshAfterTargetChange();
+        }
+        bool partyDirty = gViewerPartyInventoryDirty;
+        gViewerPartyInventoryDirty = false;
         int mouseEvent = mouseGetEvent();
         InventoryScrollerDisplayContext inventoryScrollerContext { INVENTORY_WINDOW_TYPE_LOOT, nullptr };
         InventoryScrollerDisplayContext targetScrollerContext { INVENTORY_WINDOW_TYPE_LOOT, _target_pud };
@@ -3779,7 +3790,8 @@ int inventoryOpenLooting(Object* looter, Object* target)
         if (clientViewerActive()
             && (static_cast<int>(clientViewerConsumeDudeInvDirty())
                     | static_cast<int>(clientViewerConsumeLootTargetInvDirty())
-                    | static_cast<int>(clientStealConsumeDirty()))
+                    | static_cast<int>(clientStealConsumeDirty())
+                    | static_cast<int>(partyDirty))
                 != 0) {
             if (_stack_offset[_curr_stack] > _pud->length - gInventorySlotsCount) {
                 _stack_offset[_curr_stack] = _pud->length - gInventorySlotsCount;
@@ -3822,7 +3834,8 @@ int inventoryOpenLooting(Object* looter, Object* target)
                 int newInventoryWeight = objectGetInventoryWeight(target);
                 if (clientViewerActive() && !_gIsSteal) {
                     if (target->netId > 0) {
-                        clientViewerLootTakeAll(target->netId);
+                        if (_stack[0] != gDude) clientViewerPartyTakeAll(target->netId, _stack[0]->netId);
+                        else clientViewerLootTakeAll(target->netId);
                     } else {
                         debugPrint("inventory: viewer cannot take all from unbound loot target\n");
                     }
@@ -3844,9 +3857,15 @@ int inventoryOpenLooting(Object* looter, Object* target)
             if (partyTargets.size() > 1) {
                 partyTargetIndex = inventoryWrapIndex(partyTargetIndex, partyTargets.size(), -1);
                 if (switchActivePartyTarget) {
-                    target = partyTargets[partyTargetIndex];
-                    setLootTarget(target, hiddenBox);
-                    refreshAfterTargetChange();
+                    if (clientViewerActive()) {
+                        if (clientStealIsDriver()) {
+                            clientViewerStealVerb("spartytarget", partyTargets[partyTargetIndex]->netId, 0);
+                        }
+                    } else {
+                        target = partyTargets[partyTargetIndex];
+                        setLootTarget(target, hiddenBox);
+                        refreshAfterTargetChange();
+                    }
                 } else {
                     inventorySetLeftPaneCritter(partyTargets[partyTargetIndex], target, INVENTORY_WINDOW_TYPE_LOOT);
                 }
@@ -3855,9 +3874,15 @@ int inventoryOpenLooting(Object* looter, Object* target)
             if (partyTargets.size() > 1) {
                 partyTargetIndex = inventoryWrapIndex(partyTargetIndex, partyTargets.size(), 1);
                 if (switchActivePartyTarget) {
-                    target = partyTargets[partyTargetIndex];
-                    setLootTarget(target, hiddenBox);
-                    refreshAfterTargetChange();
+                    if (clientViewerActive()) {
+                        if (clientStealIsDriver()) {
+                            clientViewerStealVerb("spartytarget", partyTargets[partyTargetIndex]->netId, 0);
+                        }
+                    } else {
+                        target = partyTargets[partyTargetIndex];
+                        setLootTarget(target, hiddenBox);
+                        refreshAfterTargetChange();
+                    }
                 } else {
                     inventorySetLeftPaneCritter(partyTargets[partyTargetIndex], target, INVENTORY_WINDOW_TYPE_LOOT);
                 }
@@ -3950,7 +3975,7 @@ int inventoryOpenLooting(Object* looter, Object* target)
                         }
                     }
                 } else if ((keyCode == PARTY_WEAPON_SLOT_KEY || keyCode == PARTY_ARMOR_SLOT_KEY)
-                    && hasPartySlots()) {
+                    && hasPartySlots() && !inventoryStealWatcherOnly()) {
                     if (gInventoryCursor == INVENTORY_WINDOW_CURSOR_ARROW) {
                         inventoryWindowOpenContextMenu(keyCode, INVENTORY_WINDOW_TYPE_LOOT);
                     } else {
@@ -4206,7 +4231,9 @@ void stealSessionRun(Object* thief, Object* target)
     Object* item1 = nullptr;
     Object* item2 = nullptr;
     Object* armor = nullptr;
-    Object* hiddenBox = lootTargetDetach(target, _gIsSteal, &item1, &item2, &armor);
+    bool partySession = serverDedicatedActive() && inventoryCanManagePartyActor(thief, target)
+        && !playerActorIs(target);
+    Object* hiddenBox = lootTargetDetach(target, _gIsSteal && !partySession, &item1, &item2, &armor);
     if (hiddenBox == nullptr) {
         _gIsSteal = 0;
         return;
@@ -4269,6 +4296,28 @@ void stealSessionRun(Object* thief, Object* target)
 
         if (intent.kind == STEAL_INTENT_DONE) {
             break;
+        }
+
+        if (intent.kind == STEAL_INTENT_PARTY_TARGET) {
+            Object* next = objectFindByNetId(intent.pid);
+            if (partySession && inventoryCanManagePartyActor(thief, next) && !playerActorIs(next)) {
+                Object* nextItem1 = nullptr;
+                Object* nextItem2 = nullptr;
+                Object* nextArmor = nullptr;
+                Object* nextHidden = lootTargetDetach(next, false, &nextItem1, &nextItem2, &nextArmor);
+                if (nextHidden != nullptr) {
+                    lootTargetReattach(target, hiddenBox, item1, item2, armor);
+                    target = next;
+                    hiddenBox = nextHidden;
+                    item1 = nextItem1;
+                    item2 = nextItem2;
+                    armor = nextArmor;
+                    gStealSessionTarget = target;
+                    presenter()->stealBegin(thief, target);
+                }
+            }
+            stealEmitState();
+            continue;
         }
 
         bool planting = intent.kind == STEAL_INTENT_PLANT;
@@ -4468,12 +4517,23 @@ static InventoryMoveResult _move_inventory(Object* item, int slotIndex, Object* 
         // Rolls and transfers belong to the server's steal session, including
         // failures. Never run the singleplayer skill roll against the mirror.
         if (clientStealActive() && clientStealIsDriver()
+            && inventoryCanManagePartyActor(clientStealThief(), partyBaseTarget)
+            && !immediate && tryEquipPartyItem(item, isPlanting)) {
+            inventorySetCursor(INVENTORY_WINDOW_CURSOR_HAND);
+            return INVENTORY_MOVE_RESULT_SUCCESS;
+        }
+        if (clientStealActive() && clientStealIsDriver()
             && (immediate || inventoryLootMouseHitTestScroller(isPlanting))) {
             int amount = quantity > 1 && !immediate
                 ? inventoryQuantitySelect(INVENTORY_WINDOW_TYPE_MOVE_ITEMS, item, quantity)
                 : quantity;
             if (amount > 0) {
-                clientViewerStealVerb(isPlanting ? "splant" : "stake", item->pid, amount);
+                if (inventoryCanManagePartyActor(clientStealThief(), partyBaseTarget)) {
+                    clientViewerPartyTransfer(isPlanting ? _stack[0]->netId : partyBaseTarget->netId,
+                        isPlanting ? partyBaseTarget->netId : _stack[0]->netId, item, amount);
+                } else {
+                    clientViewerStealVerb(isPlanting ? "splant" : "stake", item->pid, amount);
+                }
                 result = INVENTORY_MOVE_RESULT_SUCCESS;
             }
         }
@@ -4504,7 +4564,7 @@ static InventoryMoveResult _move_inventory(Object* item, int slotIndex, Object* 
                 if (!skipMove && result != INVENTORY_MOVE_RESULT_CAUGHT_STEALING) {
                     if (clientViewerActive() && !_gIsSteal) {
                         if (targetObj->netId > 0) {
-                            clientViewerLootPut(targetObj->netId, item->pid, quantityToMove);
+                            clientViewerPartyLoot(targetObj->netId, _stack[0]->netId, item, quantityToMove, false);
                             result = INVENTORY_MOVE_RESULT_SUCCESS;
                         } else {
                             debugPrint("inventory: viewer cannot put item into unbound loot target (pid %d)\n",
@@ -4541,7 +4601,7 @@ static InventoryMoveResult _move_inventory(Object* item, int slotIndex, Object* 
                 if (!skipMove && result != INVENTORY_MOVE_RESULT_CAUGHT_STEALING) {
                     if (clientViewerActive() && !_gIsSteal) {
                         if (targetObj->netId > 0) {
-                            clientViewerLootTake(targetObj->netId, item->pid, quantityToMove);
+                            clientViewerPartyLoot(targetObj->netId, _stack[0]->netId, item, quantityToMove, true);
                             result = INVENTORY_MOVE_RESULT_SUCCESS;
                         } else {
                             debugPrint("inventory: viewer cannot take item from unbound loot target (pid %d)\n",
@@ -4962,7 +5022,7 @@ void barterProcessUI(int win, Object* barterer, Object* playerTable, Object* bar
     const FrmId savedDudeFrmId = gInventoryWindowDudeFrmId;
 
     std::vector<Object*> partyTargets = { _inven_dude };
-    if (!clientViewerActive() && settings.qol.party_loot_and_barter) {
+    if (settings.qol.party_loot_and_barter) {
         for (Object* pm : get_all_party_members_objects(false)) {
             if (pm != gDude && pm != barterer) {
                 partyTargets.push_back(pm);
@@ -6868,14 +6928,15 @@ static void inventoryScrollerHandleInput(const InventoryScroller& scroller, int 
 
 static bool hasPartySlots()
 {
-    return !clientViewerActive() && inventoryLootLayout.columns == 2
+    return inventoryLootLayout.columns == 2
         && _gIsSteal
         && _target_curr_stack == 0
         && partyTargetEquipped != nullptr
         && partyBaseTarget != nullptr
         && _target_stack[0] == partyBaseTarget
         && ProtoId(partyBaseTarget).objectType() == OBJ_TYPE_CRITTER
-        && objectIsPartyMember(partyBaseTarget);
+        && objectIsPartyMember(partyBaseTarget)
+        && (!clientViewerActive() || inventoryCanManagePartyActor(clientStealThief(), partyBaseTarget));
 }
 
 static Object** getPartySlotItemPtr(InvenSlot slot)
@@ -7087,6 +7148,11 @@ static bool tryUnequipPartyItem(InvenSlot slot)
         return false;
     }
 
+    if (clientViewerActive()) {
+        if (!clientStealIsDriver()) return false;
+        clientViewerPartyUnequip(partyBaseTarget->netId, static_cast<int>(slot), partyBaseTarget->netId);
+        return true;
+    }
     critterRestoreEquipped(partyBaseTarget, *partyTargetEquipped);
 
     int rc = -1;
@@ -7143,6 +7209,12 @@ static bool tryEquipPartyItem(Object* item, bool fromLeftPane)
         return false;
     }
 
+    if (clientViewerActive()) {
+        if (!clientStealIsDriver()) return false;
+        clientViewerPartyEquip(partyBaseTarget->netId,
+            fromLeftPane ? _stack[0]->netId : partyBaseTarget->netId, item);
+        return true;
+    }
     critterRestoreEquipped(partyBaseTarget, *partyTargetEquipped);
 
     // move from player -> party member
@@ -7167,6 +7239,11 @@ static bool tryMovePartyItemToLeftPane(InvenSlot slot, Object* item)
         return false;
     }
 
+    if (clientViewerActive()) {
+        if (!clientStealIsDriver()) return false;
+        clientViewerPartyUnequip(partyBaseTarget->netId, static_cast<int>(slot), _stack[0]->netId);
+        return true;
+    }
     if (!tryUnequipPartyItem(slot)) {
         return false;
     }
@@ -7253,6 +7330,31 @@ static void inventoryRestoreEquippedFromGlobals(Object* critter)
     gInventoryLeftHandItem = nullptr;
     gInventoryRightHandItem = nullptr;
     gInventoryArmor = nullptr;
+}
+
+void inventoryViewerRestoreEquipmentForDelta(Object* owner)
+{
+    if (!clientViewerActive() || owner == nullptr
+        || (GameMode::getCurrentGameMode() & (GameMode::kInventory | GameMode::kLoot | GameMode::kUseOn | GameMode::kBarter)) == 0) return;
+    if (_stack[0] == owner) inventoryRestoreEquippedFromGlobals(owner);
+    if (partyTargetEquipped != nullptr && partyBaseTarget == owner) {
+        critterRestoreEquipped(owner, *partyTargetEquipped);
+    }
+}
+
+void inventoryViewerDetachEquipmentAfterDelta(Object* owner)
+{
+    if (!clientViewerActive() || owner == nullptr
+        || (GameMode::getCurrentGameMode() & (GameMode::kInventory | GameMode::kLoot | GameMode::kUseOn | GameMode::kBarter)) == 0) return;
+    if (_stack[0] == owner) {
+        inventoryStripEquippedToGlobals(owner);
+        gViewerPartyInventoryDirty = true;
+    }
+    if (partyTargetEquipped != nullptr && partyBaseTarget == owner) {
+        *partyTargetEquipped = critterStripEquipped(owner);
+        partyRightEquippedWeight = partyTargetEquipped->weight;
+        gViewerPartyInventoryDirty = true;
+    }
 }
 
 static void inventorySetLeftPaneCritter(Object* critter, Object* target, int inventoryWindowType)

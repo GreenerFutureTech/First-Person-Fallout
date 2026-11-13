@@ -1,3 +1,4 @@
+#include "party_inventory_access.h"
 #include <stdlib.h>
 #include "inventory_ui.h"
 #include "pres_record.h"
@@ -775,6 +776,63 @@ Object* critterGetArmor(Object* critter)
 
 // Critter inventories are displayed without equipped items in almost all cases.  This is accomplished by
 // temporarily removing them when inventory is viewed.
+bool inventoryCanManagePartyActor(Object* requester, Object* subject)
+{
+    if (requester == nullptr || subject == nullptr) return false;
+
+    const bool isCritter = ProtoId(subject).objectType() == OBJ_TYPE_CRITTER;
+    if (!isCritter) {
+        return false;
+    }
+
+    return partyInventoryAccess(subject == requester, playerActorIs(subject), isCritter,
+        objectIsPartyMember(subject), critterIsActive(subject),
+        requester->elevation == subject->elevation,
+        objectGetDistanceBetween(requester, subject) <= 8);
+}
+
+bool inventoryPartyUnequip(Object* target, InvenSlot slot)
+{
+    if (slot == InvenSlot::RightHand) {
+        return inventoryUnequipFunc(target, HAND_RIGHT, false) == 0;
+    }
+    Object* armor = critterGetArmor(target);
+    if (slot != InvenSlot::Armor || armor == nullptr
+        || !scriptHooks_InvenWield(target, armor, InvenSlot::Armor, 0, 0)) return false;
+    armor->flags &= ~OBJECT_WORN;
+    adjustCritterStatsOnArmorChange(target, armor, nullptr);
+    invenRederiveWeaponFid(target);
+    return true;
+}
+
+bool inventoryPartyEquip(Object* requester, Object* target, Object* source, Object* item)
+{
+    if (!inventoryCanManagePartyActor(requester, target) || playerActorIs(target)
+        || !inventoryCanManagePartyActor(requester, source) || item == nullptr) return false;
+    ItemType type = itemGetType(item);
+    if (type == ITEM_TYPE_WEAPON) {
+        if (!scriptHooks_CanUseWeapon(critterCanUseWeapon(target, item, HIT_MODE_RIGHT_WEAPON_PRIMARY),
+                target, item, HIT_MODE_RIGHT_WEAPON_PRIMARY)) return false;
+    } else if (type != ITEM_TYPE_ARMOR || !partyMemberProtoIdCanEquipArmor(target)) {
+        return false;
+    }
+    // Extract one unit without merging away the selected instance's identity.
+    if (source != target) {
+        if ((item->flags & OBJECT_EQUIPPED) != 0 || itemRemove(source, item, 1) != 0) return false;
+        ObjectFlags savedFlags = item->flags;
+        item->flags |= OBJECT_WORN;
+        int rc = itemAdd(target, item, 1);
+        item->flags = savedFlags;
+        if (rc != 0) {
+            itemAdd(source, item, 1);
+            return false;
+        }
+    }
+    int rc = inventoryEquipFunc(target, item, HAND_RIGHT, false);
+    if (rc != 0 && source != target) itemMove(target, source, item, 1);
+    return rc == 0;
+}
+
 CritterEquipped critterStripEquipped(Object* critter)
 {
     CritterEquipped equipped;

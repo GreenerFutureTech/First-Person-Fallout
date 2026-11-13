@@ -35,12 +35,14 @@
 #include "game_movie.h" // gameMovieAck — the movie barrier's release
 #include "game_dialog.h" // _gdialogActive — dialog-active gate for dsay/dend
 #include "input.h" // getTicks — wall-clock rate limit on the busy refusal (feature A)
+#include "interpreter_extra.h"
 #include "inventory.h" // inventoryEquip / inventoryUnequip / critterGetArmor / adjustCritterStatsOnArmorChange / HAND_*
 #include "item.h" // itemGetType / ITEM_TYPE_CONTAINER / itemDropStack / itemRemove
 #include "map.h" // mapGetLoadGeneration — drop latches on a map change
 #include "message.h" // messageListGetItem / MessageListItem
 #include "msg_channel.h" // kMsgChannel* — the greeting speaks on the system channel
 #include "object.h"
+#include "object_delta.h"
 #include "platform_compat.h" // compat_stricmp — account names compare case-insensitively
 #include "pres_record.h" // presRecord* — record the interaction gesture as a presentation sequence
 #include "presenter.h" // presenter()->consoleMessage
@@ -1823,7 +1825,11 @@ static bool serverControlIsStealVerb(const char* verb)
 {
     return strcmp(verb, "stake") == 0
         || strcmp(verb, "splant") == 0
-        || strcmp(verb, "sdone") == 0;
+        || strcmp(verb, "sdone") == 0
+        || strcmp(verb, "spartytarget") == 0
+        || strcmp(verb, "partygear") == 0
+        || strcmp(verb, "partyungear") == 0
+        || strcmp(verb, "partytransfer") == 0;
 }
 
 static Object* serverFindInventoryItemByNetId(Object* owner, int netId, Object** itemOwner, int* quantity)
@@ -1864,7 +1870,8 @@ void serverControlLine(int sessionId, const char* line)
     int arg = 0;
     int arg2 = 0;
     int arg3 = 0;
-    int n = sscanf(line, "%31s %d %d %d", verb, &arg, &arg2, &arg3);
+    int arg4 = 0;
+    int n = sscanf(line, "%31s %d %d %d %d", verb, &arg, &arg2, &arg3, &arg4);
     if (n < 1 || verb[0] == '\0') {
         return;
     }
@@ -2614,7 +2621,7 @@ void serverControlLine(int sessionId, const char* line)
     // cannot be aimed. Otherwise this would be a primitive for reaching into any
     // critter's pockets from any session, with the roll attached.
     if (strcmp(verb, "stake") == 0 || strcmp(verb, "splant") == 0
-        || strcmp(verb, "sdone") == 0) {
+        || strcmp(verb, "sdone") == 0 || strcmp(verb, "spartytarget") == 0) {
         // Liveness first, for the barter reason: an intent pushed with no session
         // open would sit in the queue and be spent inside the NEXT one, moving
         // real items out of a victim the sender never chose. (The session clears
@@ -2652,7 +2659,15 @@ void serverControlLine(int sessionId, const char* line)
 
         int pid = n >= 2 ? arg : -1;
         int qty = n >= 3 ? arg2 : 0;
-        if (strcmp(verb, "sdone") == 0) {
+        if (strcmp(verb, "spartytarget") == 0) {
+            Object* selected = objectFindByNetId(arg);
+            if (!inventoryCanManagePartyActor(actor, stealSessionTarget())
+                || !inventoryCanManagePartyActor(actor, selected) || playerActorIs(selected)) {
+                serverControlRefuse(sessionId, "You can't manage that companion.");
+                return;
+            }
+            stealIntentPush(STEAL_INTENT_PARTY_TARGET, arg, 0);
+        } else if (strcmp(verb, "sdone") == 0) {
             stealIntentPush(STEAL_INTENT_DONE, 0, 0);
         } else if (strcmp(verb, "stake") == 0) {
             stealIntentPush(STEAL_INTENT_TAKE, pid, qty);
@@ -2660,6 +2675,51 @@ void serverControlLine(int sessionId, const char* line)
             stealIntentPush(STEAL_INTENT_PLANT, pid, qty);
         }
         fprintf(stderr, "f2_server: control %s pid=%d qty=%d\n", verb, pid, qty);
+        return;
+    }
+
+    if (strcmp(verb, "partygear") == 0 || strcmp(verb, "partyungear") == 0
+        || strcmp(verb, "partytransfer") == 0) {
+        // Party gear is available only to the player driving this friendly
+        // inventory session. Another human's actor is never a companion.
+        Object* target = stealSessionTarget();
+        if (isInCombat() || !stealSessionActive() || stealSessionThief() != actor
+            || !inventoryCanManagePartyActor(actor, target) || playerActorIs(target)) {
+            serverControlRefuse(sessionId, "Open your companion's inventory first.");
+            return;
+        }
+        bool success = false;
+        if (strcmp(verb, "partygear") == 0) {
+            Object* source = objectFindByNetId(arg3);
+            Object* item = serverFindInventoryItemByNetId(source, arg2, nullptr, nullptr);
+            if (arg == target->netId && inventoryCanManagePartyActor(actor, source)) {
+                success = inventoryPartyEquip(actor, target, source, item);
+            }
+        } else if (strcmp(verb, "partyungear") == 0) {
+            Object* destination = objectFindByNetId(arg3);
+            InvenSlot slot = static_cast<InvenSlot>(arg2);
+            if (arg == target->netId && inventoryCanManagePartyActor(actor, destination)
+                && (slot == InvenSlot::RightHand || slot == InvenSlot::Armor)) {
+                Object* item = slot == InvenSlot::RightHand ? critterGetItem2(target) : critterGetArmor(target);
+                if (item != nullptr && inventoryPartyUnequip(target, slot)) {
+                    success = destination == target || itemMove(target, destination, item, 1) == 0;
+                }
+            }
+        } else {
+            Object* source = objectFindByNetId(arg);
+            Object* destination = objectFindByNetId(arg2);
+            int quantity = 0;
+            Object* item = serverFindInventoryItemByNetId(source, arg3, nullptr, &quantity);
+            if (inventoryCanManagePartyActor(actor, source) && inventoryCanManagePartyActor(actor, destination)
+                && source != destination && (source == target || destination == target)
+                && item != nullptr && (item->flags & OBJECT_EQUIPPED) == 0
+                && arg4 > 0 && arg4 <= quantity) {
+                success = itemMove(source, destination, item, arg4) == 0;
+            }
+        }
+        if (!success) serverControlRefuse(sessionId, "Your companion cannot perform that inventory action.");
+        objectDeltaScan();
+        presenter()->stealState(); // the parked session must flush its changes
         return;
     }
 
@@ -3915,7 +3975,8 @@ void serverControlLine(int sessionId, const char* line)
     // returns -1 when the destination cannot hold the stack — a faithful refusal,
     // the item simply stays put and the mirror reflects reality.
     bool isLootVerb = strcmp(verb, "take") == 0 || strcmp(verb, "put") == 0
-        || strcmp(verb, "takeall") == 0;
+        || strcmp(verb, "takeall") == 0 || strcmp(verb, "takeid") == 0
+        || strcmp(verb, "putid") == 0 || strcmp(verb, "takeallparty") == 0;
     if (isLootVerb) {
         if (gDude == nullptr) {
             return;
@@ -3923,6 +3984,14 @@ void serverControlLine(int sessionId, const char* line)
         int netId = n >= 2 ? arg : -1;
         int pid = n >= 3 ? arg2 : -1;
         Object* container = objectFindByNetId(netId);
+        bool instanceAddressed = strcmp(verb, "takeid") == 0 || strcmp(verb, "putid") == 0;
+        bool partyTakeAll = strcmp(verb, "takeallparty") == 0;
+        Object* inventoryActor = (instanceAddressed || partyTakeAll)
+            ? objectFindByNetId(partyTakeAll ? arg2 : arg4) : actor;
+        if (!inventoryCanManagePartyActor(actor, inventoryActor)) {
+            serverControlRefuse(sessionId, "You can't manage that inventory.");
+            return;
+        }
         if (isInCombat()) {
             int slot = serverControlSlotForSession(sessionId);
             auto grant = gLootGrants.find(slot);
@@ -3976,7 +4045,7 @@ void serverControlLine(int sessionId, const char* line)
             return;
         }
 
-        if (strcmp(verb, "takeall") == 0) {
+        if (strcmp(verb, "takeall") == 0 || partyTakeAll) {
             // Move every stack the dude can carry from the container into the dude.
             // itemMove removes the moved stack from the container (its inventory
             // shrinks), so DON'T advance the index on success; on a cap failure the
@@ -3988,7 +4057,7 @@ void serverControlLine(int sessionId, const char* line)
             while (i < inv->length) {
                 Object* it = inv->items[i].item;
                 int qty = inv->items[i].quantity;
-                if (it != nullptr && itemMove(container, gDude, it, qty) == 0) {
+                if (it != nullptr && itemMove(container, inventoryActor, it, qty) == 0) {
                     moved++;
                 } else {
                     i++;
@@ -4005,12 +4074,15 @@ void serverControlLine(int sessionId, const char* line)
             return;
         }
 
-        Object* from = strcmp(verb, "take") == 0 ? container : gDude;
-        Object* to = strcmp(verb, "take") == 0 ? gDude : container;
+        bool taking = strcmp(verb, "take") == 0 || strcmp(verb, "takeid") == 0;
+        Object* from = taking ? container : inventoryActor;
+        Object* to = taking ? inventoryActor : container;
         Object* item = nullptr;
         int stackQty = 0;
         {
-            item = serverLootFindStack(from, pid, &stackQty);
+            item = instanceAddressed
+                ? serverFindInventoryItemByNetId(from, pid, nullptr, &stackQty)
+                : serverLootFindStack(from, pid, &stackQty);
         }
         if (item == nullptr) {
             fprintf(stderr, "f2_server: control %s no pid=%d in source netId=%d ignored\n", verb, pid, netId);

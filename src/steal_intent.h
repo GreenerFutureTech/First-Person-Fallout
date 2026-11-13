@@ -27,6 +27,7 @@ enum StealIntentKind {
     STEAL_INTENT_PLANT,
     // Close the session (== ESC on the thief's screen). pid/qty unused.
     STEAL_INTENT_DONE,
+    STEAL_INTENT_PARTY_TARGET,
 };
 
 struct StealIntent {

@@ -4,17 +4,17 @@ Date: 2026-11-12. The findings below describe the initial source audit; no live 
 
 ## Implementation status
 
-The multiplayer viewer and dedicated-server paths now address the routing, authorization and replication defects below. Singleplayer input dispatch and gameplay remain unchanged. Shared inventory edits are behind `clientViewerActive()` or the server barter execution branch; new shadow fields are dedicated-server-only.
+Updated 2026-11-12 against the current source and working-tree changes. The implementation summary in the earlier version was too broad: it described party inventory controls as unavailable, while the current changes have begun restoring them. The old numbered findings remain below as the initial audit record; the status is:
 
-- First-person interaction dispatch honors skills/use-on modes in and out of combat, uses first-person target pickers, supports door attack selection, and blocks repeated combat submissions while awaiting a response.
-- Steal/plant gestures send server intents. Carried bags support local navigation plus authoritative extraction, nested equip/drop/unload/use, and instance-specific item commands. Barter withdrawals identify the merchant table explicitly.
-- Combat hand self-use has a separate priced server path. Combat use-on pickers stay open. Combat loot transfers require a server-issued target grant on the actor's current turn; screen close revokes the grant. Loot screens wait for an actual grant.
-- Remote inventories reconcile additions/removals by instance, with deferred frees. Newly spawned owners receive inventory. Wire version **6** carries ground item/scenery instance state and carried container flags; both binaries must be rebuilt together. Replay tooling reads versions 4-6, including nested inventory.
-- Elevator offers validate session, map generation, origin and expiry, and cancel on panel exit/disconnect. Off-turn hand switching is refused; the viewer rolls back a refused selection. Backspace sends approach cancellation outside chat/dialog. Navigation shortcuts and first-person modal mouse-release scopes are wired in the viewer.
+| Findings | Current status |
+| --- | --- |
+| 1-4, 6-21 | Source changes address the reported routing, authorization, inventory replication, and state-lifecycle gaps. They have not all been verified in live multiplayer. |
+| 5 (F11 attacks on doors) | Source change present, not gameplay-verified: the multiplayer first-person attack handler now falls back from critter picking to the door picker. Verify multiplayer and singleplayer F11 parity. |
+| 22 (party loot pane transfers) | In progress and unverified: the current changes send the displayed party actor with transfers and add server-side selection/authorization, but the full party inventory/gear interaction still needs review and end-to-end testing. |
 
-Two unsupported optional UI surfaces are intentionally unavailable in multiplayer: party-member inventory pane switching/gear controls, and entering a target's nested bag from a loot/steal window. They previously exposed client-local mutations or transfers against the wrong actor. Ordinary player-owned bag navigation remains available. Singleplayer retains these optional controls.
+The current working changes add party actor access checks, actor-aware transfer/equipment commands, server-side party target selection, and reconciliation hooks. The access policy has regression coverage for self, companion, other-player, inactive, elevation, and range cases. Gear context-menu actions still need authoritative routing, and multiplayer barter party-pane switching is not implemented; do not treat either surface as complete. See [`multiplayer-party-inventory-handoff.md`](multiplayer-party-inventory-handoff.md) for the precise unfinished work.
 
-Validation: both client and dedicated server build; inventory identity regression tests and nested wire decoding tests pass. Live two-client gameplay, visual mouse capture and delayed-turn tests remain necessary. The original line references below predate the implementation.
+Singleplayer behavior is intended to remain unchanged; shared inventory changes must stay on the viewer/server paths. The current source builds both `fallout2-ce` and `f2_server`, and all 7 CTest tests pass, including the new party access-policy test. These checks do not establish live two-client behavior, visual mouse capture, delayed-turn behavior, or full party inventory correctness.
 
 The executable has two separate input dispatchers. Singleplayer uses `gameHandleKey` / `_gmouse_handle_event` (`game_ui.cc`, `game_mouse.cc`). Multiplayer uses the viewer loop in `main.cc`, which intentionally does not call `gameHandleKey`. Shared screens such as inventory need their own `clientViewerActive()` forks. The existence of a singleplayer fix or a server handler therefore does not establish that multiplayer reaches it.
 
@@ -50,9 +50,9 @@ Repro: in F11 combat, select a skill or primary interaction and click a visible 
 
 ### 5. First-person attacks cannot select scenery doors
 
-**Medium priority; confirmed target restriction; not established as multiplayer-only.** The F11 attack branch at `src/main.cc:2403` only picks critters. Its isometric counterpart also tries a general object. The server explicitly supports door attack targets (`src/combat_drain.cc:174`). Singleplayer F11 also prioritizes critter attacks then ordinary object use (`src/game_ui.cc:681`); check both modes when repairing this broader first-person coverage gap.
+**Coverage gap from the initial audit; source change present, not gameplay-verified.** The initial F11 attack branch only picked critters. The current multiplayer click handler (`viewerHandleFirstPersonClick` in `src/main.cc`) falls back to `tileFirstPersonPreviewPickDoorAt` and passes the result through `_combat_attack_this`; the server supports door attack targets (`src/combat_drain.cc`). Verify the multiplayer behavior and check singleplayer F11 separately, since its input dispatcher is independent.
 
-Repro: attempt to shoot a door in multiplayer F11 combat. Expected repair: fall back to the visible door picker and retain server target validation.
+Regression check: attempt to shoot a visible door in multiplayer F11 combat and confirm the server validates/applies the attack. Also test singleplayer F11 independently.
 
 ### 6. Combat hand self-use sends an inventory-only command
 
@@ -152,13 +152,13 @@ Repro: put the same PID, especially caps, on both offer tables, then withdraw th
 
 ### 22. Party loot pane selection is ignored by authoritative transfers
 
-**Medium priority; confirmed mismatch when `party_loot_and_barter` is enabled.** The loot UI can switch its left pane to an NPC through `inventorySetLeftPaneCritter` (`src/inventory_ui.cc:3830`, line 3841). The viewer's `take`, `put` and `takeall` requests carry no destination/source actor (`src/inventory_ui.cc:4501`, line 4464, line 3799). Server transfers always use the requesting `gDude` (`src/server_control.cc:3845`, line 3863).
+**Medium priority; initial mismatch confirmed, repair in progress and unverified.** The initial audit found that the loot UI could switch its left pane to an NPC while viewer transfer requests omitted the selected actor. The current changes add explicit actor IDs to party transfer/loot commands, server-side party target selection, and eligibility checks. These are intended to keep displayed and mutated inventories aligned, but the path has not had a full review or live multiplayer test.
 
-Repro: select a party member's pack in the loot UI and take an item. It goes to the player instead; putting can remove the player's same-PID item or report it missing. Expected repair: either support an authorized explicit party inventory actor in the protocol or disable this pane switch for viewers until supported.
+Do not consider party inventory switching complete yet. Gear context-menu actions can still be intercepted before authoritative routing, and the separate multiplayer barter viewer does not implement party-pane switching. Verify selection acceptance/refusal, same-target selection, spectator behavior, disconnect cleanup, inventory reconciliation, and transfers in both directions. Preserve the server dialog/steal driver as the authority; the selected NPC is only the inventory owner.
 
 ## Additional candidates and parity gaps
 
-- **Party equipment may still mutate only the viewer.** `tryEquipPartyItem` runs before viewer network forks (`src/inventory_ui.cc:4442`, line 4479); its helpers call local `itemMove`/equip operations at lines 7101 and 7106. `tryUnequipPartyItem` at line 7033 also lacks a viewer fork. Confirm multiplayer reachability of the party equipment panel (`hasPartySlots`, line 6821) before treating this as reproduced. If reachable, it needs authoritative party equipment commands and witness restrictions.
+- **Party equipment controls are only partially restored.** The current changes add viewer gear commands and server authorization, but drag/ctrl-click helpers do not establish that the generic gear-slot context menu routes every action authoritatively. Trace weapon and armor slot actions, including unload/drop/unequip, and ensure rejected requests never fall through to local mutation. The multiplayer barter viewer (`inventoryOpenTradeViewer`) still has no party-owner switching; do not enable an ineffective path by removing only a guard in the singleplayer barter UI.
 - **Missing viewer shortcuts:** Tab automap, J first-person action menu, Z rest, M cursor cycling, Home centering and comma/dot rotation have singleplayer handlers but no equivalent viewer dispatch. Some functions remain reachable through other UI. These are input parity gaps, not automatically missing server implementations. Save/load and global pause require separate multiplayer policy and are not counted as defects here.
 - **Combat input busy gates vary by command.** Attack/move use `combatBusy`; primary interactions, item self-use and reload do not consistently use the same presentation gate. Server validation limits some consequences, but repeated commands during outstanding replay should be tested for duplicate spending and misleading refusals.
 
@@ -167,31 +167,31 @@ Repro: select a party member's pack in the loot UI and take an item. It goes to 
 | Action family | Singleplayer execution | Multiplayer authority | Audit result |
 | --- | --- | --- | --- |
 | Movement | Local animation movement | `mv`, `cmove` | Both routes exist; F11 WASD forwards to authority. |
-| Attack | `_combat_attack_this` and local combat | `cattack` through commit fork | Shared selection/remote commit exists; F11 door picking gap. |
+| Attack | `_combat_attack_this` and local combat | `cattack` through commit fork | Shared selection/remote commit and multiplayer F11 door picking are implemented; verify live behavior and singleplayer parity. |
 | End turn/combat | Local combat loop | `cendturn`, `cendcombat`, `cstart` | Explicit viewer routes exist. |
-| Door/scenery use | `_action_use_an_object` | `use`, `usedoor` | Both routes exist; mode/picker and response-state gaps above. |
+| Door/scenery use | `_action_use_an_object` | `use`, `usedoor` | First-person mode/picker paths are implemented; live target-selection behavior remains to verify. |
 | Pickup | `actionPickUp` | `get`, `gethere` | Explicit viewer routes exist. |
-| Examine/talk/push/rotate | Local object/action functions | `look`, `talk`, `push`, `rot` | Viewer primary/action-menu routes exist; F11 mode/picker gaps remain. |
-| Skills | `actionUseSkill`, local sneak state | `skill`, `sneak` | Server paths exist; F11 target dispatch breaks them. |
-| Use item on target | `_action_use_an_item_on_object` | `useitemon` | Server combat support exists; client gates/pickers disagree. |
-| Use item on self | `objectUseItem`, inventory item functions | `useitem` | Pack route exists; hand route uses the wrong contract. |
-| Equip/drop/unload | Local inventory mutations | `invwield`, `invunwield`, `invdrop`, `unload` | Viewer forks exist; remote observers reconcile incompletely. |
-| Container/ammo manipulation | Local `itemMove` / reload operations | `invput`, `invload`, `reload` | Routes exist; carried-container navigation missing. |
-| Loot | Local loot screen/transfers | `loot`, `take`, `put`, `takeall` | Combat opening and transfer authorization disagree. |
-| Steal/plant | Local skill roll and transfer | `stake`, `splant`, `sdone` | Only `sdone` is sent by the gameplay UI. |
+| Examine/talk/push/rotate | Local object/action functions | `look`, `talk`, `push`, `rot` | Viewer primary/action-menu routes exist; verify first-person target selection live. |
+| Skills | `actionUseSkill`, local sneak state | `skill`, `sneak` | First-person skill dispatch and targeting are implemented; live behavior remains to verify. |
+| Use item on target | `_action_use_an_item_on_object` | `useitemon` | Combat picker lifetime and first-person dispatch are implemented; live behavior remains to verify. |
+| Use item on self | `objectUseItem`, inventory item functions | `useitem` | Pack and priced combat hand-use paths exist; live AP behavior remains to verify. |
+| Equip/drop/unload | Local inventory mutations | `invwield`, `invunwield`, `invdrop`, `unload` | Viewer forks and instance-aware remote inventory reconciliation are implemented; party gear remains partial. |
+| Container/ammo manipulation | Local `itemMove` / reload operations | `invput`, `invload`, `reload` | Carried-container navigation and authoritative item routes are implemented; live behavior remains to verify. |
+| Loot | Local loot screen/transfers | `loot`, `take`, `put`, `takeall` | Combat grants and transfers have an authoritative path; party-owner transfers remain under review. |
+| Steal/plant | Local skill roll and transfer | `stake`, `splant`, `sdone` | Viewer intent path is implemented; live server/client outcome remains to verify. |
 | Character advancement | Local editor mutations | `sheetopen/close`, `skillup/down`, `perkpick`, `tagpick`, `mutpick` | Viewer helpers and server handlers exist; not evidence of a missing route by itself. |
-| Dialog/barter | Local dialog/trade engine | `dsay`, `dend`, `dbarter`, `boffer`, `btake`, `bunoffer`, `bcommit`, `bdone`, `bcancel` | Explicit routes exist; barter withdrawal omits source table. |
+| Dialog/barter | Local dialog/trade engine | `dsay`, `dend`, `dbarter`, `boffer`, `btake`, `bunoffer`, `bcommit`, `bdone`, `bcancel` | Withdrawal identifies its offer table; party inventory-owner switching is not implemented in the multiplayer trade viewer. |
 | Rest | Local rest engine | `rest`, `restopt` | Explicit route exists; advances shared time by current design. |
-| Elevator | Local panel then ride | Elevator prompt then `elev` | Route exists; offer lifecycle is insufficient. |
+| Elevator | Local panel then ride | Elevator prompt then `elev` | Offer context/expiry and cancellation handling are implemented; delayed-response behavior remains to verify. |
 | Worldmap | Local worldmap input | `wmmove`, `wmenter`, `wmesc`, encounter answers | Explicit routes exist. |
-| Approach abort | Cancel local animation | `cancel` | Server handler has no gameplay client sender. |
+| Approach abort | Cancel local animation | `cancel` | Backspace sends cancellation outside chat/dialog; live pending-action cleanup remains to verify. |
 
-## Suggested verification and repair order
+## Suggested verification order
 
-1. Repair stealing/planting and the hand self-use contract; these directly confuse local mutations with authoritative actions.
-2. Centralize viewer target picking and mode dispatch across F11/isometric and combat/peacetime. Cover skill, use-on, primary action, long-click menu and door attack separately.
-3. Align combat loot and item-picker permissions end to end; require authoritative grants for requested modals.
-4. Add identity-safe container and remote inventory reconciliation, initial inventory payloads and item-instance state replication.
-5. Expire elevator offers; align hand-switch turn checks and modal mouse lifecycles.
+1. Finish party inventory/gear routing and explicitly keep party-pane switching unavailable in multiplayer barter until its separate viewer path is implemented.
+2. Verify F11 door attack target selection in both the multiplayer viewer and the singleplayer F11 path.
+3. Run two-client checks for the previously repaired high-impact paths: steal/plant, hand self-use, combat loot, carried containers, and remote inventory convergence.
+4. Exercise first-person skill/use-on targeting in combat and peacetime, then verify rejected requests do not mutate inventory, AP, or the displayed target.
+5. Test delayed elevator/turn responses and mouse-capture transitions across modal screens.
 
 Use two connected clients, including a non-host actor. Repeat relevant actions in four combinations: isometric/first-person and peacetime/combat. Compare server outcomes, acting-client state, observing-client state and post-reconnect state. For rejected requests verify that neither client inventory nor AP changes locally. Headless server tests alone cannot verify target picking or mouse capture.

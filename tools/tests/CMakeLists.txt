@@ -6,6 +6,12 @@ add_executable(client_inventory_match_test client_inventory_match_test.cc)
 target_compile_features(client_inventory_match_test PRIVATE cxx_std_17)
 target_include_directories(client_inventory_match_test PRIVATE ../../src)
 add_test(NAME client_inventory_match COMMAND client_inventory_match_test)
+
+add_executable(party_inventory_access_test party_inventory_access_test.cc)
+target_compile_features(party_inventory_access_test PRIVATE cxx_std_17)
+target_include_directories(party_inventory_access_test PRIVATE ../../src)
+add_test(NAME party_inventory_access COMMAND party_inventory_access_test)
+
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
     add_test(NAME replay_wire COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/replay_wire_test.py)

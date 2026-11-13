@@ -2580,6 +2580,7 @@ private:
         // delta: the later window opens empty, while Take All still succeeds because
         // the server inventory was correct. Removal remains lifetime-safe below by
         // unlinking now and deferring the actual free while combat replay is busy.
+        if (hasInventory && clientViewerActive()) inventoryViewerRestoreEquipmentForDelta(obj);
         if (hasInventory && obj != gDude && clientViewerActive()) {
             // Preserve existing instance pointers while reconciling every owner.
             // Unlink removals now and defer frees while a modal or replay can
@@ -2671,18 +2672,7 @@ private:
             // of them, or the wire's equipped item matches nothing in the mirror and
             // gets recreated as a phantom duplicate (the wielded weapon "appearing"
             // in the loot/use/barter left pane after an action).
-            bool invScreenOpen = (GameMode::getCurrentGameMode()
-                & (GameMode::kInventory | GameMode::kLoot | GameMode::kUseOn | GameMode::kBarter)) != 0;
             bool anyModalOpen = (GameMode::getCurrentGameMode() & kViewerModalMask) != 0;
-            if (invScreenOpen) {
-                equipmentApply(obj, gInventoryLeftHandItem, gInventoryRightHandItem, gInventoryArmor);
-                // Clear the statics now: the items are back in the mirror, and the removal
-                // below could free one the server dropped, which would dangle a static.
-                // equipmentDetach re-populates them from the reconciled flags.
-                gInventoryLeftHandItem = nullptr;
-                gInventoryRightHandItem = nullptr;
-                gInventoryArmor = nullptr;
-            }
             int origLen = inv->length;
             for (int i = 0; i < origLen; i++) {
                 if (inv->items[i].item != nullptr) {
@@ -2784,9 +2774,6 @@ private:
             // Re-detach the now server-correct equipped items back into the UI statics, so
             // the open screen's hand/armor slots render the live equip state (mirrors the
             // equipmentApply at the top of this branch).
-            if (invScreenOpen) {
-                equipmentDetach(obj, &gInventoryLeftHandItem, &gInventoryRightHandItem, &gInventoryArmor);
-            }
             // A live reconcile touched the mirror (add / remove / qty / equip-flag): flag
             // the open inventory screen to repaint its list (it otherwise repaints only on
             // user events, so an async give/drop/consume would linger visibly).
@@ -2803,6 +2790,8 @@ private:
                     obj->netId, inv->length, invItems.size());
             }
         }
+        if (hasInventory && clientViewerActive()) inventoryViewerDetachEquipmentAfterDelta(obj);
+
         // Dude HP: apply as it streams in, in or out of combat. The old combat DEFERRAL
         // ticked the bar per-blow from the decoder-mirror (playPending / tickDudeHp) — but
         // recorded attacks (the record channel) bypass that path, so a deferred bar looked
@@ -5816,6 +5805,47 @@ void clientViewerMutatePick(int dropTrait, int gainTrait)
     char cmd[48];
     snprintf(cmd, sizeof(cmd), "mutpick %d %d", dropTrait, gainTrait);
     clientViewerSheetSend(cmd);
+}
+
+void clientViewerPartyTransfer(int fromNetId, int toNetId, Object* item, int quantity)
+{
+    if (gViewerConn == nullptr || item == nullptr || item->netId <= 0 || quantity <= 0) return;
+    char command[96];
+    snprintf(command, sizeof(command), "partytransfer %d %d %d %d", fromNetId, toNetId, item->netId, quantity);
+    gViewerConn->sendLine(command);
+}
+
+void clientViewerPartyEquip(int targetNetId, int sourceNetId, Object* item)
+{
+    if (gViewerConn == nullptr || item == nullptr || item->netId <= 0) return;
+    char command[96];
+    snprintf(command, sizeof(command), "partygear %d %d %d", targetNetId, item->netId, sourceNetId);
+    gViewerConn->sendLine(command);
+}
+
+void clientViewerPartyUnequip(int targetNetId, int slot, int destinationNetId)
+{
+    if (gViewerConn == nullptr) return;
+    char command[96];
+    snprintf(command, sizeof(command), "partyungear %d %d %d", targetNetId, slot, destinationNetId);
+    gViewerConn->sendLine(command);
+}
+
+void clientViewerPartyLoot(int targetNetId, int actorNetId, Object* item, int quantity, bool take)
+{
+    if (gViewerConn == nullptr || item == nullptr || item->netId <= 0 || quantity <= 0) return;
+    char command[96];
+    snprintf(command, sizeof(command), "%s %d %d %d %d", take ? "takeid" : "putid",
+        targetNetId, item->netId, quantity, actorNetId);
+    gViewerConn->sendLine(command);
+}
+
+void clientViewerPartyTakeAll(int targetNetId, int actorNetId)
+{
+    if (gViewerConn == nullptr) return;
+    char command[64];
+    snprintf(command, sizeof(command), "takeallparty %d %d", targetNetId, actorNetId);
+    gViewerConn->sendLine(command);
 }
 
 void clientViewerSetLootTarget(int netId)
