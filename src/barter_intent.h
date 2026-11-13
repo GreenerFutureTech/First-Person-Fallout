@@ -37,6 +37,7 @@ enum BarterIntentKind {
     // Cancel out of barter (== ESC): leave the loop without a table sweep
     // (teardown handles the tables). arg/qty unused.
     BARTER_INTENT_CANCEL,
+    BARTER_INTENT_UNOFFER_NPC_ITEM,
 };
 
 struct BarterIntent {

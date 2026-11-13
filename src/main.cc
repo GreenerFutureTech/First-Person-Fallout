@@ -106,6 +106,34 @@ static bool gViewerFirstPersonActionMenuShown = false;
 
 static int mainHeadlessProbe();
 
+// The viewer has its own input loop; modal mouse ownership must be restored
+// independently of the singleplayer gameHandleKey dispatcher.
+class ViewerMouseReleaseScope {
+public:
+    ViewerMouseReleaseScope()
+        : captured_(tileFirstPersonPreviewIsEnabled() && mouseDeviceUsesRelativeMode())
+    {
+        if (captured_) {
+            mouseDeviceSetRelativeModeForced(false);
+            tileFirstPersonPreviewSetCursorCaptured(false);
+            mouseShowCursor();
+            mouseResetButtonState();
+        }
+    }
+    ~ViewerMouseReleaseScope()
+    {
+        if (captured_ && tileFirstPersonPreviewIsEnabled()
+            && mouseDeviceSetRelativeModeForced(true)) {
+            tileFirstPersonPreviewSetCursorCaptured(true);
+            mouseHideCursor();
+            mouseResetButtonState();
+        }
+    }
+
+private:
+    bool captured_;
+};
+
 static void viewerArmPendingLoot(ClientConnection& conn, int netId);
 
 static void viewerPollPendingLoot(ClientConnection& conn);
@@ -1101,7 +1129,7 @@ static void viewerPollPendingLoot(ClientConnection& conn)
         gViewerPendingLootNetId = 0;
         return;
     }
-    if (granted != 0 || objectGetDistanceBetween(gDude, container) <= 1) {
+    if (granted != 0) {
         gViewerPendingLootNetId = 0;
         // The client's belief at the moment it decides to open the screen, to be read
         // against the server's "not adjacent" line (server_control.cc). If the tiles
@@ -1212,6 +1240,7 @@ static void viewerSendActionMenuVerb(ClientConnection& conn, int menuItem, Objec
         // SNEAK is a self-toggle (no target) — deferred; the seven targeted skills
         // route to `skill <netId> <skillId>`.
         int skill = -1;
+        ViewerMouseReleaseScope mouseRelease;
         switch (skilldexOpen()) {
         case SKILLDEX_RC_LOCKPICK: skill = SKILL_LOCKPICK; break;
         case SKILLDEX_RC_STEAL: skill = SKILL_STEAL; break;
@@ -1233,16 +1262,13 @@ static void viewerSendActionMenuVerb(ClientConnection& conn, int menuItem, Objec
         conn.sendLine(cmd);
         break;
     case GAME_MOUSE_ACTION_MENU_ITEM_INVENTORY:
-        // Use-an-inventory-item-ON the target (the vanilla backpack action). Open the
-        // local use-item-on picker modal (pure UI over the dude's mirror); its picked-
-        // item leaf sends `useitemon <netId> <pid>` and skips the local action
-        // (inventory_ui.cc clientViewerActive gate). The service ticker keeps the wire
-        // pumping inside the modal + force-closes on combat entry / rebaseline (kUseOn ∈
-        // kViewerModalMask). Out-of-combat only (the server drops the verb in combat —
-        // in-combat item-use needs the AP barrier, a later slice). Reap deferred frees
-        // after; a rebaseline buffered while open drains next main-loop iteration.
-        if (!conn.inCombat()) {
+        // The picker is local UI over the mirror. The server's useitemonid
+        // executor owns approach, item identity, turn validation and AP.
+        {
+            ViewerMouseReleaseScope mouseRelease;
+            conn.setCombatModalOpen(conn.inCombat());
             inventoryOpenUseItemOn(target);
+            conn.setCombatModalOpen(false);
             clientViewerFlushDeferredItemFrees();
         }
         break;
@@ -1307,23 +1333,51 @@ static void viewerSendPrimaryVerb(ClientConnection& conn, Object* target)
     }
 }
 
-static void viewerHandleFirstPersonClick(ClientConnection& conn, int screenX, int screenY)
+static int viewerSkillForMode(int mode);
+static Object* viewerPickFirstPersonActionTargetAt(int screenX, int screenY);
+
+static bool viewerHandleFirstPersonClick(ClientConnection& conn, int screenX, int screenY)
 {
-    if (conn.inCombat()) {
+    bool sent = false;
+    const int mode = gameMouseGetMode();
+    const int skill = viewerSkillForMode(mode);
+    if (skill != -1 || mode == GAME_MOUSE_MODE_USE_CROSSHAIR) {
+        Object* target = viewerPickFirstPersonActionTargetAt(screenX, screenY);
+        if (target != nullptr && target->netId > 0) {
+            if (skill != -1) {
+                char cmd[48];
+                snprintf(cmd, sizeof(cmd), "skill %d %d", target->netId, skill);
+                conn.sendLine(cmd);
+                sent = true;
+            } else {
+                Object* item = nullptr;
+                if (interfaceGetActiveItem(&item) != -1 && item != nullptr) {
+                    clientViewerUseItemOn(target->netId, item->netId);
+                    sent = item->netId > 0;
+                }
+            }
+        }
+        gameMouseSetCursor(MOUSE_CURSOR_NONE);
+        gameMouseSetMode(GAME_MOUSE_MODE_MOVE);
+        return sent;
+    }
+
+    if (conn.inCombat() && mode == GAME_MOUSE_MODE_CROSSHAIR) {
         Object* critter = tileFirstPersonPreviewPickCritterAt(screenX, screenY);
         if (critter != nullptr) {
-            if (!critterIsDead(critter)
-                && gameMouseGetMode() == GAME_MOUSE_MODE_CROSSHAIR) {
+            if (!critterIsDead(critter)) {
                 _combat_attack_this(critter);
+                sent = clientViewerTakeAttackCommitted();
             }
-            return;
+            return sent;
         }
 
         Object* door = tileFirstPersonPreviewPickDoorAt(screenX, screenY);
-        if (door != nullptr && door->netId > 0) {
-            viewerSendSceneryUse(conn, door);
+        if (door != nullptr) {
+            _combat_attack_this(door);
+            sent = clientViewerTakeAttackCommitted();
         }
-        return;
+        return sent;
     }
 
     Object* critter = tileFirstPersonPreviewPickCritterAt(screenX, screenY);
@@ -1331,23 +1385,26 @@ static void viewerHandleFirstPersonClick(ClientConnection& conn, int screenX, in
         if (critterIsDead(critter)) {
             if (critter->netId > 0) {
                 viewerArmPendingLoot(conn, critter->netId);
+                sent = true;
             }
-            return;
+            return sent;
         }
         if (_obj_action_can_talk_to(critter)) {
             if (critter->netId > 0) {
                 char cmd[48];
                 snprintf(cmd, sizeof(cmd), "talk %d", critter->netId);
                 conn.sendLine(cmd);
+                sent = true;
             }
-            return;
+            return sent;
         }
     }
 
     Object* door = tileFirstPersonPreviewPickDoorAt(screenX, screenY);
     if (door != nullptr && door->netId > 0) {
         viewerSendSceneryUse(conn, door);
-        return;
+        sent = true;
+        return sent;
     }
 
     Object* object = tileFirstPersonPreviewPickObjectAt(screenX, screenY);
@@ -1355,14 +1412,15 @@ static void viewerHandleFirstPersonClick(ClientConnection& conn, int screenX, in
         const ObjectType objectType = FrmId(object).objectType();
         if (objectType == OBJ_TYPE_ITEM || _obj_action_can_use(object)) {
             viewerSendPrimaryVerb(conn, object);
-            return;
+            sent = true;
+            return sent;
         }
     }
 
     if (!tileFirstPersonPreviewIsCursorCaptured()) {
         Rect rect;
         if (windowGetRect(gIsoWindow, &rect) != 0) {
-            return;
+            return sent;
         }
         const int tile = tileFirstPersonPreviewPickGroundTileAt(
             screenX - rect.left, screenY - rect.top);
@@ -1372,10 +1430,13 @@ static void viewerHandleFirstPersonClick(ClientConnection& conn, int screenX, in
                 reg_anim_clear(gDude);
             }
             char cmd[32];
-            snprintf(cmd, sizeof(cmd), "mv %d %d", tile, settings.preferences.running ? 1 : 0);
+            snprintf(cmd, sizeof(cmd), "%s %d %d", conn.inCombat() ? "cmove" : "mv",
+                tile, settings.preferences.running ? 1 : 0);
             conn.sendLine(cmd);
+            sent = true;
         }
     }
+    return sent;
 }
 
 static Object* viewerPickFirstPersonActionTargetAt(int screenX, int screenY)
@@ -1817,6 +1878,7 @@ static int mainClientViewer(const char* connectSpec)
     // pending hand switch (RTT latch) OR the local replay of our own draw animation.
     bool oocBusy = false;
     bool handSwitchPending = false;
+    int handSwitchPreviousHand = HAND_LEFT;
     unsigned int handSwitchSince = 0;
 
     bool previousFirstPersonCursorCaptured = tileFirstPersonPreviewIsCursorCaptured();
@@ -1893,7 +1955,7 @@ static int mainClientViewer(const char* connectSpec)
 
         // Pump input so the window stays responsive and ESC quits. No gameplay keys
         // or clicks are dispatched (gameHandleKey is deliberately NOT called), so the
-        // viewer can never mutate the sim; the standard mouse pump still runs harmlessly.
+        // viewer routes gameplay through authoritative commands.
         int keyCode = inputGetInput();
         gameHandleFirstPersonPreviewInput(keyCode);
         if (tileFirstPersonPreviewIsEnabled()) {
@@ -1925,6 +1987,11 @@ static int mainClientViewer(const char* connectSpec)
             if (gViewerFirstPersonLeftClickStartTime != 0
                 && leftButtonDown
                 && !gViewerFirstPersonActionMenuShown
+                && !oocBusy && !clientDialogActive() && !clientSayActive()
+                && gameMouseGetMode() != GAME_MOUSE_MODE_CROSSHAIR
+                && viewerSkillForMode(gameMouseGetMode()) == -1
+                && gameMouseGetMode() != GAME_MOUSE_MODE_USE_CROSSHAIR
+                && (!conn.inCombat() || (conn.myTurn() && !combatBusy))
                 && getTicksSince(gViewerFirstPersonLeftClickStartTime) >= BUTTON_REPEAT_TIME) {
                 Rect isoWindowRect;
                 if (windowGetRect(gIsoWindow, &isoWindowRect) == 0
@@ -1950,8 +2017,8 @@ static int mainClientViewer(const char* connectSpec)
                             : !oocBusy)
                     && !clientDialogActive() && !clientSayActive()
                     && windowGetAtPoint(clickX, clickY) == gIsoWindow) {
-                    viewerHandleFirstPersonClick(conn, clickX, clickY);
-                    if (clientViewerTakeAttackCommitted()) {
+                    bool sent = viewerHandleFirstPersonClick(conn, clickX, clickY);
+                    if (conn.inCombat() && sent) {
                         actionPending = true;
                         actionPendingSince = getTicks();
                     }
@@ -2053,6 +2120,7 @@ static int mainClientViewer(const char* connectSpec)
             // directly instead of opening Options, because a viewer must not offer local
             // Save/Load — the server owns the state. Confirming sets
             // _game_user_wants_to_quit, which the loop condition picks up next iteration.
+            ViewerMouseReleaseScope mouseRelease;
             showQuitConfirmationDialog();
         } else if (keyCode == KEY_LOWERCASE_O || keyCode == KEY_UPPERCASE_O) {
             // The HUD Options button posts O. Save/Load belong to the dedicated
@@ -2061,10 +2129,54 @@ static int mainClientViewer(const char* connectSpec)
             // such as autorun, sound, brightness, text speed, and mouse sensitivity.
             // kPreferences is in kViewerModalMask, so the wire continues pumping
             // inside this blocking vanilla dialog and combat/map changes can close it.
+            ViewerMouseReleaseScope mouseRelease;
             doPreferences(false);
         }
 
         if (!clientDialogActive()) {
+        if (!clientSayActive() && !sayConsumedKey) {
+            if ((keyCode == KEY_LOWERCASE_J || keyCode == KEY_UPPERCASE_J)
+                && tileFirstPersonPreviewIsEnabled() && !oocBusy
+                && (!conn.inCombat() || (conn.myTurn() && !combatBusy))) {
+                int x, y;
+                mouseGetPosition(&x, &y);
+                if (tileFirstPersonPreviewIsCursorCaptured()) {
+                    Rect rect;
+                    if (windowGetRect(gIsoWindow, &rect) == 0) {
+                        x = rect.left + windowGetWidth(gIsoWindow) / 2;
+                        y = rect.top + windowGetHeight(gIsoWindow) / 2;
+                    }
+                }
+                viewerShowFirstPersonActionMenu(conn, viewerPickFirstPersonActionTargetAt(x, y), x, y);
+                keyCode = -1;
+            } else if ((keyCode == KEY_LOWERCASE_Z || keyCode == KEY_UPPERCASE_Z) && !conn.inCombat()) {
+                ViewerMouseReleaseScope mouseRelease;
+                pipboyOpen(PIPBOY_OPEN_INTENT_REST);
+                keyCode = -1;
+            }
+            if (keyCode == KEY_TAB && !clientDialogActive()) {
+                ViewerMouseReleaseScope mouseRelease;
+                automapShow(true, false);
+                keyCode = -1;
+            } else if (keyCode == KEY_LOWERCASE_M || keyCode == KEY_UPPERCASE_M) {
+                gameMouseCycleMode();
+                keyCode = -1;
+            } else if (keyCode == KEY_HOME) {
+                tileSetCenter(gDude->tile, TILE_SET_CENTER_REFRESH_WINDOW);
+                keyCode = -1;
+            } else if (keyCode == KEY_COMMA || keyCode == KEY_LESS
+                || keyCode == KEY_DOT || keyCode == KEY_GREATER) {
+                conn.sendLine(keyCode == KEY_COMMA || keyCode == KEY_LESS ? "rot -1" : "rot 1");
+                keyCode = -1;
+            }
+            if (keyCode == KEY_BACKSPACE) {
+                conn.sendLine("cancel");
+                gViewerPendingLootNetId = 0;
+                gameMouseSetMode(GAME_MOUSE_MODE_MOVE);
+                keyCode = -1;
+            }
+        }
+
 
         // The normal game loop routes F11 movement through gameHandleKey. The
         // viewer owns a separate input loop, so forward the same camera-relative
@@ -2172,8 +2284,12 @@ static int mainClientViewer(const char* connectSpec)
             // refusal (server busy) the flip is reverted below. In combat the existing
             // combatBusy gate applies + the server queues it for our turn; out of combat the
             // new oocBusy gate applies. Blocked while already busy (no spamming the swap).
-            bool busy = conn.inCombat() ? combatBusy : oocBusy;
+            bool busy = conn.inCombat() ? (combatBusy || !conn.myTurn()) : oocBusy;
             if (!busy) {
+                handSwitchPreviousHand = interfaceGetCurrentHand();
+                clientViewerTakeRefusal();
+                handSwitchPending = true;
+                handSwitchSince = getTicks();
                 interfaceBarSwapHands(false);
                 int newHand = interfaceGetCurrentHand();
                 char cmd[16];
@@ -2183,10 +2299,6 @@ static int mainClientViewer(const char* connectSpec)
                     actionPending = true;
                     actionPendingSince = getTicks();
                     conn.recomputeCombatOutlines();
-                } else {
-                    handSwitchPending = true;
-                    handSwitchSince = getTicks();
-                    clientViewerTakeRefusal(); // clear any stale refusal edge before we wait
                 }
             }
         } else if (keyCode == KEY_LOWERCASE_G || keyCode == KEY_UPPERCASE_G) {
@@ -2204,7 +2316,8 @@ static int mainClientViewer(const char* connectSpec)
                     actionPendingSince = getTicks();
                 }
             }
-        } else if (keyCode == -20) {
+        } else if (keyCode == -20 && !oocBusy
+            && (!conn.inCombat() || (conn.myTurn() && !combatBusy))) {
             // Left-click the weapon/attack slot (interface.cc:505). Vanilla
             // (_intface_use_item) branches on the slot's CYCLED action: RELOAD reloads
             // (out of combat WITHOUT entering combat, interface.cc:1322), any attack
@@ -2253,7 +2366,7 @@ static int mainClientViewer(const char* connectSpec)
                     // + heal, so send the verb and skip vanilla's local objectUseItem;
                     // in combat the server queues it for our own turn and charges the AP.
                     char cmd[32];
-                    snprintf(cmd, sizeof(cmd), "useitem %d", handItem->pid);
+                    snprintf(cmd, sizeof(cmd), "handuse %d", handItem->netId);
                     conn.sendLine(cmd);
                 }
                 // No third case on purpose — see above.
@@ -2323,6 +2436,7 @@ static int mainClientViewer(const char* connectSpec)
             //
             // Allowed in combat: vanilla's character screen is free, and kEditor is
             // already in kViewerModalMask so the wire keeps pumping underneath.
+            ViewerMouseReleaseScope mouseRelease;
             characterEditorShowViewOnly();
             // Uniform with 'I'/'S': reap deferred frees, let the main loop drain a
             // blob that buffered while the screen blocked.
@@ -2353,6 +2467,7 @@ static int mainClientViewer(const char* connectSpec)
                 showDialogBox(title, nullptr, 0, 192, 116, _colorTable[32328], nullptr, _colorTable[32328], 0);
             } else {
                 soundPlayFile("ib1p1xx1");
+                ViewerMouseReleaseScope mouseRelease;
                 pipboyOpen(PIPBOY_OPEN_INTENT_UNSPECIFIED);
                 // Uniform with 'I'/'C'/'S': reap deferred frees, let the main loop drain a
                 // blob that buffered while the screen blocked.
@@ -2368,6 +2483,7 @@ static int mainClientViewer(const char* connectSpec)
             // free — vanilla prices the inventory screen, not this one — and the
             // skill it arms is answered honestly on use: msg 902 for the seven
             // combat-forbidden skills, a real toggle for Sneak.
+            ViewerMouseReleaseScope mouseRelease;
             int rc = skilldexOpen();
             int mode = viewerSkillModeForSkilldexRc(rc);
             // The ticker may have applied dude-inv deltas while the modal blocked — reap
@@ -2497,7 +2613,7 @@ static int mainClientViewer(const char* connectSpec)
                     }
                     if (targetObj != nullptr && targetObj->netId > 0 && handItem != nullptr) {
                         char cmd[48];
-                        snprintf(cmd, sizeof(cmd), "useitemon %d %d", targetObj->netId, handItem->pid);
+                        snprintf(cmd, sizeof(cmd), "useitemonid %d %d", targetObj->netId, handItem->netId);
                         conn.sendLine(cmd);
                     }
                     // Back to MOVE either way, exactly as vanilla drops the cursor after a
@@ -2618,17 +2734,18 @@ static int mainClientViewer(const char* connectSpec)
         // no-modal-open point as the inventory grant, because the panel runs a blocking
         // input loop that must not be entered from inside pump() (client_net.h).
         //
-        // The panel is the only part of an elevator ride the client owns: it answers
-        // with a BUTTON INDEX and the server resolves what that button means against
-        // its own destination table, then rides the whole party there. Escaping sends
-        // nothing, which is exactly vanilla's cancel.
+        // The client answers with a button index or cancels its outstanding offer.
+        // The server validates the offer and resolves the destination.
         {
             int elevator;
             int startLevel;
             if (conn.takeElevatorPrompt(&elevator, &startLevel)) {
+                ViewerMouseReleaseScope mouseRelease;
                 int level = elevatorPickLevel(elevator, startLevel);
                 if (level >= 0) {
                     clientViewerElevatorRide(level);
+                } else {
+                    conn.sendLine("elevcancel");
                 }
             }
         }
@@ -2659,6 +2776,7 @@ static int mainClientViewer(const char* connectSpec)
         {
             bool usingScanner = false;
             if (conn.takeAutomapOpen(&usingScanner)) {
+                ViewerMouseReleaseScope mouseRelease;
                 automapShow(true, usingScanner);
                 clientViewerFlushDeferredItemFrees();
             }
@@ -2774,7 +2892,7 @@ static int mainClientViewer(const char* connectSpec)
         // that outlasts the actionPending round-trip timeout.
         combatBusy = conn.inCombat()
             && (!conn.myTurn() || conn.combatPresentationBusy() || actionPending
-                || clientAnimActiveFor(gDude));
+                || clientAnimActiveFor(gDude) || handSwitchPending);
 
         // Feature A: out-of-combat input block (the twin of combatBusy). Resolve the
         // pending hand switch first — a refusal (server busy) flips the local hand back;
@@ -2782,7 +2900,9 @@ static int mainClientViewer(const char* connectSpec)
         // draw has streamed and animationIsBusy(gDude) keeps the block for its duration.
         if (handSwitchPending) {
             if (clientViewerTakeRefusal()) {
-                interfaceBarSwapHands(false); // server rejected the switch — undo the flip
+                if (interfaceGetCurrentHand() != handSwitchPreviousHand) {
+                    interfaceBarSwapHands(false);
+                } // server rejected the switch — undo the flip
                 handSwitchPending = false;
             } else if (getTicksBetween(getTicks(), handSwitchSince) >= kActionPendingTimeoutMs) {
                 handSwitchPending = false;
@@ -2841,9 +2961,6 @@ static int mainClientViewer(const char* connectSpec)
         // is a pure mirror, so just repaint the whole iso window from current object
         // state each frame — simple and complete.
         tileWindowRefresh();
-        // Picking flushes the queued F11 render to rebuild actor hit targets.
-        // Defer a changed hover marker to the next frame to avoid rendering twice.
-        gameFirstPersonPreviewUpdateHover(false);
         tileFirstPersonPreviewFlushRefresh();
 
         renderPresent();

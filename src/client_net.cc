@@ -1,3 +1,4 @@
+#include "client_inventory_match.h"
 #include "client_net.h"
 
 #include <cstdio>
@@ -1888,29 +1889,6 @@ private:
     }
 
     // Find the mirror slot a wire stack refers to. netId is the real identity;
-    // pid is a fallback for stacks that have not been bound yet (pre-adoption
-    // mirrors, and any path that still ships pid alone). `claimed` keeps
-    // duplicate pids mapping 1:1 instead of all collapsing onto one slot.
-    int matchInventorySlot(Inventory* inv, int origLen, std::vector<char>& claimed,
-        int wantNetId, int wantPid)
-    {
-        if (wantNetId != 0) {
-            for (int i = 0; i < origLen; i++) {
-                if (!claimed[i] && inv->items[i].item != nullptr
-                    && inv->items[i].item->netId == wantNetId) {
-                    return i;
-                }
-            }
-        }
-        for (int i = 0; i < origLen; i++) {
-            if (!claimed[i] && inv->items[i].item != nullptr
-                && inv->items[i].item->pid == wantPid) {
-                return i;
-            }
-        }
-        return -1;
-    }
-
     void seedNetMap()
     {
         // Populate-only: _net/_adoptTransients are now cleared at the TOP of applyBlob's
@@ -2332,7 +2310,7 @@ private:
         // default and a dry weapon still read as full.
         struct WireItem {
             int netId; int pid; int quantity; unsigned int flags;
-            int ammoQuantity; int ammoTypePid;
+            int ammoQuantity; int ammoTypePid; int instanceFlags;
             std::vector<WireItem> contents;
         };
         std::vector<WireItem> invItems;
@@ -2353,6 +2331,7 @@ private:
                     wi.flags = (unsigned int)r.i32();
                     wi.ammoQuantity = r.i32();
                     wi.ammoTypePid = r.i32();
+                    wi.instanceFlags = r.i32();
                     if (depth < kMaxWireInventoryDepth) {
                         self(self, wi.contents, depth + 1);
                     }
@@ -2372,6 +2351,13 @@ private:
         int newPid = -1;
         bool hasPid = (mask & OBJECT_DELTA_PID) != 0;
         if (hasPid) newPid = r.i32();
+        bool hasInstance = (mask & OBJECT_DELTA_INSTANCE) != 0;
+        int instanceFlags = 0, instanceValue = 0, instanceAux = 0;
+        if (hasInstance) {
+            instanceFlags = r.i32();
+            instanceValue = r.i32();
+            instanceAux = r.i32();
+        }
 
         if (hasFid && getenv("F2_TRACE_EVENTS") != nullptr) {
             Object* traced = lookup(netId);
@@ -2415,7 +2401,7 @@ private:
             std::vector<char> claimed(originalLength, 0);
             for (const WireItem& wi : wireItems) {
                 if (wi.pid < 0) continue;
-                int slot = matchInventorySlot(inventory, originalLength, claimed, wi.netId, wi.pid);
+                int slot = clientInventoryMatchSlot(inventory, originalLength, claimed, wi.netId, wi.pid);
                 Object* item = nullptr;
                 int quantity = wi.quantity > 0 ? wi.quantity : 1;
                 if (slot >= 0) {
@@ -2426,6 +2412,7 @@ private:
                     item->flags = (item->flags & ~(OBJECT_IN_ANY_HAND | OBJECT_WORN))
                         | static_cast<ObjectFlags>(wi.flags & (OBJECT_IN_ANY_HAND | OBJECT_WORN));
                     applyWireItemAmmo(item, wi.ammoQuantity, wi.ammoTypePid);
+                    item->data.flags = wi.instanceFlags;
                     adoptItemNetId(item, wi.netId);
                 } else {
                     if (objectCreateWithProtoId(&item, ProtoId(wi.pid)) != 0 || item == nullptr) {
@@ -2434,13 +2421,16 @@ private:
                     _obj_disconnect(item, nullptr);
                     item->flags |= static_cast<ObjectFlags>(wi.flags & (OBJECT_IN_ANY_HAND | OBJECT_WORN));
                     applyWireItemAmmo(item, wi.ammoQuantity, wi.ammoTypePid);
+                    item->data.flags = wi.instanceFlags;
                     adoptItemNetId(item, wi.netId);
+                    item->flags |= OBJECT_WORN;
                     if (itemAdd(owner, item, quantity) != 0) {
                         forgetObjectRefs(item);
                         objectDestroy(item, nullptr);
                         continue;
                     }
                 }
+                objectApplyWireFlags(item, wi.flags);
                 self(self, item, wi.contents, depth + 1);
             }
 
@@ -2455,7 +2445,7 @@ private:
             for (size_t i = 0; i < removed.size(); i++) {
                 itemRemove(owner, removed[i], removedQuantities[i]);
                 forgetObjectRefs(removed[i]);
-                if (inventoryModalOpen || _inCombat) {
+                if (inventoryModalOpen || _inCombat || combatPresentationBusy()) {
                     gDudeDeferredItemFrees.push_back(removed[i]);
                 } else {
                     objectDestroy(removed[i], nullptr);
@@ -2469,6 +2459,17 @@ private:
         // its target before its turn presents; the held values land verbatim when the
         // replay finishes. Numeric fields are never held — hp/ap/etc. never wait on
         // pixels.
+        // An instance-only OPEN change must also survive replay deferral.
+        if (hasInstance && ProtoId(hasPid ? newPid : obj->pid).objectType() == OBJ_TYPE_SCENERY) {
+            Proto* proto = nullptr;
+            if (protoGetProto(ProtoId(hasPid ? newPid : obj->pid), &proto) == 0
+                && proto->scenery.type == SCENERY_TYPE_DOOR) {
+                if (!hasFlags) flags = obj->flags;
+                flags = (instanceValue & DOOR_FLAG_OPEN) != 0
+                    ? flags | OBJECT_OPEN_DOOR : flags & ~OBJECT_OPEN_DOOR;
+                hasFlags = true;
+            }
+        }
         bool held = clientViewerActive()
             && clientCombatAnimDeferDelta(obj, hasFid, fid, hasFlags, flags, hasRot, rot);
         if (hasFid && getenv("F2_TRACE_EVENTS") != nullptr && obj == gDude) {
@@ -2515,6 +2516,24 @@ private:
                 fprintf(stderr, "[pid] net=%d pid %d -> %d\n", netId, obj->pid, newPid);
             }
             obj->pid = newPid;
+        }
+        if (hasInstance && ProtoId(obj).objectType() != OBJ_TYPE_CRITTER) {
+            obj->data.flags = instanceFlags;
+            int value = instanceValue;
+            if (ProtoId(obj).objectType() == OBJ_TYPE_SCENERY) {
+                Proto* proto = nullptr;
+                if (protoGetProto(obj, &proto) == 0 && proto->scenery.type == SCENERY_TYPE_DOOR) {
+                    if (held) {
+                        value = (value & ~DOOR_FLAG_OPEN)
+                            | (obj->data.scenery.door.openFlags & DOOR_FLAG_OPEN);
+                    }
+                    if (value != obj->data.scenery.door.openFlags) {
+                        tileFirstPersonPreviewRequestRefresh();
+                    }
+                }
+            }
+            obj->data.item.weapon.ammoQuantity = value;
+            obj->data.item.weapon.ammoTypePid = instanceAux;
         }
         // FRAME: scripted art-frame swaps (dug graves, opened doors/containers, levers)
         // that never streamed before — only fixed on a map reload. Apply to non-critters
@@ -2563,60 +2582,39 @@ private:
         // delta: the later window opens empty, while Take All still succeeds because
         // the server inventory was correct. Removal remains lifetime-safe below by
         // unlinking now and deferring the actual free while combat replay is busy.
-        bool plainContainer = obj != gDude && ProtoId(obj).objectType() != OBJ_TYPE_CRITTER;
-        bool deadCritter = obj != gDude && ProtoId(obj).objectType() == OBJ_TYPE_CRITTER
-            && (critterIsDead(obj)
-                || (hasResults && (results & DAM_DEAD) != 0)
-                || (hasHp && hp <= 0));
-        if (hasInventory && obj != gDude
-            && clientViewerActive()
-            && (plainContainer
-                || deadCritter
-                || (gViewerLootTargetNetId != 0 && obj->netId == gViewerLootTargetNetId)
-                // The thief of an open steal session: another player's pack, drawn
-                // in the left panel of everyone's screen. See the declaration.
-                || (gViewerStealThiefNetId != 0 && obj->netId == gViewerStealThiefNetId)
-                // The victim of an open steal session: the right panel, minus the
-                // gear the server detached. See the declaration.
-                || (gViewerStealTargetNetId != 0 && obj->netId == gViewerStealTargetNetId))) {
-            // The container/corpse the viewer is actively LOOTING: reconcile its FULL
-            // top-level contents (qty + ADD + REMOVE), so items taken out disappear and
-            // items put in appear live in the right-hand panel. This is the dude
-            // reconcile pattern (below) applied to the loot target. It is SAFE to
-            // free/recreate here — unlike the generic non-dude path, a looted container/
-            // corpse is out of combat, so no in-flight attack replay references its
-            // items (the exact double-free hazard that keeps that path equip-flags-only).
-            // Removed items are deferred-freed while the loot modal holds pointers
-            // (flushed on close), mirroring the dude removal. Item identity is by pid
-            // (v1); exact-instance targeting + the concurrent-freer race are the banked
-            // item-instance-id / container-deferred-free co-op work.
+        if (hasInventory && obj != gDude && clientViewerActive()) {
+            // Preserve existing instance pointers while reconciling every owner.
+            // Unlink removals now and defer frees while a modal or replay can
+            // still hold them, including for living remote actors.
             Inventory* inv = &obj->data.inventory;
             int origLen = inv->length;
             std::vector<char> claimed(origLen, 0);
             for (const WireItem& wi : invItems) {
                 if (wi.pid < 0) continue;
                 int qty = wi.quantity > 0 ? wi.quantity : 1;
-                int m = -1;
-                for (int i = 0; i < origLen; i++) {
-                    if (!claimed[i] && inv->items[i].item != nullptr
-                        && inv->items[i].item->pid == wi.pid) {
-                        m = i;
-                        break;
-                    }
-                }
+                int m = clientInventoryMatchSlot(inv, origLen, claimed, wi.netId, wi.pid);
                 if (m >= 0) {
                     claimed[m] = 1;
                     inv->items[m].quantity = qty;
+                    applyWireItemPid(inv->items[m].item, wi.pid);
+                    inv->items[m].item->flags = (inv->items[m].item->flags & ~OBJECT_EQUIPPED)
+                        | static_cast<ObjectFlags>(wi.flags & OBJECT_EQUIPPED);
                     applyWireItemAmmo(inv->items[m].item, wi.ammoQuantity, wi.ammoTypePid);
+                    inv->items[m].item->data.flags = wi.instanceFlags;
+                    objectApplyWireFlags(inv->items[m].item, wi.flags);
                     adoptItemNetId(inv->items[m].item, wi.netId);
                     reconcileNestedInventory(reconcileNestedInventory, inv->items[m].item, wi.contents, 1);
                 } else {
                     Object* item = nullptr;
                     if (objectCreateWithProtoId(&item, ProtoId(wi.pid)) == 0 && item != nullptr) {
                         _obj_disconnect(item, nullptr); // inventory-only, not in the world
+                        item->flags |= static_cast<ObjectFlags>(wi.flags & OBJECT_EQUIPPED);
                         applyWireItemAmmo(item, wi.ammoQuantity, wi.ammoTypePid);
+                        item->data.flags = wi.instanceFlags;
                         adoptItemNetId(item, wi.netId);
+                        item->flags |= OBJECT_WORN;
                         if (itemAdd(obj, item, qty) == 0) {
+                            objectApplyWireFlags(item, wi.flags);
                             reconcileNestedInventory(reconcileNestedInventory, item, wi.contents, 1);
                         } else {
                             forgetObjectRefs(item);
@@ -2640,7 +2638,7 @@ private:
                 // now or is deferred, because a deferred item is already unlinked and
                 // must not be reachable by netId in the meantime either.
                 forgetObjectRefs(toRemove[k]);
-                if (anyModalOpen || _inCombat) {
+                if (anyModalOpen || _inCombat || combatPresentationBusy()) {
                     gDudeDeferredItemFrees.push_back(toRemove[k]);
                 } else {
                     objectDestroy(toRemove[k], nullptr);
@@ -2652,45 +2650,6 @@ private:
             // screen repaint some OTHER container's changes as if they were its own.
             if (gViewerLootTargetNetId != 0 && obj->netId == gViewerLootTargetNetId) {
                 gLootTargetInvDirty = true;
-            }
-        } else if (hasInventory && obj != gDude) {
-            // Reconcile EQUIP FLAGS in place — do NOT free/recreate items. An AI critter
-            // that wields its gun mid-fight (the case that matters) already carries that
-            // weapon in its mirror inventory from the join blob; the wield only moves the
-            // in-hand flag from one item to another. Rebuilding by freeing the old item
-            // objects double-frees when an in-flight attack replay's reg_anim still
-            // references the weapon (it fires, then a same-object delta arrives mid-
-            // animation) — the object-lifetime hazard behind the observed crash. So:
-            // clear every item's equip flags, then re-assert the wire's equip flags on
-            // the matching pid. critterGetWeaponForHitMode scans for the in-hand flag, so
-            // this alone fixes the resolved weapon. (Not handled here, acceptable v1: a
-            // weapon the mirror is missing entirely, exact ammo, and items the server
-            // removed — none affect the attack animation.)
-            Inventory* inv = &obj->data.inventory;
-            for (int i = 0; i < inv->length; i++) {
-                if (inv->items[i].item != nullptr) {
-                    inv->items[i].item->flags &= ~(OBJECT_IN_ANY_HAND | OBJECT_WORN);
-                }
-            }
-            for (const WireItem& wi : invItems) {
-                if (wi.pid < 0) continue;
-                unsigned int equip = wi.flags & (OBJECT_IN_ANY_HAND | OBJECT_WORN);
-                // Apply ammo to the matching item even when it is not equipped — a
-                // remote critter's carried spare weapon can change ammo too. (This
-                // branch stays equip-flags-only for item lifecycle: no free/recreate,
-                // just scalar writes on items the mirror already holds.)
-                for (int i = 0; i < inv->length; i++) {
-                    if (inv->items[i].item != nullptr && inv->items[i].item->pid == wi.pid) {
-                        if (equip != 0) inv->items[i].item->flags |= static_cast<ObjectFlags>(equip);
-                        applyWireItemAmmo(inv->items[i].item, wi.ammoQuantity, wi.ammoTypePid);
-                        break;
-                    }
-                }
-            }
-            if (getenv("F2_TRACE_EVENTS") != nullptr) {
-                Object* rh = critterGetWeaponForHitMode(obj, HIT_MODE_RIGHT_WEAPON_PRIMARY);
-                fprintf(stderr, "[inv-apply] net=%d items=%d rhandPid=%d\n",
-                    obj->netId, inv->length, rh != nullptr ? rh->pid : -1);
             }
         } else if (hasInventory && clientViewerActive()) {
             // DUDE live inventory (player-UI Slice 2/3b). The dude's inventory delta IS
@@ -2747,7 +2706,7 @@ private:
                 if (wi.pid < 0) continue;
                 unsigned int equip = wi.flags & (OBJECT_IN_ANY_HAND | OBJECT_WORN);
                 int qty = wi.quantity > 0 ? wi.quantity : 1;
-                int m = matchInventorySlot(inv, origLen, claimed, wi.netId, wi.pid);
+                int m = clientInventoryMatchSlot(inv, origLen, claimed, wi.netId, wi.pid);
                 if (m >= 0) {
                     claimed[m] = 1;
                     inv->items[m].quantity = qty;
@@ -2756,6 +2715,8 @@ private:
                     // explosive that was armed) — see applyWireItemPid.
                     applyWireItemPid(inv->items[m].item, wi.pid);
                     applyWireItemAmmo(inv->items[m].item, wi.ammoQuantity, wi.ammoTypePid);
+                    inv->items[m].item->data.flags = wi.instanceFlags;
+                    objectApplyWireFlags(inv->items[m].item, wi.flags);
                     // Adopt the authoritative netId: a stack the mirror created locally on
                     // an earlier delta has none until the next rebaseline, which would keep
                     // it unaddressable and force the pid fallback forever.
@@ -2767,8 +2728,11 @@ private:
                         _obj_disconnect(item, nullptr); // inventory-only, not in the world
                         item->flags |= static_cast<ObjectFlags>(equip);
                         applyWireItemAmmo(item, wi.ammoQuantity, wi.ammoTypePid);
+                        item->data.flags = wi.instanceFlags;
                         adoptItemNetId(item, wi.netId);
+                        item->flags |= OBJECT_WORN;
                         if (itemAdd(obj, item, qty) == 0) {
+                            objectApplyWireFlags(item, wi.flags);
                             reconcileNestedInventory(reconcileNestedInventory, item, wi.contents, 1);
                         } else {
                             forgetObjectRefs(item);
@@ -2812,7 +2776,7 @@ private:
                 for (size_t k = 0; k < toRemove.size(); k++) {
                     itemRemove(obj, toRemove[k], toRemoveQty[k]);
                     forgetObjectRefs(toRemove[k]); // see the container path above
-                    if (anyModalOpen || _inCombat) {
+                    if (anyModalOpen || _inCombat || combatPresentationBusy()) {
                         gDudeDeferredItemFrees.push_back(toRemove[k]);
                     } else {
                         objectDestroy(toRemove[k], nullptr);
@@ -5437,7 +5401,7 @@ static void viewerServiceTicker()
         // or loot screen opened any other way, still closes as before.
         int mode = GameMode::getCurrentGameMode() & kViewerModalMask;
         bool sanctioned = gViewerConn->combatModalOpen()
-            && (mode == GameMode::kInventory || mode == GameMode::kLoot);
+            && (mode == GameMode::kInventory || mode == GameMode::kLoot || mode == GameMode::kUseOn);
         // ►►►► AND NEVER THE WORLDMAP, for the same reason the gPendingWorldmapEnter
         // branch above already excludes it: ESC there is NOT a local close. The worldmap
         // is a SERVER-DRIVEN modal, and its ESC handler sends the `wmesc` INTENT
@@ -5652,19 +5616,15 @@ void clientViewerUnload(Object* item)
     gViewerConn->sendLine(cmd);
 }
 
-// USE / apply an inventory item (out-of-combat): the inventory ctx-menu USE leaf
-// for drugs / misc / weapons routes here instead of mutating the local mirror.
-// The server runs the authoritative itemUseDrug / itemUseFromInventory on the
-// dude (addressed by pid) and streams the consume/heal/skill-up back (Slice 2
-// reconcile). Explosives take the dedicated arm path below, not this verb (the
-// plain useitem verb rejects them server-side).
-void clientViewerUseItem(int pid)
+// Pack self-use addresses the selected instance. In combat this remains part
+// of the paid inventory session; hand-slot self-use uses the separate handuse verb.
+void clientViewerUseItem(int itemNetId)
 {
-    if (gViewerConn == nullptr) {
+    if (gViewerConn == nullptr || itemNetId <= 0) {
         return;
     }
     char cmd[32];
-    snprintf(cmd, sizeof(cmd), "useitem %d", pid);
+    snprintf(cmd, sizeof(cmd), "useitemid %d", itemNetId);
     gViewerConn->sendLine(cmd);
 }
 
@@ -5679,19 +5639,19 @@ void clientViewerUseDoor(int targetNetId)
     gViewerConn->sendLine(cmd);
 }
 
-// USE an inventory item ON a world target (out-of-combat): the use-item-on picker
+// USE an inventory item ON a world target: the use-item-on picker
 // modal (inventoryOpenUseItemOn) reroutes its picked-item leaf here instead of
 // running the local _action_use_an_item_on_object. The server walks the dude to the
 // target (approach <= 1) and runs the authoritative action — the item's / target's
 // USE_OBJ_ON script (the Temple Key unlocking its door) or the default use — and the
 // world change (door open/unlock, item consume) streams back like any other event.
-void clientViewerUseItemOn(int targetNetId, int pid)
+void clientViewerUseItemOn(int targetNetId, int itemNetId)
 {
-    if (gViewerConn == nullptr) {
+    if (gViewerConn == nullptr || targetNetId <= 0 || itemNetId <= 0) {
         return;
     }
     char cmd[48];
-    snprintf(cmd, sizeof(cmd), "useitemon %d %d", targetNetId, pid);
+    snprintf(cmd, sizeof(cmd), "useitemonid %d %d", targetNetId, itemNetId);
     gViewerConn->sendLine(cmd);
 }
 
@@ -5701,13 +5661,13 @@ void clientViewerUseItemOn(int targetNetId, int pid)
 // arms the charge headless (skipping the blocking modal but running identical
 // activate + Traps/Demolition roll + queue logic); the timed explosion + any
 // door/scenery destroy stream back like any other world event.
-void clientViewerArmExplosive(int pid, int seconds)
+void clientViewerArmExplosive(int itemNetId, int seconds)
 {
-    if (gViewerConn == nullptr) {
+    if (gViewerConn == nullptr || itemNetId <= 0) {
         return;
     }
     char cmd[48];
-    snprintf(cmd, sizeof(cmd), "useitem_armexplosive %d %d", pid, seconds);
+    snprintf(cmd, sizeof(cmd), "useitem_armexplosiveid %d %d", itemNetId, seconds);
     gViewerConn->sendLine(cmd);
 }
 
@@ -5897,6 +5857,9 @@ void clientViewerMutatePick(int dropTrait, int gainTrait)
 
 void clientViewerSetLootTarget(int netId)
 {
+    if (netId == 0 && gViewerLootTargetNetId != 0 && gViewerConn != nullptr) {
+        gViewerConn->sendLine("lootclose");
+    }
     gViewerLootTargetNetId = netId;
     // Clearing the target (loot screen closed) also drops any pending dirty; setting a
     // real target must NOT clobber a dirty raised by a reconcile pumped this same beat.

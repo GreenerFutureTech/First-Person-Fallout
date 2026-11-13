@@ -4,6 +4,7 @@
 
 #include "server_control.h"
 
+#include <algorithm>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -315,6 +316,7 @@ enum {
                         // (the Temple Key on the locked door, a doctor's bag on
                         //  a critter, …). arg carries the item pid, re-resolved
                         //  on the actor's inventory at fire time.
+    kInteractHandUse, // priced self-use of a specific equipped item
     kInteractHand,      // feature A: switch the active weapon hand (0/1 in arg) —
                         //  NO target, NO approach, 0 AP. In combat it rides the
                         //  intent queue so the put-away/take-out runs on the
@@ -371,6 +373,15 @@ static void serverControlSupersedePending(int sessionId, const char* why)
 // the own-turn re-check below both exist rather than trusting this set alone.
 static std::unordered_set<int> gInventoryOpenSlots;
 
+struct LootGrant {
+    int targetNetId;
+    int targetId;
+    int targetPid;
+    unsigned int generation;
+};
+static std::unordered_map<int, LootGrant> gLootGrants;
+
+
 bool serverControlInventorySessionOpen(int slot)
 {
     return gInventoryOpenSlots.count(slot) != 0;
@@ -379,6 +390,7 @@ bool serverControlInventorySessionOpen(int slot)
 void serverControlClearInventorySessions()
 {
     gInventoryOpenSlots.clear();
+    gLootGrants.clear();
 }
 
 // Vanilla "You cannot get there." (misc msg 2000), the same feedback _is_next_to /
@@ -474,6 +486,31 @@ static int interactionCarriedQty(Object* actor, int pid)
         }
     }
     return total;
+}
+
+static Object* serverFindInventoryItemByNetId(Object* owner, int netId, Object** itemOwner, int* quantity);
+
+static bool serverControlUseHandItem(Object* actor, int netId)
+{
+    int slot = playerActorSlotOf(actor);
+    int hand = serverActorActiveHand(slot);
+    Object* item = hand == HAND_RIGHT ? critterGetItem2(actor) : critterGetItem1(actor);
+    if (item == nullptr || item->netId != netId || !_obj_action_can_use(item)
+        || explosiveIsExplosive(item)) {
+        serverControlRefuseActor(actor, "That item is no longer in your active hand.");
+        return false;
+    }
+    HitMode mode = hand == HAND_RIGHT ? HIT_MODE_RIGHT_WEAPON_PRIMARY : HIT_MODE_LEFT_WEAPON_PRIMARY;
+    int cost = isInCombat() ? itemGetActionPointCost(actor, mode, false) : 0;
+    if (cost > actor->data.critter.combat.ap && isInCombat()) {
+        serverControlRefuseActor(actor, "You don't have enough action points.");
+        return false;
+    }
+    objectUseItem(actor, item);
+    if (isInCombat()) {
+        actor->data.critter.combat.ap = std::max(0, actor->data.critter.combat.ap - cost);
+    }
+    return true;
 }
 
 static void interactionFire(int verb, Object* actor, Object* target, int arg, bool doorWasOpen)
@@ -579,6 +616,8 @@ static void interactionFire(int verb, Object* actor, Object* target, int arg, bo
         fprintf(stderr, "f2_server: interact FIRE loot netId=%d actorTile=%d targetTile=%d dist=%d\n",
             target->netId, actor->tile, target->tile,
             objectGetDistanceBetween(actor, target));
+        gLootGrants[playerActorSlotOf(actor)] = { target->netId, target->id, target->pid,
+            mapGetLoadGeneration() };
         presenter()->lootGrant(actor->netId, target->netId);
         break;
     case kInteractUseItemOn: {
@@ -596,6 +635,9 @@ static void interactionFire(int verb, Object* actor, Object* target, int arg, bo
                 item = inv->items[i].item;
                 break;
             }
+        }
+        if (arg < 0) {
+            item = serverFindInventoryItemByNetId(actor, -arg, nullptr, nullptr);
         }
         if (item != nullptr) {
             // ►► CO-OP REVIVE (players only). A healing item used on a downed PLAYER
@@ -852,6 +894,9 @@ bool serverControlRunCombatInteract(Object* actor, int verb, int targetNetId, in
 
     // Hand switch has NO target and NO approach — handle it before target resolution.
     // arg carries the hand (HAND_LEFT/HAND_RIGHT); 0 AP, so it never ends the turn.
+    if (verb == kInteractHandUse) {
+        return serverControlUseHandItem(actor, arg);
+    }
     if (verb == kInteractHand) {
         serverControlSwapHand(actor, playerActorSlotOf(actor), arg);
         fprintf(stderr, "f2_server: combat interact hand=%d fired\n", arg);
@@ -1247,6 +1292,8 @@ void serverControlBeginDrain(const std::function<bool(int)>& liveSession)
             // orders when it does would be acting for someone who left.
             combatIntentDropForSlot(slot);
             gInventoryOpenSlots.erase(slot); // and any screen they had paid to open
+            gLootGrants.erase(slot);
+            serverControlSetPendingElevator(slot, -1);
             changed = true;
 
             // Queue the BODY for despawn — parked off-map at the next safe main
@@ -1297,6 +1344,16 @@ void serverControlBeginDrain(const std::function<bool(int)>& liveSession)
                 }
                 it = gInventoryOpenSlots.erase(it);
             }
+        }
+    }
+
+    for (auto it = gLootGrants.begin(); it != gLootGrants.end();) {
+        Object* owner = playerActorAt(it->first);
+        if (!isInCombat() || owner == nullptr || _combat_whose_turn() != owner
+            || it->second.generation != mapGetLoadGeneration()) {
+            it = gLootGrants.erase(it);
+        } else {
+            ++it;
         }
     }
 
@@ -1740,6 +1797,12 @@ static constexpr int kMaxRestMinutes = 24 * 60;
 // construction and needs no initialisation path to be right.
 static bool gHasPendingElevator[kMaxPlayerActors];
 static int gPendingElevator[kMaxPlayerActors];
+static unsigned int gElevatorGeneration[kMaxPlayerActors];
+static int gElevatorSession[kMaxPlayerActors];
+static int gElevatorTile[kMaxPlayerActors];
+static int gElevatorElevation[kMaxPlayerActors];
+static unsigned int gElevatorOfferedAt[kMaxPlayerActors];
+
 
 void serverControlSetPendingElevator(int slot, int elevator)
 {
@@ -1754,6 +1817,12 @@ void serverControlSetPendingElevator(int slot, int elevator)
 
     gHasPendingElevator[slot] = true;
     gPendingElevator[slot] = elevator;
+    Object* rider = playerActorAt(slot);
+    gElevatorGeneration[slot] = mapGetLoadGeneration();
+    gElevatorSession[slot] = gBindings[slot];
+    gElevatorTile[slot] = rider != nullptr ? rider->tile : -1;
+    gElevatorElevation[slot] = rider != nullptr ? rider->elevation : -1;
+    gElevatorOfferedAt[slot] = getTicks();
 }
 
 // The character-sheet edit intents, as ONE list. They are exempt from both the
@@ -2245,6 +2314,8 @@ void serverControlLine(int sessionId, const char* line)
     if (critterIsDead(actor)) {
         bool readOnlyVerb = strcmp(verb, "invopen") == 0
             || strcmp(verb, "invclose") == 0
+            || strcmp(verb, "lootclose") == 0
+            || strcmp(verb, "elevcancel") == 0
             || strcmp(verb, "look") == 0
             || serverControlIsSheetVerb(verb) // sheet bookkeeping, no world footprint
             || strcmp(verb, "cancel") == 0; // aborting your own pending walk is not an action
@@ -2271,6 +2342,8 @@ void serverControlLine(int sessionId, const char* line)
             || strcmp(verb, "cancel") == 0
             || strcmp(verb, "invopen") == 0
             || strcmp(verb, "invclose") == 0
+            || strcmp(verb, "lootclose") == 0
+            || strcmp(verb, "elevcancel") == 0
             || serverControlIsSheetVerb(verb) // costs no AP and plays no animation
             || serverControlIsStealVerb(verb) // inside a parked session the server opened
             || strcmp(verb, "claim") == 0
@@ -2297,6 +2370,14 @@ void serverControlLine(int sessionId, const char* line)
     // makes those reads mean "the acting player" (MP_PROPOSAL.md Ch 7.2).
     ServerActorScope scope(actor);
 
+    if (strcmp(verb, "lootclose") == 0) {
+        gLootGrants.erase(serverControlSlotForSession(sessionId));
+        return;
+    }
+    if (strcmp(verb, "elevcancel") == 0) {
+        serverControlSetPendingElevator(serverControlSlotForSession(sessionId), -1);
+        return;
+    }
     if (strcmp(verb, "mv") == 0) {
         // tileFromScreenXY on the client can yield -1 out of bounds; reject any
         // tile the walk path would not tolerate (same bound walkto assumes).
@@ -2345,6 +2426,22 @@ void serverControlLine(int sessionId, const char* line)
     // reproduces. Out of combat run it now (this verb is already gated by the busy
     // reject above); in combat queue it as a 0-AP interact intent so the draw plays on
     // the actor's own turn (combat_drain.cc → serverControlRunCombatInteract).
+    if (strcmp(verb, "handuse") == 0) {
+        if (n < 2 || arg <= 0) return;
+        if (isInCombat()) {
+            if (_combat_whose_turn() != actor) {
+                serverControlRefuse(sessionId, "It isn't your turn.");
+                combatEmitCurrentTurnCheckpoint();
+                return;
+            }
+            combatIntentPushVerb(COMBAT_INTENT_INTERACT, kInteractHandUse, 0, arg,
+                serverControlSlotForSession(sessionId));
+        } else {
+            serverControlUseHandItem(actor, arg);
+        }
+        return;
+    }
+
     if (strcmp(verb, "hand") == 0) {
         int hand = n >= 2 ? arg : -1;
         if (hand != HAND_LEFT && hand != HAND_RIGHT) {
@@ -2357,6 +2454,11 @@ void serverControlLine(int sessionId, const char* line)
             slot = 0; // the debug CMD port has no session and drives the host
         }
         if (isInCombat()) {
+            if (_combat_whose_turn() != actor) {
+                serverControlRefuse(sessionId, "It isn't your turn.");
+                combatEmitCurrentTurnCheckpoint();
+                return;
+            }
             combatIntentPushVerb(COMBAT_INTENT_INTERACT, kInteractHand, 0, hand, slot);
             fprintf(stderr, "f2_server: control hand=%d queued (combat, slot=%d)\n", hand, slot);
         } else {
@@ -2472,7 +2574,8 @@ void serverControlLine(int sessionId, const char* line)
     // option, so the player who owns the conversation owns the trade — the same
     // predicate, deliberately not a second notion of ownership to keep in sync.
     if (strcmp(verb, "boffer") == 0 || strcmp(verb, "btake") == 0
-        || strcmp(verb, "bunoffer") == 0 || strcmp(verb, "bcommit") == 0
+        || strcmp(verb, "bunoffer") == 0 || strcmp(verb, "bunoffer_npc") == 0
+        || strcmp(verb, "bcommit") == 0
         || strcmp(verb, "bdone") == 0 || strcmp(verb, "bcancel") == 0) {
         if (!serverControlMayDriveDialog(sessionId)) {
             fprintf(stderr, "f2_server: control %s dropped (not the barter driver)\n", verb);
@@ -2499,6 +2602,8 @@ void serverControlLine(int sessionId, const char* line)
             barterIntentPush(BARTER_INTENT_OFFER_ITEM, pid, qty);
         } else if (strcmp(verb, "btake") == 0) {
             barterIntentPush(BARTER_INTENT_TAKE_ITEM, pid, qty);
+        } else if (strcmp(verb, "bunoffer_npc") == 0) {
+            barterIntentPush(BARTER_INTENT_UNOFFER_NPC_ITEM, pid, qty);
         } else if (strcmp(verb, "bunoffer") == 0) {
             barterIntentPush(BARTER_INTENT_UNOFFER_ITEM, pid, qty);
         } else if (strcmp(verb, "bcommit") == 0) {
@@ -2638,7 +2743,8 @@ void serverControlLine(int sessionId, const char* line)
         || strcmp(verb, "skill") == 0
         || strcmp(verb, "talk") == 0
         || strcmp(verb, "loot") == 0
-        || strcmp(verb, "useitemon") == 0;
+        || strcmp(verb, "useitemon") == 0
+        || strcmp(verb, "useitemonid") == 0;
     if (isInteractVerb) {
         // LOOK (examine) is free in combat — no AP, no turn, no barrier; vanilla
         // lets you examine mid-fight. It runs inline below like it always has.
@@ -2670,7 +2776,11 @@ void serverControlLine(int sessionId, const char* line)
             serverControlSupersedePending(sessionId, "a fresh action");
             reg_anim_clear(gDude); // and stops any in-flight approach walk
             Rect rect;
-            objectRotateClockwise(gDude, &rect);
+            if (n >= 2 && arg < 0) {
+                objectRotateCounterClockwise(gDude, &rect);
+            } else {
+                objectRotateClockwise(gDude, &rect);
+            }
             fprintf(stderr, "f2_server: control rot\n");
             return;
         }
@@ -2722,7 +2832,7 @@ void serverControlLine(int sessionId, const char* line)
             return;
         }
 
-        if (strcmp(verb, "useitemon") == 0) {
+        if (strcmp(verb, "useitemon") == 0 || strcmp(verb, "useitemonid") == 0) {
             // Use an inventory item ON a world target: `useitemon <netId> <itemPid>`.
             // The viewer picks the item locally (inventoryOpenUseItemOn modal) and
             // sends its pid; find that item on the dude's TOP-LEVEL inventory (same
@@ -2739,6 +2849,11 @@ void serverControlLine(int sessionId, const char* line)
                     break;
                 }
             }
+            bool byInstance = strcmp(verb, "useitemonid") == 0;
+            if (byInstance) {
+                if (itemPid <= 0) return;
+                item = serverFindInventoryItemByNetId(actor, itemPid, nullptr, nullptr);
+            }
             if (item == nullptr) {
                 fprintf(stderr, "f2_server: control useitemon no dude item pid=%d ignored\n", itemPid);
                 serverControlRefuse(sessionId, "You don't have that item.");
@@ -2751,7 +2866,7 @@ void serverControlLine(int sessionId, const char* line)
                 serverControlRefuse(sessionId, "Arm the explosive and drop it instead.");
                 return;
             }
-            serverControlArmInteraction(sessionId, actor, kInteractUseItemOn, target, itemPid);
+            serverControlArmInteraction(sessionId, actor, kInteractUseItemOn, target, byInstance ? -itemPid : itemPid);
             return;
         }
 
@@ -3143,6 +3258,14 @@ void serverControlLine(int sessionId, const char* line)
                 sessionId);
             return;
         }
+        if (isInCombat() || gElevatorGeneration[slot] != mapGetLoadGeneration()
+            || gElevatorSession[slot] != sessionId || actor->tile != gElevatorTile[slot]
+            || actor->elevation != gElevatorElevation[slot]
+            || getTicksBetween(getTicks(), gElevatorOfferedAt[slot]) > 120000) {
+            gHasPendingElevator[slot] = false;
+            serverControlRefuse(sessionId, "That elevator offer has expired.");
+            return;
+        }
         int elevator = gPendingElevator[slot];
         if (n < 2 || arg < 0 || arg >= elevatorLevelCount(elevator)) {
             fprintf(stderr, "f2_server: control elev bad level=%d (elevator %d has %d)\n",
@@ -3268,7 +3391,9 @@ void serverControlLine(int sessionId, const char* line)
         || strcmp(verb, "invput") == 0
         || strcmp(verb, "invload") == 0
         || strcmp(verb, "useitem") == 0
-        || strcmp(verb, "useitem_armexplosive") == 0;
+        || strcmp(verb, "useitem_armexplosive") == 0
+        || strcmp(verb, "useitemid") == 0
+        || strcmp(verb, "useitem_armexplosiveid") == 0;
     if (isInvVerb) {
         if (gDude == nullptr) {
             return;
@@ -3369,7 +3494,8 @@ void serverControlLine(int sessionId, const char* line)
         }
 
         if (strcmp(verb, "invput") == 0) {
-            Object* container = serverFindInventoryItemByNetId(gDude, arg, nullptr, nullptr);
+            Object* container = arg == gDude->netId ? gDude
+                : serverFindInventoryItemByNetId(gDude, arg, nullptr, nullptr);
             int itemQuantity = 0;
             Object* item = serverFindInventoryItemByNetId(gDude, arg2, nullptr, &itemQuantity);
             int quantity = arg3;
@@ -3390,7 +3516,7 @@ void serverControlLine(int sessionId, const char* line)
                 return false;
             };
             if (container == nullptr || item == nullptr || item == container
-                || itemGetType(container) != ITEM_TYPE_CONTAINER
+                || (container != gDude && itemGetType(container) != ITEM_TYPE_CONTAINER)
                 || quantity <= 0 || quantity > itemQuantity
                 || containsItem(containsItem, item, container)) {
                 fprintf(stderr, "f2_server: control invput invalid container=%d item=%d qty=%d\n",
@@ -3504,11 +3630,16 @@ void serverControlLine(int sessionId, const char* line)
         // inventory recursively and the wire ships one per item), so the acting object
         // can simply be named.
         const bool byNetId = strcmp(verb, "invwield") == 0 || strcmp(verb, "invdrop") == 0
-            || strcmp(verb, "unload") == 0;
+            || strcmp(verb, "unload") == 0
+            || strcmp(verb, "useitemid") == 0
+            || strcmp(verb, "useitem_armexplosiveid") == 0;
         int pid = -1;
         Object* item = nullptr;
         int stackQty = 0;
-        {
+        Object* itemOwner = gDude;
+        if (byNetId) {
+            item = serverFindInventoryItemByNetId(gDude, arg, &itemOwner, &stackQty);
+        } else {
             Inventory* inv = &gDude->data.inventory;
             for (int i = 0; i < inv->length; i++) {
                 Object* candidate = inv->items[i].item;
@@ -3548,7 +3679,7 @@ void serverControlLine(int sessionId, const char* line)
         }
         pid = item->pid; // logging / type branches below still speak pid
 
-        if (strcmp(verb, "useitem") == 0) {
+        if (strcmp(verb, "useitem") == 0 || strcmp(verb, "useitemid") == 0) {
             // USE / apply an inventory item on the dude: drugs (quaff), or misc/
             // weapon self-use (stimpak, healing powder, books, flares). Mirrors the
             // inventory ctx-menu USE leaf's type branch (inventory_ui.cc:3502) —
@@ -3570,15 +3701,15 @@ void serverControlLine(int sessionId, const char* line)
                 return;
             }
             if (itemGetType(item) == ITEM_TYPE_DRUG) {
-                itemUseDrug(gDude, gDude, item, true);
+                itemUseDrug(gDude, itemOwner, item, true);
             } else {
-                itemUseFromInventory(gDude, gDude, item, true);
+                itemUseFromInventory(gDude, itemOwner, item, true);
             }
             fprintf(stderr, "f2_server: control useitem pid=%d\n", pid);
             return;
         }
 
-        if (strcmp(verb, "useitem_armexplosive") == 0) {
+        if (strcmp(verb, "useitem_armexplosive") == 0 || strcmp(verb, "useitem_armexplosiveid") == 0) {
             // Sub-action of USE for C4 / dynamite. The plain `useitem` verb rejects
             // explosives because vanilla arming (_obj_use_explosive) opens the blocking
             // inventorySetTimer dial (inventoryQuantitySelect SET_TIMER) with no headless
@@ -3635,12 +3766,25 @@ void serverControlLine(int sessionId, const char* line)
                 return;
             }
             bool wielded = (item->flags & OBJECT_IN_ANY_HAND) != 0;
-            weaponUnloadIntoInventory(gDude, item, !wielded);
+            weaponUnloadIntoInventory(itemOwner, item, !wielded);
             fprintf(stderr, "f2_server: control unload pid=%d\n", pid);
             return;
         }
 
         if (strcmp(verb, "invwield") == 0) {
+            if (itemOwner != gDude) {
+                if (itemRemove(itemOwner, item, 1) != 0) return;
+                ObjectFlags saved = item->flags;
+                item->flags |= OBJECT_IN_LEFT_HAND; // prevent merging during extraction
+                if (itemAdd(gDude, item, 1) != 0) {
+                    item->flags = saved;
+                    itemAdd(itemOwner, item, 1);
+                    return;
+                }
+                item->flags = saved;
+                itemOwner = gDude;
+                stackQty = 1;
+            }
             // arg2 = target hand (0/1); ignored for armor (inventoryEquip branches on
             // ITEM_TYPE_ARMOR internally). Default to the right hand.
             int hand = n >= 3 ? arg2 : HAND_RIGHT;
@@ -3773,7 +3917,7 @@ void serverControlLine(int sessionId, const char* line)
             if (itemGetType(item) == ITEM_TYPE_ARMOR && (item->flags & OBJECT_WORN) != 0) {
                 adjustCritterStatsOnArmorChange(gDude, item, nullptr);
             }
-            itemDropStack(gDude, item, qty);
+            itemDropStack(itemOwner, item, qty);
             fprintf(stderr, "f2_server: control invdrop pid=%d qty=%d\n", pid, qty);
         }
         return;
@@ -3801,22 +3945,23 @@ void serverControlLine(int sessionId, const char* line)
     bool isLootVerb = strcmp(verb, "take") == 0 || strcmp(verb, "put") == 0
         || strcmp(verb, "takeall") == 0;
     if (isLootVerb) {
-        // Out-of-combat only (trust-boundary defense-in-depth, review L1/L2). The loot
-        // modal force-closes on combat entry so this is not UI-reachable, but a racing/
-        // malicious client must not transfer items mid-fight — and the loot-target full-
-        // reconcile's "no attack replay references these items" safety rests on exactly
-        // this gate, not on the object itself.
-        if (isInCombat()) {
-            fprintf(stderr, "f2_server: control %s dropped (in combat)\n", verb);
-            serverControlRefuse(sessionId, "You can't move items around in combat.");
-            return;
-        }
         if (gDude == nullptr) {
             return;
         }
         int netId = n >= 2 ? arg : -1;
         int pid = n >= 3 ? arg2 : -1;
         Object* container = objectFindByNetId(netId);
+        if (isInCombat()) {
+            int slot = serverControlSlotForSession(sessionId);
+            auto grant = gLootGrants.find(slot);
+            if (_combat_whose_turn() != actor || grant == gLootGrants.end()
+                || grant->second.generation != mapGetLoadGeneration()
+                || container == nullptr || grant->second.targetNetId != netId
+                || grant->second.targetId != container->id || grant->second.targetPid != container->pid) {
+                serverControlRefuse(sessionId, "Open this container on your turn first.");
+                return;
+            }
+        }
         // Validate at the trust boundary: the target must exist, be on the dude's
         // elevation, be adjacent (vanilla only opens a loot screen after walking
         // the dude next to it), and be an actual loot target — a container ITEM or

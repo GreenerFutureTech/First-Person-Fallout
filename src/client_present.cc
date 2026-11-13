@@ -493,7 +493,14 @@ void resolveHeld(PresEntry& e, bool resume, FrameReap reap = FrameReap::All)
         // Same lifecycle-bit rule as the immediate path (client_net's delta
         // apply): a HELD flags delta lands here later, and would otherwise
         // resurrect the server's NO_REMOVE on a viewer-side player actor.
+        const bool doorOpenChanged =
+            ((obj->flags ^ e.dFlags) & OBJECT_OPEN_DOOR) != OBJECT_NONE;
         objectApplyWireFlags(obj, e.dFlags);
+        // Door deltas are normally held during their recorded slide. Refresh
+        // after the held state lands, just as the immediate delta path does.
+        if (doorOpenChanged && tileFirstPersonPreviewIsEnabled()) {
+            tileFirstPersonPreviewRequestRefresh();
+        }
     }
     if (e.dHasRot) {
         objectSetRotation(obj, static_cast<Rotation>(e.dRot), nullptr);

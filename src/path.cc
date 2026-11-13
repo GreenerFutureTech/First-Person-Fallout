@@ -108,12 +108,6 @@ static PathNode gOpenPathNodeList[kPathMaxNodesWide];
 // 0x415E24
 bool canUseDoor(Object* critter, Object* door)
 {
-    if (critter == gDude) {
-        if (!_obj_portal_is_walk_thru(door)) {
-            return false;
-        }
-    }
-
     if (FrmId(critter).objectType() != OBJ_TYPE_CRITTER) {
         return false;
     }
@@ -133,6 +127,12 @@ bool canUseDoor(Object* critter, Object* door)
     }
 
     if (proto->scenery.type != SCENERY_TYPE_DOOR) {
+        return false;
+    }
+
+    const bool doorIsOpen =
+        (door->data.scenery.door.openFlags & DOOR_FLAG_OPEN) != 0;
+    if (critter == gDude && !doorIsOpen && !_obj_portal_is_walk_thru(door)) {
         return false;
     }
 

@@ -4890,6 +4890,20 @@ void objectApplyWireFlags(Object* obj, unsigned int wireFlags)
 
     const unsigned int kLocalLifecycleFlags = OBJECT_NO_REMOVE | OBJECT_NO_SAVE;
     obj->flags = static_cast<ObjectFlags>((wireFlags & ~kLocalLifecycleFlags) | (obj->flags & kLocalLifecycleFlags));
+
+    // Door openFlags come from the loaded map, while subsequent server changes
+    // arrive as object flags. Keep both representations in sync, including on
+    // close, so the viewer does not keep treating a previously open door as open.
+    if (ProtoId(obj).objectType() == OBJ_TYPE_SCENERY) {
+        Proto* proto = nullptr;
+        if (protoGetProto(obj, &proto) == 0 && proto->scenery.type == SCENERY_TYPE_DOOR) {
+            if ((obj->flags & OBJECT_OPEN_DOOR) == OBJECT_OPEN_DOOR) {
+                obj->data.scenery.door.openFlags |= DOOR_FLAG_OPEN;
+            } else {
+                obj->data.scenery.door.openFlags &= ~DOOR_FLAG_OPEN;
+            }
+        }
+    }
 }
 
 int _obj_load_player_actor(File* stream, Object** actorPtr)
