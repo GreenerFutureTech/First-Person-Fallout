@@ -102,8 +102,7 @@ public:
 
     // ByteSink (outbox §8.6): enqueue ONE frame to every client's per-client queue
     // as a SHARED buffer (one copy, N pointers) + its WireFrameMeta sidecar, tee the
-    // canonical bytes, then pump(). Increment 2 drains everything immediately (no
-    // release scheduling yet), so this is behavior-identical to the old broadcast.
+    // canonical bytes, then pump() with non-blocking sends.
     void writeFrame(const unsigned char* header, unsigned int headerLen,
         const unsigned char* payload, unsigned int payloadLen, const WireFrameMeta& meta) override;
 
@@ -132,7 +131,7 @@ public:
 private:
     // One frame waiting in a client's outbound queue: a SHARED pointer to the encoded
     // bytes (one copy across all clients), its metadata sidecar, and how many bytes
-    // have already gone out (partial-write resume; 0 in increment 2's blocking path).
+    // have already gone out.
     struct QueuedFrame {
         std::shared_ptr<const std::vector<unsigned char>> bytes;
         WireFrameMeta meta;
@@ -149,6 +148,7 @@ private:
         std::string inbuf;
         int sessionId;
         std::deque<QueuedFrame> outq; // per-client outbound frame queue (outbox §8.6)
+        size_t queuedBytes = 0;
         // Release-schedule cursor (F2_SERVER_OUTBOX_PACE): the last frame's release time
         // and cost, so the next frame is held until lastReleaseAtMs + lastCostMs (§8.6).
         // Seeded to now at accept; max()-reanchored so an idle client accrues no credit.
@@ -158,10 +158,9 @@ private:
 
     void dropClient(size_t index, const char* why);
 
-    // Drain each client's outbound queue toward its socket, dropping a client whose
-    // send fails. Increment 2: every queued frame is due, sent with the bounded
-    // blocking writeAll (behavior-identical to the old broadcast). Increment 3 gates
-    // on per-frame release times and flips sends non-blocking.
+    // Drain each client's queue with non-blocking sends; partial frames stay queued.
+    // A client is dropped only on a hard socket error or when its backlog exceeds
+    // the transport cap.
     void pump();
 
     NetSocket _listenFd = kNetInvalidSocket;

@@ -34,7 +34,7 @@ void _combat_over_from_load();
 // `earner` is the player actor the XP belongs to; nullptr means gDude (vanilla
 // behavior). Pass one wherever the caller knows who made the kill
 // (PLAYER_SHEET_DESIGN.md §4).
-void _combat_give_exps(int exp_points, Object* earner = nullptr);
+void _combat_give_exps(int exp_points, Object* earner = nullptr, bool allowDeadPlayer = false);
 bool combatPlayerTurnShouldBreak();
 bool combatPlayerTurnOutOfAp();
 int combatPlayerTurnResolve();

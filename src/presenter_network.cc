@@ -114,9 +114,9 @@ enum EventType : unsigned char {
     // the wield state rides objectDelta's inventory field. Append-only (skip-unknown-T).
     EVENT_WEAPON_TAKE_OUT = 27,
 
-    // Door open/close slide cue. The open/closed STATE rides objectDelta (flags); the
-    // art FRAME does not, so the viewer replays the vanilla frame slide and holds a
-    // crossing critter until it finishes. PRESENTATION-only. Append-only.
+    // Door open/close state echo and slide cue. The art FRAME also rides the recorded
+    // presentation sequence, so viewers can update F11 geometry immediately and hold a
+    // crossing critter until the slide finishes. Append-only.
     EVENT_DOOR_STATE = 28,
 
     // Out-of-combat interaction GESTURE cue (ANIM_MAGIC_HANDS_* crouch/reach). Emitted

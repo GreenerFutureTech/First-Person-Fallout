@@ -24,6 +24,7 @@
 #include "animation.h"
 #include "billboard_clip_bands.h"
 #include "combat.h"
+#include "client_net.h"
 #include "color.h"
 #include "critter.h"
 #include "debug.h"
@@ -261,6 +262,9 @@ static void tileFirstPersonFindArroyoVillageCaveExitGrid(Object* object, void* c
 static void tileFirstPersonFindTempleWallAreaLandmark(Object* object, void* context);
 static void tileFirstPersonMarkTempleBlockedAreaWalls(
     const TileFirstPersonGrayboxRenderContext* renderContext);
+static void tileFirstPersonMarkDoorFlankWalls(
+    const TileFirstPersonGrayboxRenderContext* renderContext);
+static bool tileFirstPersonDoorIsOpen(Object* door);
 static void tileFirstPersonGrayboxMarkObject(Object* object, void* context);
 static void tileFirstPersonResolveWoodGates(
     const TileFirstPersonGrayboxRenderContext* renderContext,
@@ -1403,6 +1407,7 @@ static void tileRenderFirstPersonPreview()
     if (gMapHeader.index == MAP_ARROYO_TEMPLE) {
         tileFirstPersonMarkTempleBlockedAreaWalls(&context);
     }
+    tileFirstPersonMarkDoorFlankWalls(&context);
     std::sort(gFirstPersonPreviewExitGridTiles.begin(), gFirstPersonPreviewExitGridTiles.end());
     gFirstPersonPreviewExitGridTiles.erase(
         std::unique(gFirstPersonPreviewExitGridTiles.begin(), gFirstPersonPreviewExitGridTiles.end()),
@@ -1909,8 +1914,7 @@ static void tileRenderFirstPersonPreview()
                     if (wallType == 3
                         && FrmId(object).objectType() == OBJ_TYPE_SCENERY
                         && proto->scenery.type == SCENERY_TYPE_DOOR
-                        && (object->data.scenery.door.openFlags & DOOR_FLAG_OPEN) == 0
-                        && (object->flags & OBJECT_OPEN_DOOR) == OBJECT_NONE) {
+                        && !tileFirstPersonDoorIsOpen(object)) {
                         canInteract = true;
                     } else if (wallType == 4) {
                         const ObjectType objectType = FrmId(object).objectType();
@@ -1936,8 +1940,7 @@ static void tileRenderFirstPersonPreview()
                 if (protoGetProto(object, &proto) == 0
                     && FrmId(object).objectType() == OBJ_TYPE_SCENERY
                     && proto->scenery.type == SCENERY_TYPE_DOOR
-                    && (object->data.scenery.door.openFlags & DOOR_FLAG_OPEN) == 0
-                    && (object->flags & OBJECT_OPEN_DOOR) == OBJECT_NONE) {
+                    && !tileFirstPersonDoorIsOpen(object)) {
                     gFirstPersonPreviewDoorHitTargets.push_back({ object, windowDistance, x });
                     break;
                 }
@@ -2325,8 +2328,7 @@ static void tileFirstPersonSnapshotTopologyObject(Object* object, void* context)
         && hasProto
         && proto->scenery.type == SCENERY_TYPE_DOOR;
     const bool openDoor = isDoor
-        && (((object->data.scenery.door.openFlags & DOOR_FLAG_OPEN) != 0)
-            || (object->flags & OBJECT_OPEN_DOOR) != OBJECT_NONE);
+        && tileFirstPersonDoorIsOpen(object);
 
     Color color = COLOR_LIGHT_GREY;
     switch (objectType) {
@@ -2868,6 +2870,112 @@ static void tileFirstPersonMarkTempleBlockedAreaWalls(
             renderContext->wallCells[renderHexTile] = 2;
         }
     }
+
+}
+
+static void tileFirstPersonMarkDoorFlankWalls(
+    const TileFirstPersonGrayboxRenderContext* renderContext)
+{
+    if (renderContext->doorObjects == nullptr || renderContext->gridWidth <= 0) {
+        return;
+    }
+
+    for (Object* door : *renderContext->doorObjects) {
+        if (door == nullptr || door->elevation != renderContext->elevation) {
+            continue;
+        }
+
+        for (int rotation = ROTATION_FIRST; rotation < ROTATION_COUNT / 2; rotation++) {
+            const int oppositeRotation = rotation + ROTATION_COUNT / 2;
+            const int firstFlank = tileGetTileInDirection(
+                door->tile, static_cast<Rotation>(rotation), 1);
+            const int secondFlank = tileGetTileInDirection(
+                door->tile, static_cast<Rotation>(oppositeRotation), 1);
+            const int firstWall = tileGetTileInDirection(
+                door->tile, static_cast<Rotation>(rotation), 2);
+            const int secondWall = tileGetTileInDirection(
+                door->tile, static_cast<Rotation>(oppositeRotation), 2);
+            if (!tileIsValid(firstFlank) || !tileIsValid(secondFlank)
+                || !tileIsValid(firstWall) || !tileIsValid(secondWall)) {
+                continue;
+            }
+
+            const int firstFlankRenderTile = tileFirstPersonGetRenderHexTile(
+                firstFlank, renderContext->gridWidth);
+            const int secondFlankRenderTile = tileFirstPersonGetRenderHexTile(
+                secondFlank, renderContext->gridWidth);
+            const int firstWallRenderTile = tileFirstPersonGetRenderHexTile(
+                firstWall, renderContext->gridWidth);
+            const int secondWallRenderTile = tileFirstPersonGetRenderHexTile(
+                secondWall, renderContext->gridWidth);
+            if (firstFlankRenderTile < 0 || secondFlankRenderTile < 0
+                || firstWallRenderTile < 0 || secondWallRenderTile < 0) {
+                continue;
+            }
+
+            const unsigned char firstWallType = renderContext->wallCells[firstWallRenderTile];
+            const unsigned char secondWallType = renderContext->wallCells[secondWallRenderTile];
+            if ((firstWallType != 1 && firstWallType != 2)
+                || firstWallType != secondWallType
+                || renderContext->wallMaterials[firstWallRenderTile]
+                    != renderContext->wallMaterials[secondWallRenderTile]
+                || renderContext->wallOrientations[firstWallRenderTile]
+                    != renderContext->wallOrientations[secondWallRenderTile]) {
+                continue;
+            }
+
+            if (renderContext->wallCells[firstFlankRenderTile] == 0) {
+                renderContext->wallCells[firstFlankRenderTile] = firstWallType;
+                renderContext->wallOrientations[firstFlankRenderTile] =
+                    renderContext->wallOrientations[firstWallRenderTile];
+                renderContext->wallMaterials[firstFlankRenderTile] =
+                    renderContext->wallMaterials[firstWallRenderTile];
+            }
+            if (renderContext->wallCells[secondFlankRenderTile] == 0) {
+                renderContext->wallCells[secondFlankRenderTile] = secondWallType;
+                renderContext->wallOrientations[secondFlankRenderTile] =
+                    renderContext->wallOrientations[secondWallRenderTile];
+                renderContext->wallMaterials[secondFlankRenderTile] =
+                    renderContext->wallMaterials[secondWallRenderTile];
+            }
+        }
+    }
+}
+
+static bool tileFirstPersonDoorIsOpen(Object* door)
+{
+    const bool openFlagsSet = (door->data.scenery.door.openFlags & DOOR_FLAG_OPEN) != 0
+        || (door->flags & OBJECT_OPEN_DOOR) != OBJECT_NONE;
+    if (!clientViewerActive()) {
+        return openFlagsSet;
+    }
+
+    static std::unordered_map<unsigned int, int> openFramesByFid;
+    const auto cached = openFramesByFid.find(door->fid);
+    if (cached != openFramesByFid.end()) {
+        if (cached->second <= 0) {
+            return openFlagsSet;
+        }
+        return openFlagsSet
+            ? door->frame >= cached->second
+            : door->frame > 0;
+    }
+
+    CacheEntry* cacheHandle = nullptr;
+    Art* art = artLock(FrmId(door), &cacheHandle);
+    if (art == nullptr) {
+        return openFlagsSet;
+    }
+
+    const int openFrame = artGetFrameCount(art) - 1;
+    artUnlock(cacheHandle);
+    openFramesByFid.emplace(door->fid, openFrame);
+    if (openFrame <= 0) {
+        return openFlagsSet;
+    }
+    return openFlagsSet
+        ? door->frame >= openFrame
+        : door->frame > 0;
 }
 
 static void tileFirstPersonGrayboxMarkObject(Object* object, void* context)
@@ -2915,8 +3023,7 @@ static void tileFirstPersonGrayboxMarkObject(Object* object, void* context)
         && hasProto
         && proto->scenery.type == SCENERY_TYPE_DOOR;
     const bool doorOpen = isDoor
-        && (((object->data.scenery.door.openFlags & DOOR_FLAG_OPEN) != 0)
-            || (object->flags & OBJECT_OPEN_DOOR) != OBJECT_NONE);
+        && tileFirstPersonDoorIsOpen(object);
     if (!halfHeightWall
         && !isDoor
         && (object->flags & (OBJECT_NO_BLOCK | OBJECT_LIGHT_THRU)) != OBJECT_NONE) {
@@ -2953,16 +3060,16 @@ static void tileFirstPersonGrayboxMarkObject(Object* object, void* context)
     } else if (isDoor) {
         // Some door objects do not keep the generic pass-through object
         // flags in sync with their authoritative door state.
-        if (doorOpen) {
-            wallType = 5;
-        } else {
-            wallType = 3;
-        }
+        wallType = doorOpen ? 5 : 3;
     } else {
         // Scenery is rendered as a billboard from its FRM below. Do not turn
         // it into a solid graybox wall, otherwise trees and other scenery
         // obscure their own textures.
         return;
+    }
+
+    if (isDoor && renderContext->doorObjects != nullptr) {
+        renderContext->doorObjects->push_back(object);
     }
 
     // Fallout's object grid stores X in reverse order. Convert it to the
@@ -2974,9 +3081,6 @@ static void tileFirstPersonGrayboxMarkObject(Object* object, void* context)
         renderContext->wallMaterials[renderHexTile] = objectType == OBJ_TYPE_WALL && hasProto
             ? proto->wall.material
             : MATERIAL_TYPE_INVALID;
-        if (isDoor && renderContext->doorObjects != nullptr) {
-            renderContext->doorObjects->push_back(object);
-        }
     }
 }
 
@@ -2997,6 +3101,13 @@ static void tileFirstPersonResolveWoodGates(
             door->tile, renderContext->gridWidth);
         if (gateTile < 0 || gateTile >= gHexGridSize) {
             continue;
+        }
+        const bool doorOpen = tileFirstPersonDoorIsOpen(door);
+        if (doorOpen && clientViewerActive()) {
+            renderContext->wallCells[gateTile] = 0;
+            renderContext->wallMaterials[gateTile] = MATERIAL_TYPE_INVALID;
+            renderContext->wallOrientations[gateTile] =
+                TILE_FIRST_PERSON_WALL_ORIENTATION_CELL;
         }
         const unsigned char wallType = renderContext->wallCells[gateTile];
         if (wallType != 3 && wallType != 5) {
@@ -3025,9 +3136,6 @@ static void tileFirstPersonResolveWoodGates(
             continue;
         }
 
-        const bool doorOpen =
-            (door->data.scenery.door.openFlags & DOOR_FLAG_OPEN) != 0
-            || (door->flags & OBJECT_OPEN_DOOR) != OBJECT_NONE;
         renderContext->wallCells[gateTile] = doorOpen
             ? 0
             : kFirstPersonClosedWoodGateType;
@@ -3517,11 +3625,14 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
     if (arroyoVillageMonument && !arroyoVillageMonumentComposite) {
         return true;
     }
+    const int protoId = ProtoId(object).protoId();
     constexpr double kArroyoMonumentScale = 0.25;
     Proto* proto = nullptr;
     if (protoGetProto(object, &proto) != 0
         || (!templeBackwall && !arroyoVillageMonument
-            && proto->scenery.type != SCENERY_TYPE_GENERIC)) {
+            && (proto->scenery.type != SCENERY_TYPE_GENERIC
+                || protoId == static_cast<int>(SceneryProtoTypeId::Desk)
+                || protoId == static_cast<int>(SceneryProtoTypeId::DeskAlt)))) {
         return false;
     }
     const Rotation rotation = rotationIsValid(object->rotation) ? object->rotation : ROTATION_NE;
@@ -4388,9 +4499,6 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         || sceneryProtoId == SceneryProtoTypeId::TableAlt12
         || sceneryProtoId == SceneryProtoTypeId::TableAlt13
 
-
-        || sceneryProtoId == SceneryProtoTypeId::Desk
-        || sceneryProtoId == SceneryProtoTypeId::DeskAlt
 
         || sceneryProtoId == SceneryProtoTypeId::Brace
         || sceneryProtoId == SceneryProtoTypeId::BraceAlt
@@ -5893,8 +6001,7 @@ static void tileFirstPersonTopologyMarkObject(Object* object, void* context)
         break;
     case OBJ_TYPE_SCENERY:
         if (hasProto && proto->scenery.type == SCENERY_TYPE_DOOR) {
-            const bool doorOpen = (object->data.scenery.door.openFlags & DOOR_FLAG_OPEN) != 0
-                || (object->flags & OBJECT_OPEN_DOOR) != OBJECT_NONE;
+            const bool doorOpen = tileFirstPersonDoorIsOpen(object);
             markerColor = doorOpen || (object->flags & OBJECT_NO_BLOCK) != OBJECT_NONE
                 ? COLOR_LIGHT_GREEN_3
                 : COLOR_LIGHT_RED;
@@ -6003,8 +6110,7 @@ static void tileFirstPersonTopologyMarkObject(Object* object, void* context)
     // is apparent in the topology view.
     const bool openDoor = objectType == OBJ_TYPE_SCENERY && hasProto
         && proto->scenery.type == SCENERY_TYPE_DOOR
-        && ((object->data.scenery.door.openFlags & DOOR_FLAG_OPEN) != 0
-            || (object->flags & OBJECT_OPEN_DOOR) != OBJECT_NONE);
+        && tileFirstPersonDoorIsOpen(object);
     const bool halfHeightWall = objectType == OBJ_TYPE_WALL
         && (object->flags & OBJECT_NO_BLOCK) == OBJECT_NONE
         && (object->flags & (OBJECT_TRANS_GLASS | OBJECT_TRANS_WALL | OBJECT_LIGHT_THRU)) != OBJECT_NONE;
@@ -6088,8 +6194,12 @@ static Object* tileFirstPersonPreviewPickCritterAtPosition(int x, int y)
 
     Object* pickedObject = nullptr;
     double pickedDepth = std::numeric_limits<double>::infinity();
+    Object* pickedLivingCritter = nullptr;
+    double pickedLivingCritterDepth = std::numeric_limits<double>::infinity();
     Object* fallbackObject = nullptr;
     double fallbackDepth = std::numeric_limits<double>::infinity();
+    Object* fallbackLivingCritter = nullptr;
+    double fallbackLivingCritterDepth = std::numeric_limits<double>::infinity();
     for (const TileFirstPersonActorHitTarget& target : gFirstPersonPreviewActorHitTargets) {
         if (FrmId(target.object).objectType() != OBJ_TYPE_CRITTER) {
             continue;
@@ -6105,8 +6215,10 @@ static Object* tileFirstPersonPreviewPickCritterAtPosition(int x, int y)
             fallbackObject = target.object;
             fallbackDepth = target.depth;
         }
-        if (target.depth >= pickedDepth) {
-            continue;
+        const bool livingCritter = !critterIsDead(target.object);
+        if (livingCritter && target.depth < fallbackLivingCritterDepth) {
+            fallbackLivingCritter = target.object;
+            fallbackLivingCritterDepth = target.depth;
         }
 
         FrmImage image;
@@ -6125,11 +6237,23 @@ static Object* tileFirstPersonPreviewPickCritterAtPosition(int x, int y)
             }
         }
 
-        pickedObject = target.object;
-        pickedDepth = target.depth;
+        if (target.depth < pickedDepth) {
+            pickedObject = target.object;
+            pickedDepth = target.depth;
+        }
+        if (livingCritter && target.depth < pickedLivingCritterDepth) {
+            pickedLivingCritter = target.object;
+            pickedLivingCritterDepth = target.depth;
+        }
     }
 
-    return pickedObject != nullptr ? pickedObject : fallbackObject;
+    if (pickedLivingCritter != nullptr) {
+        return pickedLivingCritter;
+    }
+    if (pickedObject != nullptr) {
+        return pickedObject;
+    }
+    return fallbackLivingCritter != nullptr ? fallbackLivingCritter : fallbackObject;
 }
 
 Object* tileFirstPersonPreviewPickCritter()
@@ -6250,7 +6374,7 @@ Object* tileFirstPersonPreviewPickDoorAt(int screenX, int screenY)
     double pickedDepth = std::numeric_limits<double>::infinity();
     for (const TileFirstPersonDoorHitTarget& target : gFirstPersonPreviewDoorHitTargets) {
         const int xDistance = target.screenX > x ? target.screenX - x : x - target.screenX;
-        if (xDistance > 4
+        if (xDistance > 12
             || xDistance > pickedXDistance
             || (xDistance == pickedXDistance && target.depth >= pickedDepth)) {
             continue;
