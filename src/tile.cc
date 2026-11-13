@@ -1,3 +1,5 @@
+#include "slow_frame_log.h"
+#include "first_person_texture_runs.h"
 #include <cmath>
 #include <stdlib.h>
 #include "config.h"
@@ -303,7 +305,7 @@ static void tileFirstPersonRenderExitGridMarker(
     int tile,
     const TileFirstPersonExitGridRenderContext* context);
 static void tileFirstPersonDrawCrosshair(double directionX, double directionY);
-static void tileFirstPersonDrawMoveMarker(double directionX, double directionY, int tile, Color color);
+static void tileFirstPersonDrawMoveMarker(double cameraX, double cameraY, double directionX, double directionY, int tile, Color color);
 static void tileFirstPersonDrawDiagnosticLine(int x1, int y1, int x2, int y2, Color color);
 static bool tileFirstPersonGetWorldPosition(int tile, double* x, double* y);
 static Rotation tileFirstPersonGetRotationToward(int tile, double targetX, double targetY);
@@ -1325,6 +1327,8 @@ static void tileRenderFirstPersonPreview()
     constexpr double kPi = 3.14159265358979323846;
     constexpr double kFieldOfViewScale = 0.66;
     const bool profileFrame = settings.debug.show_fps;
+    static SlowFrameLog slowFrameLog;
+    if (!profileFrame) slowFrameLog = {};
     const unsigned int frameStart = profileFrame ? getTicks() : 0;
     const int ambientIntensity = lightGetAmbientIntensity();
     const int ambientIntensityIndex = std::clamp(ambientIntensity / 512, 0, 255);
@@ -2031,19 +2035,29 @@ static void tileRenderFirstPersonPreview()
                         gFirstPersonWoodWallTexture[textureIndex]][light];
                 }
 
-                for (int y = wallTop; y <= wallBottom; y++) {
-                    const int textureY = static_cast<int>(
-                        (y - unclippedWallTop) * kFirstPersonWallTextureSize / textureHeight)
+                // Nearby walls magnify one source row across many pixels.
+                // Skip whole alpha gaps and reuse sampling for opaque runs.
+                // Run-boundary math pays off only at strong magnification.
+                const bool magnified = textureHeight >= kFirstPersonWallTextureSize * 16;
+                for (int y = wallTop; y <= wallBottom;) {
+                    const int textureY = firstPersonTextureRow(
+                        y, unclippedWallTop, textureHeight, kFirstPersonWallTextureSize)
                         % kFirstPersonWallTextureSize;
-                    if (!woodOpaque[textureY]) {
-                        continue;
+                    const int end = magnified
+                        ? firstPersonTextureRunEnd(y, wallBottom + 1, unclippedWallTop,
+                            textureHeight, kFirstPersonWallTextureSize)
+                        : y + 1;
+                    if (woodOpaque[textureY]) {
+                        const unsigned char color = woodColors[textureY];
+                        for (int row = y; row < end; ++row) {
+                            const size_t depthIndex = columnOffset + row;
+                            if (distance < wallPixelDepths[depthIndex]) {
+                                wallPixelDepths[depthIndex] = distance;
+                                gTileWindowBuffer[row * gTileWindowPitch + x] = color;
+                            }
+                        }
                     }
-
-                    const size_t depthIndex = static_cast<size_t>(x) * gTileWindowHeight + y;
-                    if (distance < wallPixelDepths[depthIndex]) {
-                        wallPixelDepths[depthIndex] = distance;
-                        gTileWindowBuffer[y * gTileWindowPitch + x] = woodColors[textureY];
-                    }
+                    y = end;
                 }
             } else {
                 const double textureScaleHeight = type == 3 || type == 5 || gatePanel
@@ -2279,10 +2293,12 @@ static void tileRenderFirstPersonPreview()
     // Hit targets and wall depths now describe this frame. Resolve the hover
     // before drawing overlays, without triggering another scene refresh.
     gameFirstPersonPreviewUpdateHover(false);
-    tileFirstPersonDrawMoveMarker(directionX, directionY, gFirstPersonPreviewMoveMarkerTile, COLOR_RED);
+    const unsigned int hoverEnd = profileFrame ? getTicks() : 0;
+    tileFirstPersonDrawMoveMarker(cameraX, cameraY, directionX, directionY, gFirstPersonPreviewMoveMarkerTile, COLOR_RED);
     if (!gFirstPersonPreviewCursorCaptured) {
-        tileFirstPersonDrawMoveMarker(directionX, directionY, gFirstPersonPreviewHoverTile, COLOR_LIGHT_GREEN_3);
+        tileFirstPersonDrawMoveMarker(cameraX, cameraY, directionX, directionY, gFirstPersonPreviewHoverTile, COLOR_LIGHT_GREEN_3);
     }
+    const unsigned int markerEnd = profileFrame ? getTicks() : 0;
     tileFirstPersonDrawCrosshair(directionX, directionY);
     tileRenderFirstPersonTopologyOverlay();
 
@@ -2294,14 +2310,18 @@ static void tileRenderFirstPersonPreview()
         const unsigned int actorMs = getTicksBetween(actorEnd, actorStart);
         // Averages hide isolated doorway hitches. Include setup/cache and
         // overlay time, which are outside the three raster/submission stages.
-        if (totalMs >= 50) {
-            debugPrint("F11 slow frame: tick=%u tile=%d elevation=%d total=%u setup=%u cache=%u rebuilt=%d floor=%u wall=%u actors=%u overlay=%u ms\n",
+        const SlowFrameLogSample slowSample = slowFrameLog.record(frameEnd, totalMs);
+        if (slowSample.emit) {
+            debugPrint("F11 slow frame: tick=%u tile=%d elevation=%d total=%u setup=%u cache=%u rebuilt=%d floor=%u wall=%u actors=%u hover=%u markers=%u overlay=%u ms slowCount=%u worst=%u ms\n",
                 frameEnd, gDude != nullptr ? gDude->tile : -1,
                 static_cast<int>(gElevation), totalMs,
                 getTicksBetween(wallStart, frameStart),
                 getTicksBetween(floorCacheEnd, floorCacheStart),
                 floorLayoutChanged ? 1 : 0, floorMs, wallMs, actorMs,
-                getTicksBetween(frameEnd, actorEnd));
+                getTicksBetween(hoverEnd, actorEnd),
+                getTicksBetween(markerEnd, hoverEnd),
+                getTicksBetween(frameEnd, markerEnd),
+                slowSample.count, slowSample.worstMs);
         }
         gFirstPersonPreviewProfileFrames++;
         gFirstPersonPreviewProfileTotalMs += totalMs;
@@ -4914,6 +4934,16 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                 return;
             }
             const SDL_Rect destination = { artLeft, artTop, artWidth, artHeight };
+            static std::vector<SDL_Rect> visibleClips;
+            visibleClips.clear();
+            const auto queueVisibleClip = [&](const SDL_Rect& clip) {
+                if (outlinePixels != nullptr) {
+                    visibleClips.push_back(clip);
+                } else {
+                    gpuBillboardSubmit(frame.data, frame.width, frame.height,
+                        destination, clip, transformY);
+                }
+            };
             const auto submitVisibleRange = [&](int top, int bottom) {
                 if (top >= bottom) {
                     return;
@@ -4921,17 +4951,25 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                 bool needsDetailedClipping = false;
                 static BillboardClipBands clipBands;
                 clipBands.reset(top, bottom);
-                if (renderContext->doorCapDepths != nullptr) {
-                    for (int x = firstOpaqueColumn; x < lastColumn; x++) {
+                for (int x = firstOpaqueColumn; x < lastColumn; x++) {
+                    // These depths are constant within this horizon range.
+                    // Alpha boundaries in a fully hidden column cannot change
+                    // visibility, but would otherwise split every sprite row.
+                    if (billboardColumnHidden(transformY, (*renderContext->wallDepths)[x],
+                            (*renderContext->wallSillDepths)[x],
+                            top >= renderContext->horizonY, objectType == OBJ_TYPE_CRITTER)) {
+                        continue;
+                    }
+                    if (renderContext->doorCapDepths != nullptr) {
                         const TileFirstPersonDoorCapSpan& cap = (*renderContext->doorCapDepths)[x];
                         if (cap.top < cap.bottom && cap.top < bottom && cap.bottom > top
                             && transformY >= cap.depth) {
                             needsDetailedClipping = true;
                             clipBands.addOccluder(cap.top, cap.bottom);
+                            // A covering cap also makes finer wall gaps irrelevant.
+                            if (cap.top <= top && cap.bottom >= bottom) continue;
                         }
                     }
-                }
-                for (int x = firstOpaqueColumn; x < lastColumn; x++) {
                     needsDetailedClipping = tileFirstPersonAddWallPixelOcclusionBands(
                         x, top, bottom, transformY, &clipBands)
                         || needsDetailedClipping;
@@ -4959,12 +4997,7 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                             inRun = true;
                         } else if (!visible && inRun) {
                             const SDL_Rect clip = { runStart, top, x - runStart, bottom - top };
-                            if (outlinePixels != nullptr) {
-                                gpuBillboardSubmit(outlinePixels->data(), outlineWidth, outlineHeight,
-                                    destination, clip, transformY);
-                            }
-                            gpuBillboardSubmit(frame.data, frame.width, frame.height,
-                                destination, clip, transformY);
+                            queueVisibleClip(clip);
                             inRun = false;
                         }
                     }
@@ -4982,20 +5015,19 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                     const int bandHeight = boundaries[band + 1] - y;
                     nextClips.clear();
                     retained.assign(activeClips.size(), false);
+                    size_t previousRunCursor = 0;
                     int runStart = firstOpaqueColumn;
                     bool inRun = false;
                     const auto finishRun = [&](int runEnd) {
                         SDL_Rect clip = { runStart, y, runEnd - runStart, bandHeight };
-                        for (size_t index = 0; index < activeClips.size(); index++) {
+                        const size_t index = billboardFindPreviousRun(
+                            activeClips, previousRunCursor, clip);
+                        if (index < activeClips.size()) {
                             SDL_Rect& active = activeClips[index];
-                            if (!retained[index]
-                                && active.x == clip.x && active.w == clip.w
-                                && active.y + active.h == y) {
-                                active.h += bandHeight;
-                                nextClips.push_back(active);
-                                retained[index] = true;
-                                return;
-                            }
+                            active.h += bandHeight;
+                            nextClips.push_back(active);
+                            retained[index] = true;
+                            return;
                         }
                         nextClips.push_back(clip);
                     };
@@ -5019,29 +5051,29 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                     }
                     for (size_t index = 0; index < activeClips.size(); index++) {
                         if (!retained[index]) {
-                            if (outlinePixels != nullptr) {
-                                gpuBillboardSubmit(outlinePixels->data(), outlineWidth, outlineHeight,
-                                    destination, activeClips[index], transformY);
-                            }
-                            gpuBillboardSubmit(frame.data, frame.width, frame.height,
-                                destination, activeClips[index], transformY);
+                            queueVisibleClip(activeClips[index]);
                         }
                     }
                     activeClips.swap(nextClips);
                 }
                 for (const SDL_Rect& clip : activeClips) {
-                    if (outlinePixels != nullptr) {
-                        gpuBillboardSubmit(outlinePixels->data(), outlineWidth, outlineHeight,
-                            destination, clip, transformY);
-                    }
-                    gpuBillboardSubmit(frame.data, frame.width, frame.height,
-                        destination, clip, transformY);
+                    queueVisibleClip(clip);
                 }
             };
             submitVisibleRange(std::max(0, opaqueTop),
                 std::min(gTileWindowHeight, std::min(opaqueBottom, renderContext->horizonY)));
             submitVisibleRange(std::max(0, std::max(opaqueTop, renderContext->horizonY)),
                 std::min(gTileWindowHeight, opaqueBottom));
+            billboardSubmitClipLayers(visibleClips, outlinePixels != nullptr,
+                [&](const SDL_Rect& clip, bool outline) {
+                    if (outline) {
+                        gpuBillboardSubmit(outlinePixels->data(), outlineWidth, outlineHeight,
+                            destination, clip, transformY);
+                    } else {
+                        gpuBillboardSubmit(frame.data, frame.width, frame.height,
+                            destination, clip, transformY);
+                    }
+                });
             if (objectType != OBJ_TYPE_SCENERY) {
                 textObjectsRenderForOwner(object,
                     tileFirstPersonQueueTextRender, &textRenderContext,
@@ -5562,7 +5594,7 @@ static void tileFirstPersonDrawCrosshair(double directionX, double directionY)
     bufferDrawLine(gTileWindowBuffer, gTileWindowPitch, tipX, tipY, rightX, rightY, COLOR_LIGHT_GREEN_3);
 }
 
-static void tileFirstPersonDrawMoveMarker(double directionX, double directionY, int tile, Color color)
+static void tileFirstPersonDrawMoveMarker(double cameraX, double cameraY, double directionX, double directionY, int tile, Color color)
 {
     if (!tileIsValid(tile)
         || gDude == nullptr || gDude->elevation != gElevation) {
@@ -5570,11 +5602,8 @@ static void tileFirstPersonDrawMoveMarker(double directionX, double directionY, 
     }
 
     constexpr double kFieldOfViewScale = 0.66;
-    double cameraX;
-    double cameraY;
     double targetX;
     double targetY;
-    tileFirstPersonGetCameraPosition(gDude->tile, gDude->elevation, &cameraX, &cameraY);
     if (!tileFirstPersonGetWorldPosition(tile, &targetX, &targetY)) {
         return;
     }
@@ -6553,7 +6582,10 @@ void tileFirstPersonPreviewSetMoveMarkerTile(int tile)
 
     if (gFirstPersonPreviewMoveMarkerTile != tile) {
         gFirstPersonPreviewMoveMarkerTile = tile;
-        tileFirstPersonPreviewRefresh();
+        // Coalesce destination changes with the move/camera update. Rendering
+        // here stalls input before the movement command is even submitted and
+        // repeats the full scene pass at the next presentation.
+        tileFirstPersonPreviewRequestRefresh();
     }
 }
 

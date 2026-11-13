@@ -1,3 +1,4 @@
+#include "billboard_depth_sort.h"
 
 #include "svga.h"
 
@@ -260,13 +261,14 @@ void gpuBillboardHideCursor()
     gGpuHasCursor = false;
 }
 
-void gpuBillboardSetCursor(const unsigned char* pixels, int width, int height,
+bool gpuBillboardSetCursor(const unsigned char* pixels, int width, int height,
     int pitch, unsigned char transparentColor, int x, int y)
 {
     gGpuHasCursor = gSdlRendererHardwareAccelerated
         && pixels != nullptr && width > 0 && height > 0 && pitch >= width;
     if (!gGpuHasCursor) {
-        return;
+        gGpuHasCursor = false;
+        return false;
     }
 
     unsigned char* palette = directDrawGetPalette();
@@ -292,7 +294,8 @@ void gpuBillboardSetCursor(const unsigned char* pixels, int width, int height,
             SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, width, height);
         if (gGpuCursorTexture == nullptr) {
             gGpuCursorPixels = nullptr;
-            return;
+            gGpuHasCursor = false;
+            return false;
         }
 
         std::vector<uint32_t> rgba(static_cast<size_t>(width) * height);
@@ -311,7 +314,8 @@ void gpuBillboardSetCursor(const unsigned char* pixels, int width, int height,
             SDL_DestroyTexture(gGpuCursorTexture);
             gGpuCursorTexture = nullptr;
             gGpuCursorPixels = nullptr;
-            return;
+            gGpuHasCursor = false;
+            return false;
         }
         SDL_SetTextureBlendMode(gGpuCursorTexture, SDL_BLENDMODE_BLEND);
 #if SDL_VERSION_ATLEAST(2, 0, 12)
@@ -326,6 +330,7 @@ void gpuBillboardSetCursor(const unsigned char* pixels, int width, int height,
     }
 
     gGpuCursorRect = { x, y, width, height };
+    return true;
 }
 
 void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
@@ -1038,35 +1043,92 @@ void renderPresent()
     }
     const bool firstPersonPreviewEnabled = tileFirstPersonPreviewIsEnabled();
     const Uint64 sortStart = profileGpuFrame ? SDL_GetPerformanceCounter() : 0;
-    std::stable_sort(gGpuBillboards.begin(), gGpuBillboards.end(),
-        [](const GpuBillboard& lhs, const GpuBillboard& rhs) {
-            return lhs.depth > rhs.depth;
-        });
+    static std::vector<BillboardDepthRun> depthRuns;
+    static std::vector<GpuBillboard> sortedBillboards;
+    billboardSortDepth(gGpuBillboards, depthRuns, sortedBillboards);
     const Uint64 sortEnd = profileGpuFrame ? SDL_GetPerformanceCounter() : 0;
     SDL_Rect activeClip {};
     bool hasActiveClip = false;
     uint64_t billboardDrawCalls = 0;
     uint64_t clipChanges = 0;
     const Uint64 drawStart = profileGpuFrame ? SDL_GetPerformanceCounter() : 0;
-    for (const GpuBillboard& billboard : gGpuBillboards) {
+    const auto copyBillboard = [&](const GpuBillboard& billboard) {
         const bool clipChanged = !hasActiveClip
-            || activeClip.x != billboard.clip.x
-            || activeClip.y != billboard.clip.y
-            || activeClip.w != billboard.clip.w
-            || activeClip.h != billboard.clip.h;
+            || activeClip.x != billboard.clip.x || activeClip.y != billboard.clip.y
+            || activeClip.w != billboard.clip.w || activeClip.h != billboard.clip.h;
         if (clipChanged) {
             SDL_RenderSetClipRect(gSdlRenderer, &billboard.clip);
             activeClip = billboard.clip;
             hasActiveClip = true;
-            if (profileGpuFrame) {
-                clipChanges++;
-            }
+            ++clipChanges;
         }
         SDL_RenderCopy(gSdlRenderer, billboard.texture, nullptr, &billboard.destination);
-        if (profileGpuFrame) {
-            billboardDrawCalls++;
+        ++billboardDrawCalls;
+    };
+#if SDL_VERSION_ATLEAST(2, 0, 18)
+    // Scissor changes break SDL batching. Encode wall visibility in quad
+    // positions/UVs instead, preserving the stable back-to-front ordering.
+    static std::vector<SDL_Vertex> vertices;
+    static std::vector<int> indices;
+    constexpr size_t kMaxBatchQuads = 4096;
+    for (size_t first = 0; first < gGpuBillboards.size();) {
+        size_t end = first + 1;
+        SDL_Texture* texture = gGpuBillboards[first].texture;
+        while (end < gGpuBillboards.size() && end - first < kMaxBatchQuads
+            && gGpuBillboards[end].texture == texture) {
+            ++end;
         }
+        vertices.clear();
+        indices.clear();
+        // RenderGeometry ignores texture color modulation; carry it in vertices.
+        SDL_Color color { 255, 255, 255, 255 };
+        SDL_GetTextureColorMod(texture, &color.r, &color.g, &color.b);
+        SDL_GetTextureAlphaMod(texture, &color.a);
+        for (size_t index = first; index < end; ++index) {
+            const GpuBillboard& billboard = gGpuBillboards[index];
+            SDL_Rect visible;
+            if (!SDL_IntersectRect(&billboard.destination, &billboard.clip, &visible)) {
+                continue;
+            }
+            const SDL_Rect& dest = billboard.destination;
+            const float left = static_cast<float>(visible.x);
+            const float top = static_cast<float>(visible.y);
+            const float right = static_cast<float>(visible.x + visible.w);
+            const float bottom = static_cast<float>(visible.y + visible.h);
+            const float u0 = static_cast<float>(visible.x - dest.x) / dest.w;
+            const float v0 = static_cast<float>(visible.y - dest.y) / dest.h;
+            const float u1 = static_cast<float>(visible.x + visible.w - dest.x) / dest.w;
+            const float v1 = static_cast<float>(visible.y + visible.h - dest.y) / dest.h;
+            const int base = static_cast<int>(vertices.size());
+            vertices.push_back({ { left, top }, color, { u0, v0 } });
+            vertices.push_back({ { right, top }, color, { u1, v0 } });
+            vertices.push_back({ { right, bottom }, color, { u1, v1 } });
+            vertices.push_back({ { left, bottom }, color, { u0, v1 } });
+            for (int offset : { 0, 1, 2, 0, 2, 3 }) indices.push_back(base + offset);
+        }
+        if (!vertices.empty()) {
+            if (hasActiveClip) {
+                SDL_RenderSetClipRect(gSdlRenderer, nullptr);
+                hasActiveClip = false;
+            }
+            if (SDL_RenderGeometry(gSdlRenderer, texture, vertices.data(),
+                    static_cast<int>(vertices.size()), indices.data(),
+                    static_cast<int>(indices.size())) == 0) {
+                ++billboardDrawCalls;
+            } else {
+                // Retain compatibility with renderers lacking geometry support.
+                for (size_t index = first; index < end; ++index) {
+                    copyBillboard(gGpuBillboards[index]);
+                }
+            }
+        }
+        first = end;
     }
+#else
+    for (const GpuBillboard& billboard : gGpuBillboards) {
+        copyBillboard(billboard);
+    }
+#endif
     if (hasActiveClip) {
         SDL_RenderSetClipRect(gSdlRenderer, nullptr);
     }
@@ -1118,7 +1180,7 @@ void renderPresent()
         gGpuPresentationProfileTotalMs += performanceCounterMilliseconds(frameStart, frameEnd);
         if (gGpuPresentationProfileFrames >= 60) {
             const double frameCount = static_cast<double>(gGpuPresentationProfileFrames);
-            debugPrint("F11 GPU avg: spans=%.0f submits=%.0f merged=%.0f queued=%.0f copies=%.0f clips=%.0f cacheHit=%.0f cacheMiss=%.0f upload=%.3f sort=%.3f copyQueue=%.3f present=%.3f total=%.3f ms\n",
+            debugPrint("F11 GPU avg: spans=%.0f submits=%.0f merged=%.0f queued=%.0f draws=%.0f clips=%.0f cacheHit=%.0f cacheMiss=%.0f upload=%.3f sort=%.3f copyQueue=%.3f present=%.3f total=%.3f ms\n",
                 gGpuPresentationProfileWallDepthSpanCount / frameCount,
                 gGpuPresentationProfileSubmitCount / frameCount,
                 gGpuPresentationProfileMergedSubmitCount / frameCount,

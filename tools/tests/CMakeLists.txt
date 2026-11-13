@@ -35,3 +35,18 @@ add_executable(transparent_window_rects_test transparent_window_rects_test.cc)
 target_compile_features(transparent_window_rects_test PRIVATE cxx_std_17)
 target_include_directories(transparent_window_rects_test PRIVATE ../../src)
 add_test(NAME transparent_window_rects COMMAND transparent_window_rects_test)
+
+add_executable(first_person_texture_runs_test first_person_texture_runs_test.cc)
+target_compile_features(first_person_texture_runs_test PRIVATE cxx_std_17)
+target_include_directories(first_person_texture_runs_test PRIVATE ../../src)
+add_test(NAME first_person_texture_runs COMMAND first_person_texture_runs_test)
+
+add_executable(slow_frame_log_test slow_frame_log_test.cc)
+target_compile_features(slow_frame_log_test PRIVATE cxx_std_17)
+target_include_directories(slow_frame_log_test PRIVATE ../../src)
+add_test(NAME slow_frame_log COMMAND slow_frame_log_test)
+
+add_executable(billboard_depth_sort_test billboard_depth_sort_test.cc)
+target_compile_features(billboard_depth_sort_test PRIVATE cxx_std_17)
+target_include_directories(billboard_depth_sort_test PRIVATE ../../src)
+add_test(NAME billboard_depth_sort COMMAND billboard_depth_sort_test)

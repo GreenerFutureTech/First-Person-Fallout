@@ -13,6 +13,7 @@
 #include "platform/ios/quick_toolbar.h"
 #include "svga.h"
 #include "touch.h"
+#include "tile.h"
 #include "window_manager.h"
 
 namespace fallout {
@@ -65,6 +66,8 @@ static int last_buttons = 0;
 
 // 0x6AC790 mouse_is_hidden
 static bool gCursorIsHidden;
+// True only when no cursor pixels were painted into the CPU framebuffer.
+static bool gMouseGpuCursorOnly = false;
 
 // 0x6AC794 raw_x
 static int _raw_x;
@@ -140,6 +143,7 @@ int mouseInit()
     _mouse_disabled = 0;
 
     gCursorIsHidden = true;
+    gMouseGpuCursorOnly = false;
 
     mousePrepareDefaultCursor();
 
@@ -198,7 +202,6 @@ static void mousePrepareDefaultCursor()
 // 0x4CA0AC
 int mouseSetFrame(unsigned char* frame, int width, int height, int pitch, int hotX, int hotY, char transparentColor)
 {
-    Rect rect;
     unsigned char* cursorFrame;
     int hotXDelta;
     int hotYDelta;
@@ -212,12 +215,7 @@ int mouseSetFrame(unsigned char* frame, int width, int height, int pitch, int ho
 
     bool cursorWasHidden = gCursorIsHidden;
     if (!gCursorIsHidden && gMouseInitialized) {
-        gCursorIsHidden = true;
-        gpuBillboardHideCursor();
-        mouseGetRect(&rect);
-        gpuBillboardBeginCursorRestore();
-        windowRefreshAll(&rect);
-        gpuBillboardEndCursorRestore();
+        mouseHideCursor();
     }
 
     if (width != gMouseCursorWidth || height != gMouseCursorHeight) {
@@ -295,6 +293,21 @@ static void _mouse_anim()
 // 0x4CA34C
 void mouseShowCursor()
 {
+    if (gMouseInitialized && tileFirstPersonPreviewIsEnabled()
+        && screenIsHardwareAccelerated()) {
+        // Remove a previously software-composited cursor once when entering
+        // this path. Subsequent updates only move/update the GPU texture.
+        if (!gCursorIsHidden && !gMouseGpuCursorOnly) mouseHideCursor();
+        if (gpuBillboardSetCursor(_mouse_shape, gMouseCursorWidth, gMouseCursorHeight,
+                gMouseCursorPitch, static_cast<unsigned char>(_mouse_trans),
+                gMouseCursorX, gMouseCursorY)) {
+            gMouseGpuCursorOnly = true;
+            gCursorIsHidden = false;
+            return;
+        }
+    }
+    gMouseGpuCursorOnly = false;
+
     unsigned char* cursorData;
     int clipX;
     int clipWidth;
@@ -366,6 +379,12 @@ void mouseShowCursor()
 // 0x4CA534
 void mouseHideCursor()
 {
+    if (gMouseInitialized && gMouseGpuCursorOnly) {
+        gpuBillboardHideCursor();
+        gMouseGpuCursorOnly = false;
+        gCursorIsHidden = true;
+        return;
+    }
     Rect rect;
 
     if (gMouseInitialized) {
@@ -703,9 +722,12 @@ void _mouse_simulate_input(int delta_x, int delta_y, int buttons)
         }
         _mouse_clip();
 
-        gpuBillboardBeginCursorRestore();
-        windowRefreshAll(&mouseRect);
-        gpuBillboardEndCursorRestore();
+        // The F11 GPU cursor never dirtied this framebuffer rectangle.
+        if (!gMouseGpuCursorOnly) {
+            gpuBillboardBeginCursorRestore();
+            windowRefreshAll(&mouseRect);
+            gpuBillboardEndCursorRestore();
+        }
 
         mouseShowCursor();
 

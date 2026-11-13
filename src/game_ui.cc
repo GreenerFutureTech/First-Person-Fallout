@@ -167,8 +167,23 @@ void gameHandleFirstPersonPreviewInput(int eventCode)
         }
     }
 
-    // Resolve hover during rendering once this frame's hit targets exist.
-    tileFirstPersonPreviewRequestRefresh();
+    // A stationary cursor does not invalidate the scene. Main/combat loops
+    // refresh animation independently; look input requests its own refresh.
+    // Only invalidate here when the cursor or capture mode actually changes.
+    static int previousMouseX = -1;
+    static int previousMouseY = -1;
+    static bool previousCaptured = true;
+    int mouseX;
+    int mouseY;
+    mouseGetPosition(&mouseX, &mouseY);
+    const bool captured = mouseDeviceUsesRelativeMode();
+    if (captured != previousCaptured
+        || (!captured && (mouseX != previousMouseX || mouseY != previousMouseY))) {
+        tileFirstPersonPreviewRequestRefresh();
+    }
+    previousMouseX = mouseX;
+    previousMouseY = mouseY;
+    previousCaptured = captured;
 
     if (mouseDeviceUsesRelativeMode()) {
         int deltaX;
@@ -189,11 +204,16 @@ void gameFirstPersonPreviewUpdateHover(bool requestRefresh)
         mouseGetPosition(&mouseX, &mouseY);
         Rect rect;
         if (windowGetAtPoint(mouseX, mouseY) == gIsoWindow
-            && windowGetRect(gIsoWindow, &rect) == 0
-            && tileFirstPersonPreviewPickCritterAt(mouseX, mouseY) == nullptr
-            && tileFirstPersonPreviewPickObjectAt(mouseX, mouseY) == nullptr
-            && tileFirstPersonPreviewPickDoorAt(mouseX, mouseY) == nullptr) {
+            && windowGetRect(gIsoWindow, &rect) == 0) {
+            // Reject sky, walls, and missing floor before scanning the scene's
+            // hit targets (projected scenery can contribute one per column).
             hoverTile = tileFirstPersonPreviewPickGroundTileAt(mouseX - rect.left, mouseY - rect.top);
+            if (tileIsValid(hoverTile)
+                && (tileFirstPersonPreviewPickDoorAt(mouseX, mouseY) != nullptr
+                    || tileFirstPersonPreviewPickCritterAt(mouseX, mouseY) != nullptr
+                    || tileFirstPersonPreviewPickObjectAt(mouseX, mouseY) != nullptr)) {
+                hoverTile = -1;
+            }
         }
     }
     tileFirstPersonPreviewSetHoverTile(hoverTile, requestRefresh);
