@@ -2880,63 +2880,105 @@ static void tileFirstPersonMarkDoorFlankWalls(
         return;
     }
 
+    struct DoorFlankWall {
+        int tile;
+        int direction;
+        int distance;
+        unsigned char type;
+        TileFirstPersonWallOrientation orientation;
+        MaterialType material;
+    };
+
     for (Object* door : *renderContext->doorObjects) {
         if (door == nullptr || door->elevation != renderContext->elevation) {
             continue;
         }
 
-        for (int rotation = ROTATION_FIRST; rotation < ROTATION_COUNT / 2; rotation++) {
-            const int oppositeRotation = rotation + ROTATION_COUNT / 2;
-            const int firstFlank = tileGetTileInDirection(
-                door->tile, static_cast<Rotation>(rotation), 1);
-            const int secondFlank = tileGetTileInDirection(
-                door->tile, static_cast<Rotation>(oppositeRotation), 1);
-            const int firstWall = tileGetTileInDirection(
-                door->tile, static_cast<Rotation>(rotation), 2);
-            const int secondWall = tileGetTileInDirection(
-                door->tile, static_cast<Rotation>(oppositeRotation), 2);
-            if (!tileIsValid(firstFlank) || !tileIsValid(secondFlank)
-                || !tileIsValid(firstWall) || !tileIsValid(secondWall)) {
-                continue;
+        const int doorRotation = rotationIsValid(door->rotation)
+            ? door->rotation
+            : ROTATION_E;
+        const int flankDirections[2] = {
+            doorRotation % (ROTATION_COUNT / 2),
+            doorRotation % (ROTATION_COUNT / 2) + ROTATION_COUNT / 2,
+        };
+        DoorFlankWall flankWalls[2] = {};
+        for (int side = 0; side < 2; side++) {
+            for (int distance = 1; distance <= 4; distance++) {
+                const int tile = tileGetTileInDirection(
+                    door->tile, static_cast<Rotation>(flankDirections[side]), distance);
+                if (!tileIsValid(tile)) {
+                    break;
+                }
+                const int renderTile = tileFirstPersonGetRenderHexTile(
+                    tile, renderContext->gridWidth);
+                if (renderTile < 0) {
+                    break;
+                }
+                const unsigned char type = renderContext->wallCells[renderTile];
+                if (type != 1 && type != 2) {
+                    continue;
+                }
+                flankWalls[side] = {
+                    tile,
+                    flankDirections[side],
+                    distance,
+                    type,
+                    static_cast<TileFirstPersonWallOrientation>(
+                        renderContext->wallOrientations[renderTile]),
+                    renderContext->wallMaterials[renderTile],
+                };
+                break;
             }
+        }
 
-            const int firstFlankRenderTile = tileFirstPersonGetRenderHexTile(
-                firstFlank, renderContext->gridWidth);
-            const int secondFlankRenderTile = tileFirstPersonGetRenderHexTile(
-                secondFlank, renderContext->gridWidth);
-            const int firstWallRenderTile = tileFirstPersonGetRenderHexTile(
-                firstWall, renderContext->gridWidth);
-            const int secondWallRenderTile = tileFirstPersonGetRenderHexTile(
-                secondWall, renderContext->gridWidth);
-            if (firstFlankRenderTile < 0 || secondFlankRenderTile < 0
-                || firstWallRenderTile < 0 || secondWallRenderTile < 0) {
-                continue;
+        const bool hasFlankWallPair =
+            flankWalls[0].distance != 0 && flankWalls[1].distance != 0;
+        MaterialType flankMaterial = MATERIAL_TYPE_STONE;
+        if (!hasFlankWallPair) {
+            for (int rotation = ROTATION_FIRST;
+                 rotation < ROTATION_COUNT && flankMaterial == MATERIAL_TYPE_STONE;
+                 rotation++) {
+                for (int searchDistance = 1; searchDistance <= 4; searchDistance++) {
+                    const int nearbyTile = tileGetTileInDirection(
+                        door->tile, static_cast<Rotation>(rotation), searchDistance);
+                    if (!tileIsValid(nearbyTile)) {
+                        break;
+                    }
+                    const int nearbyRenderTile = tileFirstPersonGetRenderHexTile(
+                        nearbyTile, renderContext->gridWidth);
+                    if (nearbyRenderTile < 0) {
+                        break;
+                    }
+                    const unsigned char nearbyType =
+                        renderContext->wallCells[nearbyRenderTile];
+                    if ((nearbyType == 1 || nearbyType == 2)
+                        && renderContext->wallMaterials[nearbyRenderTile]
+                            != MATERIAL_TYPE_INVALID) {
+                        flankMaterial = renderContext->wallMaterials[nearbyRenderTile];
+                        break;
+                    }
+                }
             }
-
-            const unsigned char firstWallType = renderContext->wallCells[firstWallRenderTile];
-            const unsigned char secondWallType = renderContext->wallCells[secondWallRenderTile];
-            if ((firstWallType != 1 && firstWallType != 2)
-                || firstWallType != secondWallType
-                || renderContext->wallMaterials[firstWallRenderTile]
-                    != renderContext->wallMaterials[secondWallRenderTile]
-                || renderContext->wallOrientations[firstWallRenderTile]
-                    != renderContext->wallOrientations[secondWallRenderTile]) {
-                continue;
-            }
-
-            if (renderContext->wallCells[firstFlankRenderTile] == 0) {
-                renderContext->wallCells[firstFlankRenderTile] = firstWallType;
-                renderContext->wallOrientations[firstFlankRenderTile] =
-                    renderContext->wallOrientations[firstWallRenderTile];
-                renderContext->wallMaterials[firstFlankRenderTile] =
-                    renderContext->wallMaterials[firstWallRenderTile];
-            }
-            if (renderContext->wallCells[secondFlankRenderTile] == 0) {
-                renderContext->wallCells[secondFlankRenderTile] = secondWallType;
-                renderContext->wallOrientations[secondFlankRenderTile] =
-                    renderContext->wallOrientations[secondWallRenderTile];
-                renderContext->wallMaterials[secondFlankRenderTile] =
-                    renderContext->wallMaterials[secondWallRenderTile];
+        }
+        for (int side = 0; side < 2; side++) {
+            const int wallDistance = hasFlankWallPair ? flankWalls[side].distance : 2;
+            for (int distance = 1; distance < wallDistance; distance++) {
+                const int tile = tileGetTileInDirection(
+                    door->tile, static_cast<Rotation>(flankDirections[side]), distance);
+                const int renderTile = tileFirstPersonGetRenderHexTile(
+                    tile, renderContext->gridWidth);
+                if (renderTile >= 0 && renderContext->wallCells[renderTile] == 0) {
+                    if (hasFlankWallPair) {
+                        renderContext->wallCells[renderTile] = flankWalls[side].type;
+                        renderContext->wallOrientations[renderTile] = flankWalls[side].orientation;
+                        renderContext->wallMaterials[renderTile] = flankWalls[side].material;
+                    } else {
+                        renderContext->wallCells[renderTile] = 1;
+                        renderContext->wallOrientations[renderTile] =
+                            TILE_FIRST_PERSON_WALL_ORIENTATION_CELL;
+                        renderContext->wallMaterials[renderTile] = flankMaterial;
+                    }
+                }
             }
         }
     }
