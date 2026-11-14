@@ -1697,7 +1697,40 @@ static void tileRenderFirstPersonPreview()
             TILE_FIRST_PERSON_WALL_ORIENTATION_CELL;
         int doorCapCellTile = -1;
         int doorCapSide = 0;
+        // Opaque half-walls all start at the horizon; the nearest covers the farther ones.
+        TileFirstPersonTransparentWallLayer opaqueSillLayer {};
+        bool hasOpaqueSillLayer = false;
         double cellEntryDistance = 0.0;
+        const auto recordWindowWallLayer = [&](unsigned char type,
+                                                MaterialType material,
+                                                double distance,
+                                                TileFirstPersonWallOrientation orientation,
+                                                int cellTile,
+                                                int wallSide) {
+            if (distance < windowDistance) {
+                windowType = type;
+                windowMaterial = material;
+                windowOrientation = orientation;
+                windowDistance = distance;
+                windowCellTile = cellTile;
+                windowSide = wallSide;
+                windowGateClosed = type == kFirstPersonWoodGateType;
+            }
+            if (type == 2 && distance < windowSillDistance) {
+                windowSillDistance = distance;
+            }
+        };
+        const auto addOpaqueSillWallLayer = [&](MaterialType material,
+                                                 double distance,
+                                                 TileFirstPersonWallOrientation orientation,
+                                                 int cellTile,
+                                                 int wallSide) {
+            if (!hasOpaqueSillLayer || distance < opaqueSillLayer.distance) {
+                opaqueSillLayer = { 2, material, distance, orientation, cellTile, wallSide };
+                hasOpaqueSillLayer = true;
+            }
+            recordWindowWallLayer(2, material, distance, orientation, cellTile, wallSide);
+        };
         const auto addTransparentWallLayer = [&](unsigned char type,
                                                   MaterialType material,
                                                   double distance,
@@ -1717,19 +1750,8 @@ static void tileRenderFirstPersonPreview()
             } else if (distance < existingLayer->distance) {
                 *existingLayer = { type, material, distance, orientation, cellTile, wallSide };
             }
-
-            if (distance < windowDistance) {
-                windowType = type;
-                windowMaterial = material;
-                windowOrientation = orientation;
-                windowDistance = distance;
-                windowCellTile = cellTile;
-                windowSide = wallSide;
-                windowGateClosed = type == kFirstPersonWoodGateType;
-            }
-            if (type == 2 && distance < windowSillDistance) {
-                windowSillDistance = distance;
-            }
+            recordWindowWallLayer(type, material, distance,
+                orientation, cellTile, wallSide);
         };
         while (mapX >= 0 && mapX < gHexGridWidth
             && mapY >= 0 && mapY < gHexGridHeight) {
@@ -1742,7 +1764,14 @@ static void tileRenderFirstPersonPreview()
                         gFirstPersonPreviewWallOrientations[cellIndex]);
                 if (wallOrientation == TILE_FIRST_PERSON_WALL_ORIENTATION_CELL) {
                     const double hitDistance = std::max(0.1, cellEntryDistance / 2.0);
-                    if (wallType == 2
+                    if (wallType == 2 && cellMaterial != MATERIAL_TYPE_WOOD) {
+                        addOpaqueSillWallLayer(
+                            cellMaterial,
+                            hitDistance,
+                            wallOrientation,
+                            mapY * gHexGridWidth + (gHexGridWidth - 1 - mapX),
+                            side);
+                    } else if (wallType == 2
                         || (wallType == 1 && cellMaterial == MATERIAL_TYPE_WOOD)
                         || wallType == kFirstPersonWoodGateType
                         || wallType == kFirstPersonClosedWoodGateType) {
@@ -1832,7 +1861,16 @@ static void tileRenderFirstPersonPreview()
                     && wallExitDistance >= clippedWallEntryDistance - kIntersectionEpsilon
                     && clippedWallEntryDistance <= cellExitDistance + kIntersectionEpsilon) {
                     const double hitDistance = std::max(0.1, clippedWallEntryDistance / 2.0);
-                    if (wallType == 2
+                    if (wallType == 2 && cellMaterial != MATERIAL_TYPE_WOOD) {
+                        addOpaqueSillWallLayer(
+                            cellMaterial,
+                            hitDistance,
+                            wallOrientation,
+                            mapY * gHexGridWidth + (gHexGridWidth - 1 - mapX),
+                            wallEntryDistance >= cellEntryDistance - kIntersectionEpsilon
+                                ? nearX > nearY ? 0 : 1
+                                : side);
+                    } else if (wallType == 2
                         || (wallType == 1 && cellMaterial == MATERIAL_TYPE_WOOD)
                         || wallType == kFirstPersonWoodGateType
                         || wallType == kFirstPersonClosedWoodGateType) {
@@ -1929,6 +1967,9 @@ static void tileRenderFirstPersonPreview()
 
         const bool detailedWallPixelDepth = !transparentLayers.empty()
             || doorCapDistance != std::numeric_limits<double>::infinity();
+        if (detailedWallPixelDepth && hasOpaqueSillLayer) {
+            transparentLayers.push_back(opaqueSillLayer);
+        }
         hasDetailedWallDepth[x] = detailedWallPixelDepth ? 1 : 0;
         wallDepths[x] = wallDistance;
         wallSillDepths[x] = windowSillDistance;
@@ -2164,6 +2205,8 @@ static void tileRenderFirstPersonPreview()
         if (wallDistance != std::numeric_limits<double>::infinity()) {
             renderWall(wallType, wallMaterial, wallDistance, wallOrientation, side);
         }
+        const int opaqueWallTop = depthTop;
+        const int opaqueWallBottom = depthBottom;
         if (transparentLayers.size() > 1) {
             std::sort(
                 transparentLayers.begin(),
@@ -2181,12 +2224,30 @@ static void tileRenderFirstPersonPreview()
                 layer.orientation,
                 layer.side);
         }
+        if (!detailedWallPixelDepth && hasOpaqueSillLayer) {
+            renderWall(
+                opaqueSillLayer.type,
+                opaqueSillLayer.material,
+                opaqueSillLayer.distance,
+                opaqueSillLayer.orientation,
+                opaqueSillLayer.side);
+        }
         if (doorCapDistance != std::numeric_limits<double>::infinity()) {
             renderWall(5, MATERIAL_TYPE_INVALID, doorCapDistance,
                 doorCapOrientation, doorCapSide);
         }
 
-        if (!detailedWallPixelDepth
+        if (!detailedWallPixelDepth && hasOpaqueSillLayer) {
+            if (wallDistance != std::numeric_limits<double>::infinity()) {
+                const int upperBottom = std::min(opaqueWallBottom, horizonY);
+                if (opaqueWallTop < upperBottom) {
+                    depthSpans.push_back({ opaqueWallTop, upperBottom, wallDistance });
+                }
+            }
+            if (horizonY < depthBottom) {
+                depthSpans.push_back({ horizonY, depthBottom, opaqueSillLayer.distance });
+            }
+        } else if (!detailedWallPixelDepth
             && wallDistance != std::numeric_limits<double>::infinity()
             && depthTop < depthBottom) {
             depthSpans.push_back({ depthTop, depthBottom, wallDistance });
