@@ -44,6 +44,7 @@
 #include "actions.h" // actionExplodeReplay + actionPresReplayShowDeath — viewer explosion replay
 #include "automap.h" // automapSaveCurrent — a viewer records its OWN pipboy map
 #include "animation.h" // reg_anim_* / animationRegister* — the real engine the recorded stream drives
+#include "endgame.h"
 #include "object.h"
 #include "pipboy.h" // pipboyServerHolodisk* — server-authored holodisks
 #include "perk.h" // perkPlayerActorSeedRanks — per-actor sheet rows
@@ -215,6 +216,9 @@ enum : unsigned char {
     EVENT_LOOT_GRANT = 59, // the server opened a container FOR US — open the loot screen
     EVENT_STATE_AUDIT = 60, // authoritative object state — diff it against our mirror
     EVENT_UI_LOCK = 61, // scripted cutscene input lock, addressed (0 = everyone)
+    EVENT_ENDGAME = 62, // server-triggered endgame slideshow + optional credits movie
+    EVENT_SFALL_MESSAGE_BOX = 63,
+    EVENT_SFALL_MESSAGE_BOX_CLOSE = 64,
 };
 
 // crc32 (IEEE, reflected) — MUST match server_loop.cc's joinBlobCrc32.
@@ -413,6 +417,7 @@ static void wmencTagEscInjection(const char* site)
 }
 
 static bool gEncounterPromptActive = false;
+static int gSfallMessageBoxPromptActiveId = 0;
 
 // The decoder's live index: wire netId -> local Object*. Seeded from the loaded
 // blob's post-walk objects, maintained by SPAWN/DESTROY.
@@ -649,6 +654,16 @@ public:
         _encPromptPending = false;
         *title = _encPromptTitle;
         *body = _encPromptBody;
+        return true;
+    }
+
+    bool takeSfallMessageBox(SfallMessageBoxPrompt* prompt)
+    {
+        if (!_sfallMessageBoxPending || prompt == nullptr) {
+            return false;
+        }
+        _sfallMessageBoxPending = false;
+        *prompt = _sfallMessageBox;
         return true;
     }
 
@@ -1089,9 +1104,12 @@ public:
         case EVENT_MOVIE_PLAY: onMoviePlay(r); break;
         case EVENT_MOVIE_SEEN_STATE: onMovieSeenState(r); break;
         case EVENT_MOVIE_STOP: onMovieStop(r); break;
+        case EVENT_ENDGAME: onEndgame(r); break;
         case EVENT_PLAYER_SHEET: onPlayerSheet(r); break;
         case EVENT_ENCOUNTER_PROMPT: onEncounterPrompt(r); break;
         case EVENT_ENCOUNTER_CLOSE: onEncounterClose(r); break;
+        case EVENT_SFALL_MESSAGE_BOX: onSfallMessageBoxPrompt(r); break;
+        case EVENT_SFALL_MESSAGE_BOX_CLOSE: onSfallMessageBoxClose(r); break;
         case EVENT_GVAR_DELTA: onGvarDelta(r); break;
         case EVENT_HOLODISK_CLEAR: onHolodiskClear(r); break;
         case EVENT_HOLODISK_ADD: onHolodiskAdd(r); break;
@@ -4131,6 +4149,44 @@ private:
         }
     }
 
+    void onSfallMessageBoxPrompt(Reader& r)
+    {
+        SfallMessageBoxPrompt prompt;
+        prompt.promptId = r.i32();
+        prompt.title = r.str();
+        unsigned char bodyLength = r.u8();
+        if (bodyLength > 4) {
+            debugPrint("client_net: invalid sfall message_box body length=%u\n", bodyLength);
+            return;
+        }
+        prompt.bodyLength = bodyLength;
+        for (int i = 0; i < prompt.bodyLength; i++) {
+            prompt.body[i] = r.str();
+        }
+        prompt.titleColor = r.i32();
+        prompt.bodyColor = r.i32();
+        prompt.flags = r.i32();
+        if (prompt.promptId <= 0 || r.overflow() || !clientViewerActive()) {
+            return;
+        }
+        _sfallMessageBox = prompt;
+        _sfallMessageBoxPending = true;
+    }
+
+    void onSfallMessageBoxClose(Reader& r)
+    {
+        int promptId = r.i32();
+        if (promptId <= 0) {
+            return;
+        }
+        if (_sfallMessageBoxPending && _sfallMessageBox.promptId == promptId) {
+            _sfallMessageBoxPending = false;
+        }
+        if (clientViewerActive() && gSfallMessageBoxPromptActiveId == promptId) {
+            enqueueInputEvent(KEY_ESCAPE);
+        }
+    }
+
     void onMoviePlay(Reader& r)
     {
         int movie = r.i32();
@@ -4149,6 +4205,36 @@ private:
         // Release the room. FIRST ACK WINS by design (game_movie.h): whoever gets
         // here first — finished or skipped — ends it for everybody.
         clientViewerMovieAck();
+    }
+
+    void onEndgame(Reader& r)
+    {
+        const bool playSlideshow = r.u8() != 0;
+        const bool playMovie = r.u8() != 0;
+        if (!clientViewerActive()) return;
+
+        static bool presentationActive = false;
+        static bool slideshowPending = false;
+        static bool moviePending = false;
+        slideshowPending = slideshowPending || playSlideshow;
+        moviePending = moviePending || playMovie;
+        if (presentationActive) return;
+
+        presentationActive = true;
+        while (slideshowPending || moviePending) {
+            const bool showSlideshow = slideshowPending;
+            const bool showMovie = moviePending;
+            slideshowPending = false;
+            moviePending = false;
+
+            if (showSlideshow) {
+                endgamePlaySlideshow();
+            }
+            if (showMovie) {
+                endgamePlayMovie();
+            }
+        }
+        presentationActive = false;
     }
 
     // Another viewer skipped/finished, so the server freed the movie barrier and told
@@ -4683,6 +4769,8 @@ private:
     bool _encPromptPending = false; // encounter prompt latched out of the decoder
     std::string _encPromptTitle;
     std::string _encPromptBody;
+    bool _sfallMessageBoxPending = false;
+    SfallMessageBoxPrompt _sfallMessageBox;
     bool _elevatorPending = false;
     // When the screen went black (0 = not black). The fade is applied at decode; this
     // is only the watchdog's clock.
@@ -4884,6 +4972,7 @@ public:
     bool takeInventoryGrant() { return _decoder.takeInventoryGrant(); }
     int takeLootGrant() { return _decoder.takeLootGrant(); }
     bool takeEncounterPrompt(std::string* title, std::string* body) { return _decoder.takeEncounterPrompt(title, body); }
+    bool takeSfallMessageBox(SfallMessageBoxPrompt* prompt) { return _decoder.takeSfallMessageBox(prompt); }
     bool takeElevatorPrompt(int* elevator, int* startLevel) { return _decoder.takeElevatorPrompt(elevator, startLevel); }
     bool takeAutomapOpen(bool* usingScanner) { return _decoder.takeAutomapOpen(usingScanner); }
     bool fadeWatchdogExpired(unsigned int nowMs, unsigned int maxBlackMs) const
@@ -5191,6 +5280,11 @@ bool ClientConnection::takeEncounterPrompt(std::string* title, std::string* body
     return _impl->stream != nullptr && _impl->stream->takeEncounterPrompt(title, body);
 }
 
+bool ClientConnection::takeSfallMessageBox(SfallMessageBoxPrompt* prompt)
+{
+    return _impl->stream != nullptr && _impl->stream->takeSfallMessageBox(prompt);
+}
+
 bool ClientConnection::takeElevatorPrompt(int* elevator, int* startLevel)
 {
     return _impl->stream != nullptr && _impl->stream->takeElevatorPrompt(elevator, startLevel);
@@ -5273,8 +5367,37 @@ void clientViewerSetConnection(ClientConnection* conn)
 // every such loop AND the main loop, but it self-gates to modal-only. On combat entry (or
 // a deferred rebaseline, or disconnect) it enqueues ESC so the modal force-closes at its
 // next top-of-loop check — vanilla closes UI on combat entry.
-// Open the latched random-encounter prompt, if one is waiting, and answer the server.
+// Open the latched sfall message_box prompt, if one is waiting, and answer the server.
 // Called ONLY from viewerServiceTicker — never from the decoder (see onEncounterPrompt).
+static void showPendingSfallMessageBox()
+{
+    if (gViewerConn == nullptr || !clientViewerActive() || gSfallMessageBoxPromptActiveId != 0) {
+        return;
+    }
+
+    SfallMessageBoxPrompt prompt;
+    if (!gViewerConn->takeSfallMessageBox(&prompt)) {
+        return;
+    }
+
+    const char* body[4] = {};
+    for (int i = 0; i < prompt.bodyLength; i++) {
+        body[i] = prompt.body[i].c_str();
+    }
+
+    keyboardReset();
+    inputEventQueueReset();
+    gSfallMessageBoxPromptActiveId = prompt.promptId;
+    int result = showDialogBox(prompt.title.c_str(), body, prompt.bodyLength, 192, 116,
+        static_cast<ColorWithFlags>(prompt.titleColor), nullptr,
+        static_cast<ColorWithFlags>(prompt.bodyColor), prompt.flags);
+    gSfallMessageBoxPromptActiveId = 0;
+
+    char command[32];
+    snprintf(command, sizeof(command), "mbanswer %d %d", prompt.promptId, result != 0 ? 1 : 0);
+    gViewerConn->sendLine(command);
+}
+
 static void showPendingEncounterPrompt()
 {
     if (gViewerConn == nullptr || !clientViewerActive() || gEncounterPromptActive) {
@@ -5335,6 +5458,7 @@ static void viewerServiceTicker()
     // The server is BLOCKED in its barrier until somebody answers, so this must not be
     // gated on anything that can stay false: no combat test, no claim test, no modal
     // test. showPendingEncounterPrompt guards its own re-entry.
+    showPendingSfallMessageBox();
     showPendingEncounterPrompt();
     if ((GameMode::getCurrentGameMode() & kViewerModalMask) == 0) {
         return; // not in a modal — the main loop pumps the wire itself

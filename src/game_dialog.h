@@ -123,7 +123,7 @@ void gameDialogOptionHoverExit(int index);
 void gameDialogSetServerPump(std::function<bool()> pump);
 
 // True while gameDialogProcessUI is running a conversation that can consume a dialog
-// intent — i.e. the ONLY correct predicate for "may this dsay/dend be accepted".
+// intent — i.e. the ONLY correct predicate for "may this dsay/dend/dbarter be accepted".
 //
 // ►► Do NOT use _gdialogActive() for that. It reports _dialog_state_fix, which
 // only gameDialogEnter (the engine's TALK-on-an-NPC path) ever sets. A script

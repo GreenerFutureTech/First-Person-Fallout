@@ -216,7 +216,6 @@ enum EventType : unsigned char {
     EVENT_PLAYER_SHEET = 48,
     EVENT_ENCOUNTER_PROMPT = 49, // random-encounter accept/decline prompt (title+body); ack via encaccept/encdecline
     EVENT_ENCOUNTER_CLOSE = 50, // first viewer answered — break the others out of the prompt box
-
     // Global variables that changed this beat (index/value pairs). A NEW type rather
     // than extra worldDelta fields: unknown types are skipped whole via the event
     // length by both the client and tools/replay.py, so this cannot move a gate.
@@ -241,6 +240,9 @@ enum EventType : unsigned char {
     EVENT_LOOT_GRANT = 59, // co-op: the server opened a container for THIS actor — show the screen
     EVENT_STATE_AUDIT = 60, // authoritative per-object state, for mirror divergence checking
     EVENT_UI_LOCK = 61, // scripted cutscene input lock (op_game_ui_disable/_enable), addressed
+    EVENT_ENDGAME = 62,
+    EVENT_SFALL_MESSAGE_BOX = 63,
+    EVENT_SFALL_MESSAGE_BOX_CLOSE = 64,
 };
 
 // Event flag bits.
@@ -984,6 +986,15 @@ public:
         flushFrame();
     }
 
+    void endgame(bool playSlideshow, bool playMovie) override
+    {
+        beginEvent(EVENT_ENDGAME, 0);
+        putU8(playSlideshow ? 1 : 0);
+        putU8(playMovie ? 1 : 0);
+        endEvent();
+        flushFrame();
+    }
+
     void movieStop() override
     {
         // Modal, like moviePlay: the server was parked in the movie barrier and just
@@ -1012,6 +1023,33 @@ public:
         // Modal, like movieStop: the barrier just freed on the first answer, so ship
         // it now to break the OTHER viewers' blocking prompt boxes this beat.
         beginEvent(EVENT_ENCOUNTER_CLOSE, 0);
+        endEvent();
+        flushFrame();
+    }
+
+    void sfallMessageBoxPrompt(int promptId, const char* title, const char* const* body,
+        int bodyLength, int titleColor, int bodyColor, int flags) override
+    {
+        beginEvent(EVENT_SFALL_MESSAGE_BOX, 0);
+        putI32(promptId);
+        putString(title != nullptr ? title : "");
+        if (bodyLength < 0) bodyLength = 0;
+        if (bodyLength > 4) bodyLength = 4;
+        putU8(static_cast<unsigned char>(bodyLength));
+        for (int i = 0; i < bodyLength; i++) {
+            putString(body != nullptr && body[i] != nullptr ? body[i] : "");
+        }
+        putI32(titleColor);
+        putI32(bodyColor);
+        putI32(flags);
+        endEvent();
+        flushFrame();
+    }
+
+    void sfallMessageBoxClose(int promptId) override
+    {
+        beginEvent(EVENT_SFALL_MESSAGE_BOX_CLOSE, 0);
+        putI32(promptId);
         endEvent();
         flushFrame();
     }

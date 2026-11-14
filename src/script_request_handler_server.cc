@@ -3,6 +3,8 @@
 #include <cstdio>
 #include "critter.h"
 #include "elevator.h" // elevatorResolveStartLevel — where the rider's gauge starts
+#include "endgame.h"
+#include "game.h"
 #include "inventory.h" // stealSessionRun — the server-owned steal screen
 #include "scripts.h" // scriptsRequestedElevatorRider — WHO pressed the button
 #include "msg_channel.h"
@@ -16,16 +18,13 @@
 
 namespace fallout {
 
-// The dedicated server's ScriptRequestHandler. Mirrors ClientScriptRequestHandler
-// for dialog ONLY: SCRIPT_REQUEST_DIALOG runs the authoritative conversation on
-// the server (game_dialog.cc executes the choice procs that mutate gvars/lvars;
-// the viewer only renders a node + returns the picked index — Stage A2/A3).
+// The dedicated server's ScriptRequestHandler. Simulation stays authoritative here;
+// client-only screens are sent through Presenter. Dialog executes its choice procs
+// on the server (game_dialog.cc mutates gvars/lvars; viewers return the picked index).
 //
-// Every other request is intentionally left as the base no-op: looting and the
-// endgame are dropped on the server exactly as the previous null handler dropped
-// them (client-side modal presentation, not yet server-authoritative). Looting
-// stays that way on purpose — it is viewer-local, driven by take/put verbs, and
-// the sim keeps running behind it. STEALING cannot be, so it is answered here.
+// Looting remains viewer-local, driven by take/put verbs, and the sim keeps running
+// behind it. Town-map requests enter the existing authoritative worldmap session;
+// endgame presentation is streamed to every viewer by the presenter.
 //
 // ►► A DROPPED REQUEST IS SILENT, and that is the trap this seam sets. The base
 // class answers "nothing happened" — elevatorSelect returned -1, which the drain
@@ -96,6 +95,25 @@ public:
     void worldMap() override
     {
         worldmapServerDriver();
+    }
+
+    void townMap() override
+    {
+        worldmapServerDriver();
+    }
+
+    void endgame() override
+    {
+        const bool playMovie = endgameShouldPlayMovieAfterSlideshow();
+        presenter()->endgame(true, playMovie);
+        if (playMovie) {
+            _game_user_wants_to_quit = GAME_QUIT_REQUEST_MAIN_MENU;
+        }
+    }
+
+    void endgameSlideshow() override
+    {
+        presenter()->endgame(true, false);
     }
 
     // STEAL / PICKPOCKET / PLANT. The one request in this class that the server

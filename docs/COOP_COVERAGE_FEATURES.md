@@ -102,8 +102,8 @@ below is a stub or a wire gap it says so in one line and points there.
 | Exit grids / map transitions | NATIVE | open to ALL as of 2026-07-23 (`playerActorMayTransit` = `playerActorIs`); live-verify owed |
 | Scenery use (levers, computers) | NATIVE | `use` verb, any scenery, `_obj_use` routes |
 | Real-time script map mutation | NATIVE | frame @cee0fa3, per-object + ambient light @8113084; the remainder is the **wire axis** |
-| **Stealing / pickpocketing** | **ABSENT** | `stealing()` is the base no-op on the server; the viewer's skilldex STEAL is parked with a comment saying why (`main.cc:927`). Engine already refuses steal in combat (msg 902) |
-| **Planting items on a live critter** | **ABSENT** | same steal path |
+| **Stealing / pickpocketing** | **NATIVE** | server-owned `stealSessionRun` applies the roll and item transfer; viewers render `EVENT_STEAL_*`. Live verification remains owed |
+| **Planting items on a live critter** | **NATIVE** | same server-owned steal session |
 | Planting into containers / corpses | NATIVE | `put` verb, out-of-combat gated (`server_control.cc:3251`) |
 | Highlight lootables | NATIVE | `src/loot_highlight.cc` @14266d2, client-only, never on the wire or in a save; live-verify owed |
 
@@ -132,7 +132,7 @@ shared party-based model the owner wants is actually in place and visible.
 | ~~Dialog option scrolling~~ | NATIVE | **SHIPPED 2026-07-26** — PageUp/PageDown + arrows/wheel (the arrows only when the reply is not paging, so it keeps first claim). Scrolling down is refused unless the last render actually hid something, since only the renderer knows how many lines each option wraps to. Also fixed: a viewer could not CLICK the tenth option at all (buttons post `49 + index`, the handler only took '1'-'9'). LIVE-VERIFY OWED |
 | **Empathy option colour-coding** | **ABSENT** | the per-option `reaction` is NOT on the wire — `client_dialog.cc:158` calls `gameDialogAddTextOptionWithProc(-1, text, 0, 50)`, hardcoding `GAME_DIALOG_REACTION_NEUTRAL`. The renderer that would colour them is `game_dialog.cc:2809-2833`. A player with Empathy sees no hints at all |
 
-## 6. Progression & meta — 19 entries (NATIVE 11 / SHARED 1 / UNSEEN 3 / ABSENT 4)
+## 6. Progression & meta — 20 entries (NATIVE 12 / SHARED 1 / UNSEEN 3 / ABSENT 4)
 
 | feature | verdict | evidence |
 |---|---|---|
@@ -141,10 +141,11 @@ shared party-based model the owner wants is actually in place and visible.
 | Holodisks | NATIVE | `EVENT_HOLODISK_CLEAR/ADD` (52/53) + a server-authored disk @d6267f9 |
 | Pipboy status | NATIVE | read-only, per-client |
 | Pipboy automap | UNSEEN | viewer-local; `automapSaveCurrent()` is a deliberate server no-op (`server_stubs.cc:320`), so the server contributes nothing and each viewer records its own |
-| **Player-initiated REST** | **ABSENT** | `pipboyRest` returns false for a viewer and the alarm tab routes into vanilla's own refusal (`pipboy.cc:2048-2058`); `pipboyRestHeadless` is a **stub abort** on the server (`server_stubs.cc:492` → **stub axis**). There is no `rest` verb in either verb table |
+| **Player-initiated REST** | **NATIVE** | `rest`/`restopt` intents run through `restPerform` on the server; the dedicated server owns shared time and healing. Live verification remains owed |
 | Heal-over-time while travelling | NATIVE | `worldmapTravelRestHeal` per travel step (`server_worldmap.cc:162`); rest-heal iterates every player actor (owner ruling, audit #18) |
 | Worldmap travel | NATIVE | open to all; `wmmove`/`wmenter`/`wmesc` |
 | Random encounters + accept/decline prompt | NATIVE | `EVENT_ENCOUNTER_PROMPT/CLOSE` (49/50), first-answer-wins @701160a; live-verify owed |
+| Sfall `message_box` prompts | NATIVE | `EVENT_SFALL_MESSAGE_BOX/CLOSE` (63/64) broadcasts to every viewer; first `mbanswer <prompt-id> <result>` is returned to the server script |
 | ~~Encounter avoidance (Outdoorsman)~~ | NATIVE | **FIXED 2026-07-26** — GROUP scope (travel is a party act): every online living player's Outdoorsman counts, the Motion Sensor bonus checks whoever is CARRYING it, and the catch-XP is credited + addressed to the player whose skill actually carried the roll. Kept BEST-in-party, not an average: an average makes the party worse when someone joins |
 | Special encounters | NATIVE | marker placement fixed 2026-07-25 (`wmCitySizeDimensions`/`wmHotspotDimensions` lock-on-demand) |
 | ~~Town map / multi-entrance city choice~~ | NATIVE | **SHIPPED 2026-07-26** — the viewer runs vanilla's own town map and sends an ENTRANCE INDEX; `wmAreaResolveEntrance` resolves it server-side and refuses an out-of-range or undiscovered one (the elevator rule: a map index off the wire would be teleport-anywhere). ►► The hole that would have made it inert: "which districts have we found" is server state that never reached a viewer, so `worldmapState` now carries the visited state + a discovered-entrance bitmask for the area UNDERFOOT. LIVE-VERIFY OWED |
@@ -152,7 +153,7 @@ shared party-based model the owner wants is actually in place and visible.
 | Time of day / day-night light | NATIVE | `WORLD_DELTA_GAMETIME` + `WORLD_DELTA_LIGHT` @8113084 |
 | Save / load, N-actor | NATIVE | admin `save`/`load` + the `'PAC2'` appendix carrying every extra's body/inventory/sheet |
 | Autosave | NATIVE | **owner-confirmed working 2026-07-25.** Remaining nuance, not a break: `serverAutosaveTick` gates on `wmMapIsSaveable`, so random-encounter and wilderness maps are skipped AND the latch advances — worth a design pass, never blind gate removal |
-| **Endgame slideshow + narrator + credits** | **ABSENT** | `endgamePlaySlideshow` returns immediately under `serverLoopActive` (`endgame.cc:221`) and `endgamePlayMovie` sets `_game_user_wants_to_quit = 2` and returns (`:256`). Reaching the ending kills the server and nobody sees anything. `SCRIPT_REQUEST_ENDGAME` also has no server handler |
+| **Endgame slideshow + narrator + credits** | **NATIVE** | `SCRIPT_REQUEST_ENDGAME` streams `EVENT_ENDGAME`; each viewer runs the existing slideshow and optional configured movie. Direct `endgamePlayMovie` calls are also projected. Live multiplayer presentation remains unverified |
 | **Freeplay after the endgame** | **ABSENT** | banked in IDEAS.md; today the endgame is terminal |
 | Movies / cutscenes | NATIVE | first-ack-wins barrier + `EVENT_MOVIE_SEEN_STATE`; alt-tab wedge fixed |
 
@@ -204,11 +205,12 @@ Per family (partial-credit score / entries):
 
 **They diverge on one honest reading, and it matters.** Counting *how much of a Temple→Enclave
 co-op playthrough is reachable and correct*, the number is materially lower — call it **60-65 %** —
-because four ABSENT entries are not features, they are gates: dead **elevators** lock out the
+because several ABSENT entries are not features, they are gates: dead **elevators** lock out the
 interiors of Sierra, Navarro, the Military Base, Vault City's vault, Vault 15, the Shi Temple and
-the Wanamingo Mine; the missing **town map** removes district-level navigation everywhere; the
-**endgame** cannot be watched and kills the server; and **rejoin corruption** ends sessions. A
-feature-count percentage cannot see that one dead level-picker outweighs twenty working perks.
+the Wanamingo Mine; **all-player death recovery** and **rejoin corruption** can end or strand a
+session. Town-map entrance selection is already server-resolved, and the ending now streams to
+viewers but still needs a live multiplayer verification. A feature-count percentage cannot see
+that one dead level-picker outweighs twenty working perks.
 
 Say both numbers out loud: **~75 % of the feature inventory, ~60-65 % of a playthrough.**
 
@@ -218,12 +220,14 @@ Say both numbers out loud: **~75 % of the feature inventory, ~60-65 % of a playt
    elevators; several whole locations become unenterable.
 2. **Rejoin / hot-join corrupts the world** — containers vanish, later crash. Ends sessions;
    `docs/APPLYBLOB_TEARDOWN_PLAN.md`.
-3. **No town map** — always the city's first map; kills district navigation in New Reno, Vault
-   City, San Francisco, NCR, Broken Hills, Redding.
-4. **Endgame absent** — the ending cannot be seen and the server exits. No campaign payoff.
+3. **Town map** — district selection is implemented via a server-resolved entrance index; live
+   verification remains owed.
+4. **Endgame** — slideshow and optional movie are now streamed to clients; live verification
+   remains owed.
 5. **All-players-dead soft-lock** — no in-band recovery from a wipe.
-6. **Steal + sneak absent** — a whole build (thief/stealth) is unplayable, and Silent Death /
-   Silent Running are dead with it.
+6. ~~**Sfall `message_box` prompts**~~ — **IMPLEMENTED** — every viewer sees the prompt and
+   the first `mbanswer` returns its result to the server-side script; generic headless
+   `showDialogBox` callers still use their fallback.
 7. **Party/companion AI anchored on the host** — companions ignore extras in and out of combat.
 8. **NPC notice is nearest-player-only, and lvar state machines double-fire** — reads as content
    bugs; corrupts quest and faction state machines.

@@ -39,27 +39,26 @@ the 10 server-only TUs the `f2_server` target adds (`CMakeLists.txt:519-551`).
 Of the 20 sim-path aborts: **10 are guarded** (`serverLoopActive()` / `presRecordActive()`),
 **3 are teardown-only** (`objectsExit`, `object.cc:369/372/377` — `f2_server` never calls it),
 **1 is intLib-only in practice** (`pcxRead` ← `datafile.cc:95` ← `interpreter_lib.cc:173`), and
-**6 are live unguarded landmines**. Those 6 are the whole of §1.
+**6 were live unguarded landmines at recon time**. The status column below tracks subsequent
+fixes; A4 remains a known abort path.
 
 ---
 
-## §1 The abort surface — the 6 live landmines
+## §1 The abort surface — recon findings and current status
 
-Every one is the `endgamePlayMovie` shape the recon warned about: an unguarded core call site into
-a symbol whose body is `abort()`.
+At recon time, each row was an unguarded core call site into a symbol whose body was `abort()`.
 
 | # | symbol / stub | reached from | vanilla feature gated | reachability | class |
 |---|---|---|---|---|---|
 | ~~A1~~ | `gameShowDeathDialog` `server_stubs.cc` | `critter.cc` `_process_rads` | the SFALL death-by-radiation pop-up ("You have died from radiation sickness") | **plausible in normal play** — any player whose rad counter kills them (Toxic Caves goo, Gecko reactor, Broken Hills) | **FIXED 2026-07-25** — addressed to the dying actor; stub headless-safe |
 | ~~A2~~ | `automapShow` | `item.cc` `_item_m_use_charged_item` | **using the Motion Sensor** | **plausible in normal play** — a real carryable item | **FIXED 2026-07-25** — addressed `EVENT_AUTOMAP_OPEN`; the USER's viewer opens its own automap (latched, never from inside pump) |
-| A3 | `endgamePlayMovie` `server_stubs.cc:354` | `interpreter_extra.cc:4727` (`op_endgame_movie`, opcode `0x8148`, registered `:5131`) | the ending movie. Note the opcode calls it **directly**, bypassing `ScriptRequestHandler` entirely | **only via a script opcode** — but the natural pairing with `op_endgame_slideshow` (`0x8146`), i.e. exactly at victory. *Which shipped `.int` uses `0x8148` is unverified (no bytecode disassembly done).* | **ABORTS** |
+| ~~A3~~ | `endgamePlayMovie` (`server_stubs.cc`) | `interpreter_extra.cc` (`op_endgame_movie`, opcode `0x8148`) | the ending movie; direct calls now send a movie-only `EVENT_ENDGAME` to viewers | script opcode; shipped `.int` reachability remains unverified | **FIXED** — headless-safe and projected |
 | A4 | `textObjectsRemoveByOwner` `server_stubs.cc:530` | `interpreter_extra.cc:3202` | `float_msg(obj, <empty-or-non-string>, type)` — vanilla's idiom for **clearing** a floating message | **only via a script opcode**, but `float_msg` (`0x810A`) is one of the most-used opcodes in FO2. *Frequency of the clear form is unverified.* | **ABORTS** |
-| A5 | `pipboyRestHeadless` `server_stubs.cc:492` | `command.cc:509` (`rest` / `restopt` debug verbs) | **RESTING** — see §4, this is the whole feature, not just a verb | **only via an admin/debug verb** on `f2_server` | **ABORTS** |
-| A6 | `showMesageBox` `server_stubs.cc:510` | `game.cc:353` and `:369`, called from `server_boot.cc:84` (`gameDbInit`) | the "Could not find the master datafile" operator message | **boot-time misconfiguration** (wrong cwd / missing `master.dat`) | **ABORTS** |
+| ~~A5~~ | ~~`pipboyRestHeadless`~~ (removed) | player `rest` / `restopt` intents | shared rest simulation | server rest intents now call `restPerform` | **FIXED** — headless rest uses the shared simulation |
+| ~~A6~~ | `showMesageBox` (`server_stubs.cc`) | `game.cc:353` and `:369`, called from `server_boot.cc:84` (`gameDbInit`) | the "Could not find the master datafile" operator message | **boot-time misconfiguration** (wrong cwd / missing `master.dat`) | **FIXED** — prints the diagnostic to stderr |
 
-A6 is a pure operator paper cut but the highest-frequency one: the first-run mistake prints
-`FATAL — client symbol 'showMesageBox' called on the core-only server` instead of naming the
-missing data file.
+A6 used to be a pure operator paper cut: a first-run mistake printed a stub-abort message instead
+of naming the missing data file. `showMesageBox` now reports the diagnostic to stderr.
 
 **Verified NOT a hazard** (guards read in tree, cite for anyone re-auditing):
 `combatInputClient` / `combatTurnRunClient` / `calledShotSelectHitLocation` are all behind
@@ -83,12 +82,12 @@ spine.
 |---|---|---|---|---|
 | `dialogEnter` | **override** `:28` | conversations | `scripts.cc:1055` | **DONE** |
 | `worldMap` | **override** `:78` → `worldmapServerDriver()` | worldmap travel | `interpreter_extra.cc:3154` (`op_world_map`), `worldmap.cc:3130` | **DONE** |
-| `townMap` | base no-op | the town map screen | `scripts_request_townmap()` (`scripts.cc:1177`) — **zero callers in tree**, so effectively unreachable | SILENT NO-OP (inert) |
-| `elevatorSelect` | base `return -1` (`:47`) | **every elevator in the game.** `-1` makes the caller skip the whole placement/transition block (`scripts.cc:979-1045`) exactly as if the player cancelled | `interpreter_extra.cc:3289` (`METARULE_ELEVATOR`) — **plausible in normal play** | **SILENT NO-OP** |
+| `townMap` | **override** → `worldmapServerDriver()` | the streamed worldmap screen | `scripts_request_townmap()` (`scripts.cc:1467`) — **zero callers in tree**, so effectively unreachable; district selection is separately implemented via the streamed entrance index | IMPLEMENTED |
+| `elevatorSelect` | **server override** | addressed elevator picker; destination resolved from the server's own table | `interpreter_extra.cc:3289` (`METARULE_ELEVATOR`) | IMPLEMENTED |
 | `automapSave` | base no-op | persisting the automap on a committed elevator move | `scripts.cc:980` (unreachable while `elevatorSelect` returns -1) | SILENT NO-OP (harmless) |
-| `endgame` | base no-op | `endgamePlaySlideshow()` + `endgamePlayMovie()` — **the whole ending** | `interpreter_extra.cc:4656` (`op_endgame_slideshow`), `command.cc:877` (`endgame` verb) | **SILENT NO-OP** |
+| `endgame` | **override** → `EVENT_ENDGAME` | slideshow + optional configured movie on every viewer; direct movie-only calls are also projected | `SCRIPT_REQUEST_ENDGAME` and direct `endgamePlayMovie()` calls | IMPLEMENTED; live verify owed |
 | `looting` | base no-op | the script/action-path loot screen. Player looting is covered by the wire verbs (`loot`/`take`/`put`/`takeall`) and the callback DOES fire (`server_anim.cc:1042`, allowlisted) — the *screen request* is where it dies | `actions.cc:1629`, `:1704` | SILENT NO-OP (covered) |
-| `stealing` | base no-op | **the STEAL skill / pickpocketing, entirely** | `skill.cc:956` | **SILENT NO-OP** |
+| `stealing` | **server override** → `stealSessionRun` | server-owned STEAL roll and item transfer | `skill.cc:956` | IMPLEMENTED |
 
 Other silent no-ops worth naming (all in `server_stubs.cc`, all deliberate, all *correct as
 no-ops* but each is a vanilla behaviour the server does not have):
@@ -124,7 +123,8 @@ sanely. What each one is FOR:
 |---|---|---|---|
 | `get_screen_width` / `get_screen_height` | `sfall_opcodes.cc:523`, `:529` | 640 / 480 (`server_stubs.cc:171-172`) | mods laying out UI get vanilla-resolution answers, not the viewer's |
 | `show_window` | `sfall_metarules.cc:241`, `:244` | `false` (`:306-307`) | mod-created windows never show |
-| `create_message_window` | `sfall_opcodes.cc:559` → `showDialogBox` | `0` = "NO" (`:503`) | a mod prompt is auto-answered NO. ►► A prompt a *player* should answer must be streamed (`wmEncounterPromptBarrier`); this is the never-fatal backstop |
+| `create_message_window` | `sfall_opcodes.cc:559` → `showDialogBox` | `0` = "NO" (`:503`) | this opcode remains auto-answered; the separate sfall `message_box` metarule is streamed to viewers |
+| `message_box` | `sfall_metarules.cc` → `EVENT_SFALL_MESSAGE_BOX/CLOSE` | first `mbanswer <prompt-id> <result>` | all viewers see it; the server script receives the winning result |
 | `get_cursor_mode` / `set_cursor_mode` | `sfall_metarules.cc:121`, `:192` | `0` / no-op (`:366`, `:376`) | cursor-mode mods inert |
 | `outlined_object` | `sfall_metarules.cc:186` | `nullptr` (`:437`) | "what is under the cursor" mods inert |
 | `get_mouse_x` / `get_mouse_y` / `tile_under_cursor` | `sfall_opcodes.cc:499`, `:508`, `:619` | `0,0` (`:480`) | pointer-driven mods inert |
@@ -150,17 +150,17 @@ prove zero usage of `0x804C-0x80A0`.
 
 ## §4 Screens / modals with no server driver
 
-Drivers that exist: **dialog, barter, rest (client binary only — see below), endgame (client
-binary only), worldmap travel, encounter prompt** (memory `modal-drivers-plan`). What is left:
+Drivers that exist: **dialog, barter, rest, endgame presentation, worldmap travel, encounter
+prompt, elevators, and stealing** (memory `modal-drivers-plan`). What is left:
 
 | vanilla screen | server state | consequence | quest impact |
 |---|---|---|---|
-| **Elevator level picker** (`elevator.cc`, client-only) | `elevatorSelect` → `-1`, **SILENT NO-OP** | button press does nothing, no message. `entermap` routes around it; `climb` (`command.cc:567`) is stairs/ladders, a different mechanism | ►► **QUEST BLOCKER.** Elevators are on the Enclave / Vault City / Sierra Army Depot / tanker paths (`FULL_RUN_RECON` §1). No wire verb exists (`server_control.cc` verb list has none) |
-| **Pipboy REST / alarm clock** (`pipboy.cc`, client-only) | three-way dead: `pipboyRestHeadless` **ABORTS** on `f2_server` (A5); a viewer is **REFUSED** with vanilla's own "You cannot rest at this location!" (`pipboy.cc:1869`, leaf guard `:2050`); the golden that "proves rest works" runs the **client** binary | **resting is impossible in co-op** — no healing between fights, no time-passing | ►► blocks any quest with a *wait N days* gate; also strands the owner-ruled "rest heals ALL players" work. The rest SIM is already core (`party_member.h:58-69`); only the loop lives in `pipboy.cc` |
-| **STEAL / plant** (`inventory.cc` steal mode) | `stealing()` base no-op — **SILENT NO-OP**, not a hang | the Steal skill does nothing | quest-relevant in Den/New Reno pickpocket content; owner's elephant list |
-| **Endgame slideshow + movie** | `endgame()` **SILENT NO-OP**; `op_endgame_movie` **ABORTS** (A3) | the game cannot end. `METARULE_SIGNAL_END_GAME` is additionally suppressed by design (`interpreter_extra.cc:3276`, MP survival) | the ending never renders |
-| **"You died" / death narration** | `gameShowDeathDialog` **ABORTS** on the rad path (A1); combat death takes the benign `endgameSetupDeathEnding` (`:361`) + an ignored `quit=2` | no death screen; server keeps running (intended); rad death crashes it | — |
-| **Automap screen** | `automapShow` **ABORTS** (A2). `automapSaveCurrent`/`automapSetDisplayMap` are benign no-ops (`:320-321`) — that pair is what stopped mid-run transitions aborting | Motion Sensor kills the server; the viewer's own automap is local | — |
+| **Elevator level picker** (`elevator.cc`, client-only) | server prompt + `elev <level>` | server resolves the destination and applies the ride | live verification owed |
+| **Pipboy REST / alarm clock** (`pipboy.cc`, client-only UI) | the Pipboy screen remains viewer-local; player `rest` / `restopt` intents run `restPerform` on the server | rest is available through the multiplayer intents, not the Pipboy UI | live verification of shared time/healing remains owed |
+| **STEAL / plant** (`inventory.cc` steal mode) | server-owned steal session | server resolves the roll and transfers | live verification owed |
+| **Endgame slideshow + movie** | `EVENT_ENDGAME` presents the server-triggered sequence | ending UI runs on each viewer; the server keeps its headless terminal transition | live verification owed |
+| **"You died" / death narration** | radiation-death dialog is addressed to the dying viewer (A1); combat death remains server-owned | live verification owed | — |
+| **Automap screen** | `automapShow` is projected to the requesting viewer (A2); save/display-map helpers remain benign server no-ops | Motion Sensor automap is viewer-local | — |
 | **Level-up: HP / skill points / free perk** | **DONE 2026-07-25** — sheet edit intents shipped (`docs/PLAYER_SHEET_DESIGN.md` §9, `src/sheet_intent.{h,cc}`, verbs `sheetopen/skillup/skilldown/perkpick/tagpick/mutpick`); the award moved off `characterEditorShow` onto the XP loop (`stat.cc:1001-1018`) | — | — |
 | **Character creation** | **DONE** — server-authoritative (`docs/ACCOUNT_IDENTITY_DESIGN.md`, `F2_PLAYER_CREATE`) | — | — |
 | **Movies / cutscenes** | **DONE but hazardous**: `gameMoviePlay` (`:387`) marks seen, projects to viewers, then parks in `gameMovieServerBarrier` (`game_movie_state.cc:41-57`). Bails if no viewers remain, so a CMD-only run is safe | ⚠ **doc drift**: the comment at `server_stubs.cc:406-414` says "DEFAULT OFF (F2_MOVIES=1 to project)". It is **default ON** — `serverFeatureEnabled` (`server_loop.cc:169-176`) returns `!headlessProbeActive()` when the var is unset, and `DEDICATED_HOWTO.md:70` correctly documents `F2_MOVIES=0` as the kill switch. So the "viewer fails to render → server parked, `movdone` unreachable from CMD" failure mode is **live by default** | — |

@@ -7,6 +7,19 @@ namespace fallout {
 
 struct Object;
 
+enum class ServerControlInputContext {
+    // Regular non-blocking server-loop input.
+    kNormal,
+    // Inputs accepted while the corresponding server modal has parked the world.
+    kDialog,
+    kBarter,
+    kSteal,
+    kMovie,
+    kWorldmap,
+    kEncounter,
+    kSfallMessageBox,
+};
+
 // f2_server control plane — the FIRST CONTROLLABLE CLIENT (P5-C STEP 6,
 // [[p5-server-plan]]). Wire clients (the SDL viewer) send newline text intents
 // upstream on the MAIN socket; the server executes them authoritatively over the
@@ -88,10 +101,12 @@ void serverControlBeginDrain(const std::function<bool(int sessionId)>& liveSessi
 void serverControlSetKicker(std::function<bool(int sessionId)> kicker);
 
 // Dispatch one inbound line from wire client `sessionId`. The ONLY entry point for
-// viewer-wire lines (server_main routes netSink.pollInbound here). Unknown or
-// disallowed verbs are ignored with a one-line debug log. A cheap flood guard
-// drops lines past a per-session-per-beat cap.
-void serverControlLine(int sessionId, const char* line);
+// viewer-wire lines (server_main routes netSink.pollInbound here). `context`
+// restricts commands to the active modal while its pump services input. Unknown or
+// disallowed verbs are ignored with a one-line debug log. A cheap flood guard drops
+// lines past a per-session-per-beat cap.
+void serverControlLine(int sessionId, const char* line,
+    ServerControlInputContext context = ServerControlInputContext::kNormal);
 
 // Spawn the player actors queued by `login` for names the server has never seen
 // (ACCOUNT_IDENTITY_DESIGN.md §3), and deliver greetings owed from an earlier
