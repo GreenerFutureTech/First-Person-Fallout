@@ -771,10 +771,12 @@ void _dark_translucent_trans_buf_to_buf(unsigned char* src, int srcWidth, int sr
 int _gsound_compute_relative_volume(Object* obj) { return 0; }
 int floatSoundPlay(const char* fileName, Object* speaker) { return -1; }
 void gpuBillboardBeginFrame(unsigned char lightModulation) { }
+bool screenSupportsGpuFirstPersonPass() { return false; }
+bool gpuFirstPersonSubmitWallColumn(const Color* pixels, const unsigned char* alpha, int textureSize, bool repeatTextureTwice, int textureX, unsigned char light, int x, int top, int bottom, double textureOrigin, double textureScale, double depth) { return false; }
 void gpuBillboardSetWallDepthSpanCount(unsigned int count) { }
 void gpuBillboardMarkSceneComplete() { }
 void gpuBillboardClear() { }
-void gpuBillboardSubmit(const unsigned char* pixels, int width, int height, const SDL_Rect& destination, const SDL_Rect& clip, double depth) { }
+void gpuBillboardSubmit(const unsigned char* pixels, int width, int height, const SDL_Rect& destination, const SDL_Rect& clip, double depth, int blackMaskColor) { }
 bool gBlockMouseUpEvent = false;
 int gInterfaceBarWindow = -1;
 bool _ctrl_pressed() { return false; }

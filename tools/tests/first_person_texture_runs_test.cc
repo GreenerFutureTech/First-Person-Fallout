@@ -18,6 +18,23 @@ static void check(double top, double height, int bottom)
         if (end < bottom && static_cast<int>((end - top) * 64 / height) == expected) std::abort();
         y = end;
     }
+
+    start = std::max(0, static_cast<int>(std::ceil(top)));
+    for (int y = start; y < bottom;) {
+        const int expected = fallout::firstPersonTextureRow(y, top, height, 64);
+        const int textureRunEnd =
+            fallout::firstPersonTextureRunEnd(y, bottom, top, height, 64);
+        const int sampleCount = (textureRunEnd - y + 1) / 2;
+        const int end = std::min(bottom, y + sampleCount * 2);
+        if (end <= y) std::abort();
+        for (int row = y; row < end; ++row) {
+            const int sampleY = y + ((row - y) / 2) * 2;
+            if (fallout::firstPersonTextureRow(sampleY, top, height, 64) != expected) {
+                std::abort();
+            }
+        }
+        y = end;
+    }
 }
 
 int main()

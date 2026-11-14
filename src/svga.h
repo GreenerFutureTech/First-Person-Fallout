@@ -5,6 +5,7 @@
 
 #include <SDL.h>
 
+#include "color.h"
 #include "fps_limiter.h"
 #include "geometry.h"
 
@@ -61,6 +62,10 @@ const char* screenGetRendererName();
 bool screenSupportsGpuFirstPersonPass();
 bool screenHasOpenGLContext();
 void gpuBillboardBeginFrame(unsigned char lightModulation);
+bool gpuFirstPersonSubmitWallColumn(const Color* pixels, const unsigned char* alpha,
+    int textureSize, bool repeatTextureTwice, int textureX, unsigned char light,
+    int x, int top, int bottom, double textureOrigin, double textureScale,
+    double depth);
 void gpuBillboardSetWallDepthSpanCount(unsigned int count);
 void gpuBillboardMarkSceneComplete();
 void gpuBillboardClear();
@@ -72,7 +77,7 @@ void gpuBillboardHideCursor();
 bool gpuBillboardSetCursor(const unsigned char* pixels, int width, int height,
     int pitch, unsigned char transparentColor, int x, int y);
 void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
-    const SDL_Rect& destination, const SDL_Rect& clip, double depth);
+    const SDL_Rect& destination, const SDL_Rect& clip, double depth, int blackMaskColor = -1);
 bool gpuOverlaySetIndexed(const unsigned char* pixels, int width, int height, int pitch, int x, int y);
 void gpuOverlayClear();
 

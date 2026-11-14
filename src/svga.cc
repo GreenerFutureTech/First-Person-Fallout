@@ -7,6 +7,9 @@
 #include <string.h>
 
 #include <algorithm>
+#include <array>
+#include <bitset>
+#include <cmath>
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
@@ -62,6 +65,12 @@ struct GpuBillboard {
     SDL_Rect destination;
     SDL_Rect clip;
     double depth;
+    float u0;
+    float v0;
+    float u1;
+    float v1;
+    SDL_Rect source;
+    bool hasSource;
 };
 
 struct GpuBillboardTexture {
@@ -69,8 +78,22 @@ struct GpuBillboardTexture {
     int width;
     int height;
     unsigned char lightModulation;
+    int blackMaskColor;
     uint64_t paletteRevision;
     IndexedTexturePalette palette;
+};
+
+struct GpuFirstPersonWallTexture {
+    SDL_Texture* texture = nullptr;
+    uint64_t paletteRevision = 0;
+    std::bitset<COLOR_COUNT> usedColors;
+    std::array<unsigned char, COLOR_MAP_SIZE> palette {};
+};
+
+struct GpuFirstPersonWallTextureSet {
+    const unsigned char* alpha = nullptr;
+    int size = 0;
+    std::array<std::array<GpuFirstPersonWallTexture, COLOR_COUNT>, 2> textures {};
 };
 
 enum class GpuOverlayType {
@@ -95,6 +118,7 @@ static bool gGpuHasCursor = false;
 static SDL_Texture* gGpuIndexedOverlayTexture = nullptr;
 static SDL_Rect gGpuIndexedOverlayRect {};
 static std::unordered_map<const unsigned char*, GpuBillboardTexture> gGpuBillboardTextures;
+static std::unordered_map<const Color*, GpuFirstPersonWallTextureSet> gGpuFirstPersonWallTextures;
 static unsigned char gGpuPalette[256 * 3];
 static uint64_t gGpuPaletteRevision = 0;
 static unsigned char gGpuBillboardLightModulation = 255;
@@ -175,6 +199,7 @@ const char* screenGetRendererName()
 
 bool screenSupportsGpuFirstPersonPass()
 {
+#if SDL_VERSION_ATLEAST(2, 0, 18)
     if (!gSdlRendererHardwareAccelerated || gSdlRenderer == nullptr) {
         return false;
     }
@@ -186,6 +211,9 @@ bool screenSupportsGpuFirstPersonPass()
 
     return (rendererInfo.flags & SDL_RENDERER_TARGETTEXTURE) != 0
         && (rendererInfo.flags & SDL_RENDERER_ACCELERATED) != 0;
+#else
+    return false;
+#endif
 }
 
 bool screenHasOpenGLContext()
@@ -207,7 +235,7 @@ void gpuBillboardBeginFrame(unsigned char lightModulation)
     gGpuBillboardTextureCacheMisses = 0;
     gGpuWallDepthSpanCount = 0;
     const size_t expectedBillboardCount =
-        static_cast<size_t>(std::max(64, screenGetWidth() / 2));
+        static_cast<size_t>(std::max(64, screenGetWidth() * 4));
     if (gGpuBillboards.capacity() < expectedBillboardCount) {
         gGpuBillboards.reserve(expectedBillboardCount);
     }
@@ -216,6 +244,184 @@ void gpuBillboardBeginFrame(unsigned char lightModulation)
         memcpy(gGpuPalette, palette, sizeof(gGpuPalette));
         gGpuPaletteRevision++;
     }
+}
+
+static void gpuFirstPersonDestroyWallTextureSet(GpuFirstPersonWallTextureSet& textureSet)
+{
+    for (auto& textureSetByRepeat : textureSet.textures) {
+        for (GpuFirstPersonWallTexture& texture : textureSetByRepeat) {
+            if (texture.texture != nullptr) {
+                SDL_DestroyTexture(texture.texture);
+                texture.texture = nullptr;
+            }
+            texture.paletteRevision = 0;
+            texture.usedColors.reset();
+        }
+    }
+}
+
+static SDL_Texture* gpuFirstPersonGetWallTexture(
+    const Color* pixels, const unsigned char* alpha, int textureSize, int light,
+    bool repeatTextureTwice, bool& cacheHit)
+{
+    cacheHit = false;
+    GpuFirstPersonWallTextureSet& textureSet = gGpuFirstPersonWallTextures[pixels];
+    if (textureSet.alpha != alpha || textureSet.size != textureSize) {
+        gpuFirstPersonDestroyWallTextureSet(textureSet);
+        textureSet.alpha = alpha;
+        textureSet.size = textureSize;
+    }
+
+    GpuFirstPersonWallTexture& wallTexture =
+        textureSet.textures[repeatTextureTwice ? 1 : 0][light];
+    if (wallTexture.texture != nullptr) {
+        bool paletteMatches = wallTexture.paletteRevision == gGpuPaletteRevision;
+        if (!paletteMatches) {
+            paletteMatches = true;
+            for (int color = 0; color < COLOR_COUNT; color++) {
+                if (!wallTexture.usedColors.test(color)) {
+                    continue;
+                }
+                const int paletteIndex = color * COLOR_COMPONENTS_RGB;
+                if (memcmp(wallTexture.palette.data() + paletteIndex,
+                        gGpuPalette + paletteIndex, COLOR_COMPONENTS_RGB) != 0) {
+                    paletteMatches = false;
+                    break;
+                }
+            }
+        }
+        if (paletteMatches) {
+            wallTexture.paletteRevision = gGpuPaletteRevision;
+            memcpy(wallTexture.palette.data(), gGpuPalette, COLOR_MAP_SIZE);
+            cacheHit = true;
+            return wallTexture.texture;
+        }
+        SDL_DestroyTexture(wallTexture.texture);
+        wallTexture.texture = nullptr;
+    }
+
+    const int textureHeight = textureSize * (repeatTextureTwice ? 2 : 1);
+    wallTexture.texture = SDL_CreateTexture(gSdlRenderer, SDL_PIXELFORMAT_ARGB8888,
+        SDL_TEXTUREACCESS_STATIC, textureSize, textureHeight);
+    if (wallTexture.texture == nullptr) {
+        return nullptr;
+    }
+
+    static std::vector<uint32_t> rgba;
+    rgba.resize(static_cast<size_t>(textureSize) * textureHeight);
+    wallTexture.usedColors.reset();
+    for (int y = 0; y < textureHeight; y++) {
+        const int textureY = y % textureSize;
+        for (int x = 0; x < textureSize; x++) {
+            const int sourceIndex = textureY * textureSize + x;
+            const size_t index = static_cast<size_t>(y) * textureSize + x;
+            if (alpha != nullptr && alpha[sourceIndex] == 0) {
+                rgba[index] = 0;
+                continue;
+            }
+            const Color color = intensityColorTable[pixels[sourceIndex]][light];
+            wallTexture.usedColors.set(color);
+            const int paletteIndex = static_cast<int>(color) * COLOR_COMPONENTS_RGB;
+            rgba[index] = 0xFF000000u
+                | (static_cast<uint32_t>(gGpuPalette[paletteIndex]) << 18)
+                | (static_cast<uint32_t>(gGpuPalette[paletteIndex + 1]) << 10)
+                | (static_cast<uint32_t>(gGpuPalette[paletteIndex + 2]) << 2);
+        }
+    }
+    if (SDL_UpdateTexture(wallTexture.texture, nullptr, rgba.data(),
+            textureSize * static_cast<int>(sizeof(uint32_t))) != 0) {
+        SDL_DestroyTexture(wallTexture.texture);
+        wallTexture.texture = nullptr;
+        return nullptr;
+    }
+
+    SDL_SetTextureBlendMode(wallTexture.texture, SDL_BLENDMODE_BLEND);
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+    SDL_SetTextureScaleMode(wallTexture.texture, SDL_ScaleModeNearest);
+#endif
+    wallTexture.paletteRevision = gGpuPaletteRevision;
+    memcpy(wallTexture.palette.data(), gGpuPalette, COLOR_MAP_SIZE);
+    return wallTexture.texture;
+}
+
+bool gpuFirstPersonSubmitWallColumn(const Color* pixels, const unsigned char* alpha,
+    int textureSize, bool repeatTextureTwice, int textureX, unsigned char light,
+    int x, int top, int bottom, double textureOrigin, double textureScale,
+    double depth)
+{
+#if SDL_VERSION_ATLEAST(2, 0, 18)
+    if (!gSdlRendererHardwareAccelerated || gSdlRenderer == nullptr
+        || pixels == nullptr || alpha == nullptr
+        || textureSize <= 0 || textureX < 0 || textureX >= textureSize
+        || top > bottom || textureScale <= 0.0) {
+        return false;
+    }
+
+    bool textureCacheHit = false;
+    SDL_Texture* texture = gpuFirstPersonGetWallTexture(
+        pixels, alpha, textureSize, light, repeatTextureTwice, textureCacheHit);
+    if (texture == nullptr) {
+        return false;
+    }
+    if (settings.debug.show_fps) {
+        gGpuBillboardSubmitCount++;
+        if (textureCacheHit) {
+            gGpuBillboardTextureCacheHits++;
+        } else {
+            gGpuBillboardTextureCacheMisses++;
+        }
+    }
+
+    const float u = (textureX + 0.5f) / textureSize;
+    const int textureHeight = textureSize * (repeatTextureTwice ? 2 : 1);
+    const double verticalScale = textureScale * (repeatTextureTwice ? 2.0 : 1.0);
+    const float v0 = static_cast<float>((top - textureOrigin - 0.5) / verticalScale);
+    const float v1 = static_cast<float>((bottom + 1 - textureOrigin - 0.5) / verticalScale);
+    const int sourceTop = std::clamp(
+        static_cast<int>(floor(v0 * textureHeight)), 0, textureHeight - 1);
+    const int sourceBottom = std::clamp(
+        static_cast<int>(ceil(v1 * textureHeight)), sourceTop + 1, textureHeight);
+    const SDL_Rect destination {
+        x,
+        top,
+        1,
+        bottom - top + 1,
+    };
+    const SDL_Rect source {
+        textureX,
+        sourceTop,
+        1,
+        sourceBottom - sourceTop,
+    };
+    gGpuBillboards.push_back({
+        texture,
+        destination,
+        destination,
+        depth,
+        u,
+        v0,
+        u,
+        v1,
+        source,
+        true,
+    });
+
+    return true;
+#else
+    (void)pixels;
+    (void)alpha;
+    (void)textureSize;
+    (void)repeatTextureTwice;
+    (void)textureX;
+    (void)light;
+    (void)x;
+    (void)top;
+    (void)bottom;
+    (void)textureOrigin;
+    (void)textureScale;
+    (void)depth;
+    return false;
+#endif
 }
 
 void gpuBillboardSetWallDepthSpanCount(unsigned int count)
@@ -334,7 +540,7 @@ bool gpuBillboardSetCursor(const unsigned char* pixels, int width, int height,
 }
 
 void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
-    const SDL_Rect& destination, const SDL_Rect& clip, double depth)
+    const SDL_Rect& destination, const SDL_Rect& clip, double depth, int blackMaskColor)
 {
     if (!gSdlRendererHardwareAccelerated || pixels == nullptr
         || width <= 0 || height <= 0 || destination.w <= 0 || destination.h <= 0) {
@@ -345,7 +551,8 @@ void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
     auto textureIt = gGpuBillboardTextures.find(pixels);
     if (textureIt != gGpuBillboardTextures.end()
         && textureIt->second.width == width
-        && textureIt->second.height == height) {
+        && textureIt->second.height == height
+        && textureIt->second.blackMaskColor == blackMaskColor) {
         GpuBillboardTexture& candidate = textureIt->second;
         // Color cycling changes a small palette range many times per second.
         // Reuse textures whose opaque pixels do not use the changed colors.
@@ -378,12 +585,15 @@ void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
                 const unsigned char colorIndex = pixels[y * width + x];
                 texturePalette.useColor(colorIndex);
                 const int paletteIndex = colorIndex * 3;
-                const uint32_t color = colorIndex == 0
-                    ? 0
-                    : 0xFF000000u
-                        | (static_cast<uint32_t>(gGpuPalette[paletteIndex]) << 18)
-                        | (static_cast<uint32_t>(gGpuPalette[paletteIndex + 1]) << 10)
-                        | (static_cast<uint32_t>(gGpuPalette[paletteIndex + 2]) << 2);
+                uint32_t color = 0;
+                if (colorIndex != 0) {
+                    color = 0xFF000000u;
+                    if (colorIndex != blackMaskColor) {
+                        color |= (static_cast<uint32_t>(gGpuPalette[paletteIndex]) << 18)
+                            | (static_cast<uint32_t>(gGpuPalette[paletteIndex + 1]) << 10)
+                            | (static_cast<uint32_t>(gGpuPalette[paletteIndex + 2]) << 2);
+                    }
+                }
                 rgba[static_cast<size_t>(y) * width + x] = color;
             }
         }
@@ -401,7 +611,7 @@ void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
             SDL_DestroyTexture(textureIt->second.texture);
             textureIt->second = {
                 texture, width, height, gGpuBillboardLightModulation,
-                gGpuPaletteRevision, texturePalette
+                blackMaskColor, gGpuPaletteRevision, texturePalette
             };
             cachedTexture = &textureIt->second;
         } else {
@@ -409,7 +619,7 @@ void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
                 &gGpuBillboardTextures.emplace(pixels,
                     GpuBillboardTexture {
                         texture, width, height, gGpuBillboardLightModulation,
-                        gGpuPaletteRevision, texturePalette
+                        blackMaskColor, gGpuPaletteRevision, texturePalette
                     }).first->second;
         }
     }
@@ -424,6 +634,7 @@ void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
     if (!gGpuBillboards.empty()) {
         GpuBillboard& previous = gGpuBillboards.back();
         const bool sameBillboard = previous.texture == cachedTexture->texture
+            && !previous.hasSource
             && previous.destination.x == destination.x
             && previous.destination.y == destination.y
             && previous.destination.w == destination.w
@@ -446,6 +657,12 @@ void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
         destination,
         clip,
         depth,
+        0.0f,
+        0.0f,
+        1.0f,
+        1.0f,
+        {},
+        false,
     });
 }
 
@@ -890,10 +1107,8 @@ static bool createRenderer(int width, int height)
             rendererInfo.name != nullptr ? rendererInfo.name : "unknown",
             gSdlRendererHardwareAccelerated ? "accelerated" : "software",
             (rendererInfo.flags & SDL_RENDERER_TARGETTEXTURE) != 0 ? "yes" : "no");
-        debugPrint("GPU first-person backend: %s\n",
-            screenSupportsGpuFirstPersonPass() && screenHasOpenGLContext()
-                ? "available for isolated shader integration"
-                : "CPU fallback");
+        debugPrint("GPU first-person wall pass capability: %s; walls use CPU rendering\n",
+            screenSupportsGpuFirstPersonPass() ? "SDL geometry" : "unavailable");
     }
 
     if (SDL_RenderSetLogicalSize(gSdlRenderer, width, height) != 0) {
@@ -932,6 +1147,10 @@ static void destroyRenderer()
         SDL_DestroyTexture(entry.second.texture);
     }
     gGpuBillboardTextures.clear();
+    for (auto& entry : gGpuFirstPersonWallTextures) {
+        gpuFirstPersonDestroyWallTextureSet(entry.second);
+    }
+    gGpuFirstPersonWallTextures.clear();
     gSdlRendererHardwareAccelerated = false;
     if (gSdlTextureSurface != nullptr) {
         SDL_FreeSurface(gSdlTextureSurface);
@@ -1062,7 +1281,8 @@ void renderPresent()
             hasActiveClip = true;
             ++clipChanges;
         }
-        SDL_RenderCopy(gSdlRenderer, billboard.texture, nullptr, &billboard.destination);
+        SDL_RenderCopy(gSdlRenderer, billboard.texture,
+            billboard.hasSource ? &billboard.source : nullptr, &billboard.destination);
         ++billboardDrawCalls;
     };
 #if SDL_VERSION_ATLEAST(2, 0, 18)
@@ -1095,10 +1315,16 @@ void renderPresent()
             const float top = static_cast<float>(visible.y);
             const float right = static_cast<float>(visible.x + visible.w);
             const float bottom = static_cast<float>(visible.y + visible.h);
-            const float u0 = static_cast<float>(visible.x - dest.x) / dest.w;
-            const float v0 = static_cast<float>(visible.y - dest.y) / dest.h;
-            const float u1 = static_cast<float>(visible.x + visible.w - dest.x) / dest.w;
-            const float v1 = static_cast<float>(visible.y + visible.h - dest.y) / dest.h;
+            const float clipLeft = static_cast<float>(visible.x - dest.x) / dest.w;
+            const float clipTop = static_cast<float>(visible.y - dest.y) / dest.h;
+            const float clipRight =
+                static_cast<float>(visible.x + visible.w - dest.x) / dest.w;
+            const float clipBottom =
+                static_cast<float>(visible.y + visible.h - dest.y) / dest.h;
+            const float u0 = billboard.u0 + clipLeft * (billboard.u1 - billboard.u0);
+            const float v0 = billboard.v0 + clipTop * (billboard.v1 - billboard.v0);
+            const float u1 = billboard.u0 + clipRight * (billboard.u1 - billboard.u0);
+            const float v1 = billboard.v0 + clipBottom * (billboard.v1 - billboard.v0);
             const int base = static_cast<int>(vertices.size());
             vertices.push_back({ { left, top }, color, { u0, v0 } });
             vertices.push_back({ { right, top }, color, { u1, v0 } });

@@ -298,7 +298,9 @@ static const std::vector<unsigned char>* tileFirstPersonGetActorOutlinePixels(
     const unsigned char* pixels,
     int width,
     int height,
-    Color color);
+    Color color,
+    int* outlineWidth,
+    int* outlineHeight);
 static void tileFirstPersonRenderExitGridMarkers(
     const std::vector<int>& tiles,
     const TileFirstPersonExitGridRenderContext* context);
@@ -358,7 +360,10 @@ static unsigned int gFirstPersonPreviewWallPixelDepthStamp = 0;
 static std::vector<unsigned char> gFirstPersonPreviewHasDetailedWallDepth;
 static std::vector<std::vector<TileFirstPersonWallPixelDepthSpan>> gFirstPersonPreviewWallPixelDepthSpans;
 static constexpr int kFirstPersonWallTextureSize = 64;
-static constexpr unsigned char kFirstPersonTransparentWoodWallType = 7;
+static constexpr int kFirstPersonTextureRunMinimumScale =
+    kFirstPersonWallTextureSize * 4;
+static constexpr bool kEnableGpuFirstPersonWallPass = false;
+static constexpr unsigned char kFirstPersonHalfHeightWallType = 2;
 static constexpr unsigned char kFirstPersonWoodGateType = 6;
 static constexpr unsigned char kFirstPersonClosedWoodGateType = 8;
 static std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize> gFirstPersonStoneWallTexture;
@@ -369,6 +374,8 @@ static std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSi
 static std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize> gFirstPersonMetalWallTexture;
 static std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize> gFirstPersonWoodWallTexture;
 static std::array<unsigned char, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize> gFirstPersonWoodWallTextureAlpha;
+static std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize> gFirstPersonSolidWoodWallTexture;
+static std::array<unsigned char, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize> gFirstPersonSolidWoodWallTextureAlpha;
 static std::array<Color, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize> gFirstPersonGateTexture;
 static std::array<unsigned char, kFirstPersonWallTextureSize * kFirstPersonWallTextureSize> gFirstPersonGateTextureAlpha;
 static bool gFirstPersonWallTexturesInitialized = false;
@@ -1240,6 +1247,8 @@ static void tileFirstPersonInitializeWallTextures()
             gFirstPersonWoodWallTextureAlpha[coordinate];
     }
 
+    gFirstPersonSolidWoodWallTexture = gFirstPersonWoodWallTexture;
+    gFirstPersonSolidWoodWallTextureAlpha.fill(255);
     gFirstPersonWallTexturesInitialized = true;
 }
 
@@ -1352,6 +1361,8 @@ static void tileRenderFirstPersonPreview()
     }
 
     tileFirstPersonInitializeWallTextures();
+    const bool gpuTransparentWallPass = kEnableGpuFirstPersonWallPass
+        && screenSupportsGpuFirstPersonPass();
     gFirstPersonPreviewDoorHitTargets.clear();
 
     const int horizonY = tileFirstPersonPreviewGetHorizonY();
@@ -1772,15 +1783,12 @@ static void tileRenderFirstPersonPreview()
                             mapY * gHexGridWidth + (gHexGridWidth - 1 - mapX),
                             side);
                     } else if (wallType == 2
-                        || (wallType == 1 && cellMaterial == MATERIAL_TYPE_WOOD)
                         || wallType == kFirstPersonWoodGateType
                         || wallType == kFirstPersonClosedWoodGateType) {
                         addTransparentWallLayer(
-                            wallType == 1
-                                ? kFirstPersonTransparentWoodWallType
-                                : wallType == kFirstPersonClosedWoodGateType
-                                    ? kFirstPersonWoodGateType
-                                    : wallType,
+                            wallType == kFirstPersonClosedWoodGateType
+                                ? kFirstPersonWoodGateType
+                                : wallType,
                             cellMaterial,
                             hitDistance,
                             wallOrientation,
@@ -1871,15 +1879,12 @@ static void tileRenderFirstPersonPreview()
                                 ? nearX > nearY ? 0 : 1
                                 : side);
                     } else if (wallType == 2
-                        || (wallType == 1 && cellMaterial == MATERIAL_TYPE_WOOD)
                         || wallType == kFirstPersonWoodGateType
                         || wallType == kFirstPersonClosedWoodGateType) {
                         addTransparentWallLayer(
-                            wallType == 1
-                                ? kFirstPersonTransparentWoodWallType
-                                : wallType == kFirstPersonClosedWoodGateType
-                                    ? kFirstPersonWoodGateType
-                                    : wallType,
+                            wallType == kFirstPersonClosedWoodGateType
+                                ? kFirstPersonWoodGateType
+                                : wallType,
                             cellMaterial,
                             hitDistance,
                             wallOrientation,
@@ -2024,10 +2029,17 @@ static void tileRenderFirstPersonPreview()
             }
         }
         const auto renderWall = [&](unsigned char type, MaterialType material, double distance,
-                                    TileFirstPersonWallOrientation orientation, int wallSide) {
+                                    TileFirstPersonWallOrientation orientation, int wallSide,
+                                    bool gpuTransparentWall) {
             const double projectedWallHeight = gTileWindowHeight / distance;
-            const bool halfHeightWall = type == 2;
+            const bool halfHeightWall = type == kFirstPersonHalfHeightWallType;
             const bool gatePanel = type == kFirstPersonWoodGateType;
+            const auto& woodWallTexture = halfHeightWall
+                ? gFirstPersonWoodWallTexture
+                : gFirstPersonSolidWoodWallTexture;
+            const auto& woodWallTextureAlpha = halfHeightWall
+                ? gFirstPersonWoodWallTextureAlpha
+                : gFirstPersonSolidWoodWallTextureAlpha;
             const double wallHeight = halfHeightWall
                 ? std::max(1.0, projectedWallHeight / 2.0)
                 : projectedWallHeight * 2.0;
@@ -2041,7 +2053,8 @@ static void tileRenderFirstPersonPreview()
             const int wallBottom = std::min(gTileWindowHeight - 1,
                 static_cast<int>(floor(type == 5 ? doorSplitY : floorY)));
             if (wallTop <= horizonY + 1 && wallBottom >= horizonY + 1) {
-                if (material == MATERIAL_TYPE_WOOD) {
+                if (material == MATERIAL_TYPE_WOOD
+                    && (halfHeightWall || gatePanel)) {
                     floorOcclusionBottoms[x] = horizonY;
                 } else {
                     floorOcclusionBottoms[x] = std::max(floorOcclusionBottoms[x], wallBottom);
@@ -2073,6 +2086,31 @@ static void tileRenderFirstPersonPreview()
                     || material == MATERIAL_TYPE_WOOD
                 ? 1
                 : 2;
+            bool gpuWallQueued = false;
+            if (gpuTransparentWall && (material == MATERIAL_TYPE_WOOD || gatePanel)) {
+                const Color* wallTexture = gatePanel
+                    ? gFirstPersonGateTexture.data()
+                    : woodWallTexture.data();
+                const unsigned char* wallAlpha = gatePanel
+                    ? gFirstPersonGateTextureAlpha.data()
+                    : woodWallTextureAlpha.data();
+                const double textureScaleHeight = gatePanel
+                    ? std::max(1.0, wallHeight / 2.0)
+                    : textureHeight;
+                gpuWallQueued = gpuFirstPersonSubmitWallColumn(
+                    wallTexture,
+                    wallAlpha,
+                    kFirstPersonWallTextureSize,
+                    !halfHeightWall && !gatePanel,
+                    textureX,
+                    static_cast<unsigned char>(light),
+                    x,
+                    wallTop,
+                    wallBottom,
+                    gatePanel ? doorSplitY : unclippedWallTop,
+                    textureScaleHeight,
+                    distance);
+            }
             if (type == 5 && wallTop <= wallBottom) {
                 hasDoorCaps = true;
                 TileFirstPersonDoorCapSpan& cap = doorCapDepths[x];
@@ -2093,15 +2131,18 @@ static void tileRenderFirstPersonPreview()
                 for (int textureY = 0; textureY < kFirstPersonWallTextureSize; textureY++) {
                     const int textureIndex = textureY * kFirstPersonWallTextureSize + textureX;
                     woodOpaque[textureY] =
-                        gFirstPersonWoodWallTextureAlpha[textureIndex] != 0;
-                    woodColors[textureY] = intensityColorTable[
-                        gFirstPersonWoodWallTexture[textureIndex]][light];
+                        woodWallTextureAlpha[textureIndex] != 0;
+                    if (!gpuWallQueued) {
+                        woodColors[textureY] = intensityColorTable[
+                            woodWallTexture[textureIndex]][light];
+                    }
                 }
 
                 // Nearby walls magnify one source row across many pixels.
                 // Skip whole alpha gaps and reuse sampling for opaque runs.
                 // Run-boundary math pays off only at strong magnification.
-                const bool magnified = textureHeight >= kFirstPersonWallTextureSize * 16;
+                const bool magnified =
+                    textureHeight >= kFirstPersonTextureRunMinimumScale;
                 for (int y = wallTop; y <= wallBottom;) {
                     const int textureY = firstPersonTextureRow(
                         y, unclippedWallTop, textureHeight, kFirstPersonWallTextureSize)
@@ -2111,7 +2152,9 @@ static void tileRenderFirstPersonPreview()
                             textureHeight, kFirstPersonWallTextureSize)
                         : y + 1;
                     if (woodOpaque[textureY]) {
-                        const unsigned char color = woodColors[textureY];
+                        const unsigned char color = gpuWallQueued
+                            ? 0
+                            : woodColors[textureY];
                         for (int row = y; row < end; ++row) {
                             const size_t depthIndex = columnOffset + row;
                             if (!detailedWallPixelDepth
@@ -2123,7 +2166,9 @@ static void tileRenderFirstPersonPreview()
                                         gFirstPersonPreviewWallPixelDepthStamp;
                                     wallPixelDepths[depthIndex] = distance;
                                 }
-                                gTileWindowBuffer[row * gTileWindowPitch + x] = color;
+                                if (!gpuWallQueued) {
+                                    gTileWindowBuffer[row * gTileWindowPitch + x] = color;
+                                }
                             }
                         }
                     }
@@ -2133,7 +2178,9 @@ static void tileRenderFirstPersonPreview()
                 const double textureScaleHeight = type == 3 || type == 5 || gatePanel
                     ? std::max(1.0, wallHeight / 2.0)
                     : textureHeight;
-                for (int y = wallTop; y <= wallBottom; y += wallRenderStep) {
+                const bool magnifiedTextureRuns = wallRenderStep == 2
+                    && textureScaleHeight >= kFirstPersonTextureRunMinimumScale;
+                for (int y = wallTop; y <= wallBottom;) {
                     const bool brickTexture = type != 3 || y < doorSplitY;
                     const bool stoneWall = brickTexture && material == MATERIAL_TYPE_STONE;
                     const bool leatherWall = brickTexture && material == MATERIAL_TYPE_LEATHER;
@@ -2150,7 +2197,7 @@ static void tileRenderFirstPersonPreview()
                                 : metalWall
                                     ? gFirstPersonMetalWallTexture
                                     : woodWall
-                                        ? gFirstPersonWoodWallTexture
+                                        ? woodWallTexture
                                         : gFirstPersonStoneWallTexture
                         : gFirstPersonDoorWallTexture;
                     const double textureOffset = type == 3 && !brickTexture
@@ -2165,64 +2212,80 @@ static void tileRenderFirstPersonPreview()
                         + (leatherWall ? leatherTextureX : textureX);
                     if ((gateTexture && gFirstPersonGateTextureAlpha[textureIndex] == 0)
                         || (woodWall && !gateTexture
-                            && gFirstPersonWoodWallTextureAlpha[textureIndex] == 0)) {
+                            && woodWallTextureAlpha[textureIndex] == 0)) {
+                        y += wallRenderStep;
                         continue;
                     }
-                    const Color texel = brickTexture && useCaveWallTexture
-                            && !stoneWall && !leatherWall && !metalWall && !woodWall
-                        ? gFirstPersonCaveWallTexture[textureIndex]
-                        : texture[textureIndex];
-                    const unsigned char color = intensityColorTable[texel][light];
-                    const size_t depthIndex = static_cast<size_t>(x) * gTileWindowHeight + y;
-                    if (!detailedWallPixelDepth
-                        || wallPixelDepthStamps[depthIndex]
-                            != gFirstPersonPreviewWallPixelDepthStamp
-                        || distance < wallPixelDepths[depthIndex]) {
-                        if (detailedWallPixelDepth) {
-                            wallPixelDepthStamps[depthIndex] =
-                                gFirstPersonPreviewWallPixelDepthStamp;
-                            wallPixelDepths[depthIndex] = distance;
-                        }
-                        gTileWindowBuffer[y * gTileWindowPitch + x] = color;
+                    unsigned char color = 0;
+                    if (!gpuWallQueued) {
+                        const Color texel = brickTexture && useCaveWallTexture
+                                && !stoneWall && !leatherWall && !metalWall && !woodWall
+                            ? gFirstPersonCaveWallTexture[textureIndex]
+                            : texture[textureIndex];
+                        color = intensityColorTable[texel][light];
                     }
-                    if (wallRenderStep == 2 && y + 1 <= wallBottom) {
-                        const size_t nextDepthIndex = depthIndex + 1;
+                    int runEnd = y + 1;
+                    if (magnifiedTextureRuns) {
+                        // Preserve the two-row sampling grid while reusing magnified texels.
+                        const int textureRunEnd = firstPersonTextureRunEnd(
+                            y, wallBottom + 1, unclippedWallTop,
+                            textureScaleHeight, kFirstPersonWallTextureSize);
+                        const int sampleCount =
+                            (textureRunEnd - y + wallRenderStep - 1) / wallRenderStep;
+                        runEnd = std::min(wallBottom + 1, y + sampleCount * wallRenderStep);
+                    } else {
+                        runEnd = std::min(wallBottom + 1, y + wallRenderStep);
+                    }
+                    for (int row = y; row < runEnd; row++) {
+                        const size_t depthIndex = columnOffset + row;
                         if (!detailedWallPixelDepth
-                            || wallPixelDepthStamps[nextDepthIndex]
+                            || wallPixelDepthStamps[depthIndex]
                                 != gFirstPersonPreviewWallPixelDepthStamp
-                            || distance < wallPixelDepths[nextDepthIndex]) {
+                            || distance < wallPixelDepths[depthIndex]) {
                             if (detailedWallPixelDepth) {
-                                wallPixelDepthStamps[nextDepthIndex] =
+                                wallPixelDepthStamps[depthIndex] =
                                     gFirstPersonPreviewWallPixelDepthStamp;
-                                wallPixelDepths[nextDepthIndex] = distance;
+                                wallPixelDepths[depthIndex] = distance;
                             }
-                            gTileWindowBuffer[(y + 1) * gTileWindowPitch + x] = color;
+                            if (!gpuWallQueued) {
+                                gTileWindowBuffer[row * gTileWindowPitch + x] = color;
+                            }
                         }
                     }
+                    y = runEnd;
                 }
             }
         };
         if (wallDistance != std::numeric_limits<double>::infinity()) {
-            renderWall(wallType, wallMaterial, wallDistance, wallOrientation, side);
+            renderWall(wallType, wallMaterial, wallDistance, wallOrientation, side, false);
         }
         const int opaqueWallTop = depthTop;
         const int opaqueWallBottom = depthBottom;
         if (transparentLayers.size() > 1) {
+            // Front-to-back order lets nearer opaque texels claim pixels first.
             std::sort(
                 transparentLayers.begin(),
                 transparentLayers.end(),
                 [](const TileFirstPersonTransparentWallLayer& left,
                     const TileFirstPersonTransparentWallLayer& right) {
-                    return left.distance > right.distance;
+                    return left.distance < right.distance;
                 });
         }
+        // Partial opaque sills and door caps still use CPU per-pixel depth.
+        const bool gpuTransparentWallsForColumn = gpuTransparentWallPass
+            && !hasOpaqueSillLayer
+            && doorCapDistance == std::numeric_limits<double>::infinity();
         for (const TileFirstPersonTransparentWallLayer& layer : transparentLayers) {
             renderWall(
                 layer.type,
                 layer.material,
                 layer.distance,
                 layer.orientation,
-                layer.side);
+                layer.side,
+                gpuTransparentWallsForColumn
+                    && layer.type != kFirstPersonHalfHeightWallType
+                    && (layer.material == MATERIAL_TYPE_WOOD
+                        || layer.type == kFirstPersonWoodGateType));
         }
         if (!detailedWallPixelDepth && hasOpaqueSillLayer) {
             renderWall(
@@ -2230,11 +2293,12 @@ static void tileRenderFirstPersonPreview()
                 opaqueSillLayer.material,
                 opaqueSillLayer.distance,
                 opaqueSillLayer.orientation,
-                opaqueSillLayer.side);
+                opaqueSillLayer.side,
+                false);
         }
         if (doorCapDistance != std::numeric_limits<double>::infinity()) {
             renderWall(5, MATERIAL_TYPE_INVALID, doorCapDistance,
-                doorCapOrientation, doorCapSide);
+                doorCapOrientation, doorCapSide, false);
         }
 
         if (!detailedWallPixelDepth && hasOpaqueSillLayer) {
@@ -5091,11 +5155,24 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         && gameMouseGetMode() == GAME_MOUSE_MODE_CROSSHAIR
         && settings.preferences.target_highlight != TARGET_HIGHLIGHT_OFF
         && !_combat_is_shot_blocked(gDude, gDude->tile, object->tile, object, nullptr);
-    const Color combatOutlineColor = drawCombatOutline
-            && (objectIsPartyMember(object)
-                || gDude->data.critter.combat.team == object->data.critter.combat.team)
-        ? Color(229)
-        : Color(243);
+    Color combatOutlineColor = COLOR_BLACK;
+    if (objectType == OBJ_TYPE_CRITTER) {
+        if (clientViewerActive()) {
+            if (!critterIsDead(object) && objectHasVisibleOutline(object)) {
+                const OutlineType outlineType = object->outline & OUTLINE_TYPE_MAX;
+                if (outlineType == OUTLINE_TYPE_FRIENDLY) {
+                    combatOutlineColor = Color(229);
+                } else if (outlineType == OUTLINE_TYPE_HOSTILE) {
+                    combatOutlineColor = Color(243);
+                }
+            }
+        } else if (drawCombatOutline) {
+            combatOutlineColor = objectIsPartyMember(object)
+                    || gDude->data.critter.combat.team == object->data.critter.combat.team
+                ? Color(229)
+                : Color(243);
+        }
+    }
     Color actorColor = COLOR_AMBER;
     if (objectType == OBJ_TYPE_CRITTER) {
         if (objectIsPartyMember(object)
@@ -5113,13 +5190,12 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         if (frame.width <= 0 || frame.height <= 0) {
             return;
         }
-        const std::vector<unsigned char>* outlinePixels = drawCombatOutline
+        int outlineWidth = frame.width;
+        int outlineHeight = frame.height;
+        const std::vector<unsigned char>* outlinePixels = objectType == OBJ_TYPE_CRITTER
             ? tileFirstPersonGetActorOutlinePixels(frame.data, frame.width, frame.height,
-                combatOutlineColor)
+                combatOutlineColor, &outlineWidth, &outlineHeight)
             : nullptr;
-        const int outlineScale = combatOutlineColor == Color(243) ? 2 : 1;
-        const int outlineWidth = frame.width * outlineScale;
-        const int outlineHeight = frame.height * outlineScale;
         const int artHeight = actorHeight;
         const int artWidth = std::max(1,
             static_cast<int>(artHeight * frame.width / static_cast<double>(frame.height)
@@ -5167,16 +5243,49 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
             (spriteBounds.bottom + 1) * artHeight / frame.height);
         const int artTop = actorBottom - visibleHeight;
         const int artLeft = screenCenterX - artWidth / 2;
+        const int outlinePaddingPixelsX = outlinePixels != nullptr
+            ? (outlineWidth - frame.width * 2) / 2
+            : 0;
+        const int outlinePaddingPixelsY = outlinePixels != nullptr
+            ? (outlineHeight - frame.height * 2) / 2
+            : 0;
+        const int outlinePaddingX = outlinePixels != nullptr
+            ? std::max(1, (artWidth * outlinePaddingPixelsX
+                + frame.width * 2 - 1) / (frame.width * 2))
+            : 0;
+        const int outlinePaddingY = outlinePixels != nullptr
+            ? std::max(1, (artHeight * outlinePaddingPixelsY
+                + frame.height * 2 - 1) / (frame.height * 2))
+            : 0;
+        const SDL_Rect outlineDestination = {
+            artLeft - outlinePaddingX,
+            artTop - outlinePaddingY,
+            artWidth + 2 * outlinePaddingX,
+            artHeight + 2 * outlinePaddingY,
+        };
+        const SDL_Rect destination = { artLeft, artTop, artWidth, artHeight };
         const int opaqueLeft = artLeft + spriteBounds.left * artWidth / frame.width;
         const int opaqueRight = artLeft
             + (spriteBounds.right + 1) * artWidth / frame.width;
         const int opaqueTop = artTop + spriteBounds.top * artHeight / frame.height;
         const int opaqueBottom = artTop
             + (spriteBounds.bottom + 1) * artHeight / frame.height;
+        const int renderLeft = outlinePixels != nullptr
+            ? std::min(opaqueLeft, outlineDestination.x)
+            : opaqueLeft;
+        const int renderRight = outlinePixels != nullptr
+            ? std::max(opaqueRight, outlineDestination.x + outlineDestination.w)
+            : opaqueRight;
+        const int renderTop = outlinePixels != nullptr
+            ? std::min(opaqueTop, outlineDestination.y)
+            : opaqueTop;
+        const int renderBottom = outlinePixels != nullptr
+            ? std::max(opaqueBottom, outlineDestination.y + outlineDestination.h)
+            : opaqueBottom;
         // Only actual artwork bounds are safe for culling. Wide sprites can
         // extend far beyond the placeholder silhouette or one-tile radius.
-        if (opaqueRight <= 0 || opaqueLeft >= gTileWindowWidth
-            || opaqueBottom <= 0 || opaqueTop >= gTileWindowHeight) {
+        if (renderRight <= 0 || renderLeft >= gTileWindowWidth
+            || renderBottom <= 0 || renderTop >= gTileWindowHeight) {
             return;
         }
         renderContext->hitTargets->push_back({
@@ -5192,14 +5301,16 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
 
         const int firstOpaqueColumn = std::max(0, opaqueLeft);
         const int lastColumn = std::min(gTileWindowWidth, opaqueRight);
+        const int firstRenderColumn = std::max(0, renderLeft);
+        const int lastRenderColumn = std::min(gTileWindowWidth, renderRight);
         if ((objectType == OBJ_TYPE_CRITTER
                 || objectType == OBJ_TYPE_SCENERY
                 || objectType == OBJ_TYPE_ITEM)
             && screenIsHardwareAccelerated()) {
             bool hasVisibleColumn = false;
-            const int clippedOpaqueTop = std::max(0, opaqueTop);
-            const int clippedOpaqueBottom = std::min(gTileWindowHeight, opaqueBottom);
-            for (int x = firstOpaqueColumn; x < lastColumn; x++) {
+            const int clippedOpaqueTop = std::max(0, renderTop);
+            const int clippedOpaqueBottom = std::min(gTileWindowHeight, renderBottom);
+            for (int x = firstRenderColumn; x < lastRenderColumn; x++) {
                 hasVisibleColumn = tileFirstPersonHasVisibleWallPixel(
                     x, clippedOpaqueTop, clippedOpaqueBottom, transformY,
                     renderContext->horizonY, renderContext->wallDepths,
@@ -5217,7 +5328,6 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                 }
                 return;
             }
-            const SDL_Rect destination = { artLeft, artTop, artWidth, artHeight };
             static std::vector<SDL_Rect> visibleClips;
             visibleClips.clear();
             const auto queueVisibleClip = [&](const SDL_Rect& clip) {
@@ -5235,7 +5345,7 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                 bool needsDetailedClipping = false;
                 static BillboardClipBands clipBands;
                 clipBands.reset(top, bottom);
-                for (int x = firstOpaqueColumn; x < lastColumn; x++) {
+                for (int x = firstRenderColumn; x < lastRenderColumn; x++) {
                     // These depths are constant within this horizon range.
                     // Alpha boundaries in a fully hidden column cannot change
                     // visibility, but would otherwise split every sprite row.
@@ -5265,10 +5375,10 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                     // Each call stays on one side of the horizon. Visibility
                     // therefore depends only on x; merge adjacent columns into
                     // full-height clips without allocating vectors per row.
-                    int runStart = firstOpaqueColumn;
+                    int runStart = firstRenderColumn;
                     bool inRun = false;
-                    for (int x = firstOpaqueColumn; x <= lastColumn; x++) {
-                        const bool visible = x < lastColumn
+                    for (int x = firstRenderColumn; x <= lastRenderColumn; x++) {
+                        const bool visible = x < lastRenderColumn
                             && transformY < (objectType == OBJ_TYPE_CRITTER
                                     ? tileFirstPersonGetWallDepthAt(
                                         x, top, renderContext->horizonY,
@@ -5303,7 +5413,7 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                     nextClips.clear();
                     retained.assign(activeClips.size(), false);
                     size_t previousRunCursor = 0;
-                    int runStart = firstOpaqueColumn;
+                    int runStart = firstRenderColumn;
                     bool inRun = false;
                     const auto finishRun = [&](int runEnd) {
                         SDL_Rect clip = { runStart, y, runEnd - runStart, bandHeight };
@@ -5318,8 +5428,8 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                         }
                         nextClips.push_back(clip);
                     };
-                    for (int x = firstOpaqueColumn; x <= lastColumn; x++) {
-                        const bool nextVisible = x < lastColumn
+                    for (int x = firstRenderColumn; x <= lastRenderColumn; x++) {
+                        const bool nextVisible = x < lastRenderColumn
                             && transformY < tileFirstPersonGetWallDepthAt(
                                 x,
                                 y,
@@ -5347,15 +5457,15 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                     queueVisibleClip(clip);
                 }
             };
-            submitVisibleRange(std::max(0, opaqueTop),
-                std::min(gTileWindowHeight, std::min(opaqueBottom, renderContext->horizonY)));
-            submitVisibleRange(std::max(0, std::max(opaqueTop, renderContext->horizonY)),
-                std::min(gTileWindowHeight, opaqueBottom));
+            submitVisibleRange(std::max(0, renderTop),
+                std::min(gTileWindowHeight, std::min(renderBottom, renderContext->horizonY)));
+            submitVisibleRange(std::max(0, std::max(renderTop, renderContext->horizonY)),
+                std::min(gTileWindowHeight, renderBottom));
             billboardSubmitClipLayers(visibleClips, outlinePixels != nullptr,
                 [&](const SDL_Rect& clip, bool outline) {
                     if (outline) {
                         gpuBillboardSubmit(outlinePixels->data(), outlineWidth, outlineHeight,
-                            destination, clip, transformY);
+                            outlineDestination, clip, transformY, Color(1));
                     } else {
                         gpuBillboardSubmit(frame.data, frame.width, frame.height,
                             destination, clip, transformY);
@@ -5378,14 +5488,18 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
             : artHeight >= 96 ? 3
             : 2;
         if (outlinePixels != nullptr) {
-            const int outlineTop = std::max(0, artTop);
-            const int outlineBottom = std::min(gTileWindowHeight, artTop + artHeight);
-            const int outlineLeft = std::max(0, artLeft);
-            const int outlineRight = std::min(gTileWindowWidth, artLeft + artWidth);
+            const int outlineTop = std::max(0, outlineDestination.y);
+            const int outlineBottom = std::min(
+                gTileWindowHeight, outlineDestination.y + outlineDestination.h);
+            const int outlineLeft = std::max(0, outlineDestination.x);
+            const int outlineRight = std::min(
+                gTileWindowWidth, outlineDestination.x + outlineDestination.w);
             for (int y = outlineTop; y < outlineBottom; y++) {
-                const int sourceY = (y - artTop) * outlineHeight / artHeight;
+                const int sourceY = (y - outlineDestination.y) * outlineHeight
+                    / outlineDestination.h;
                 for (int x = outlineLeft; x < outlineRight; x++) {
-                    const int sourceX = (x - artLeft) * outlineWidth / artWidth;
+                    const int sourceX = (x - outlineDestination.x) * outlineWidth
+                        / outlineDestination.w;
                     const unsigned char color = (*outlinePixels)[sourceY * outlineWidth + sourceX];
                     if (color == 0
                         || transformY >= tileFirstPersonGetWallDepthAt(
@@ -5407,7 +5521,8 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                             std::numeric_limits<double>::infinity();
                     }
                     if (transformY < (*renderContext->actorDepths)[depthIndex]) {
-                        gTileWindowBuffer[y * gTileWindowPitch + x] = color;
+                        gTileWindowBuffer[y * gTileWindowPitch + x] =
+                            color == Color(1) ? COLOR_BLACK : color;
                         (*renderContext->actorDepths)[depthIndex] = transformY;
                     }
                 }
@@ -5586,12 +5701,14 @@ static const std::vector<unsigned char>* tileFirstPersonGetActorOutlinePixels(
     const unsigned char* pixels,
     int width,
     int height,
-    Color color)
+    Color color,
+    int* outlineWidth,
+    int* outlineHeight)
 {
     struct OutlineFrameCacheEntry {
         int width = 0;
         int height = 0;
-        std::array<std::vector<unsigned char>, 2> frames;
+        std::array<std::vector<unsigned char>, 3> frames;
     };
     static std::unordered_map<const unsigned char*, OutlineFrameCacheEntry> cache;
 
@@ -5602,40 +5719,70 @@ static const std::vector<unsigned char>* tileFirstPersonGetActorOutlinePixels(
         entry.height = height;
     }
 
-    const size_t frameIndex = color == Color(229) ? 0 : 1;
+    const size_t frameIndex = color == COLOR_BLACK ? 0 : color == Color(229) ? 1 : 2;
     std::vector<unsigned char>& outlinePixels = entry.frames[frameIndex];
     if (outlinePixels.empty()) {
-        const int scale = color == Color(243) ? 2 : 1;
-        const int outlineWidth = width * scale;
-        const int outlineHeight = height * scale;
-        outlinePixels.assign(static_cast<size_t>(outlineWidth) * outlineHeight, 0);
-        for (int y = 0; y < outlineHeight; y++) {
-            for (int x = 0; x < outlineWidth; x++) {
-                if (pixels[(y / scale) * width + x / scale] != 0) {
+        constexpr int scale = 2;
+        constexpr int padding = 3;
+        const int frameWidth = width * scale;
+        const int frameHeight = height * scale;
+        *outlineWidth = frameWidth + padding * 2;
+        *outlineHeight = frameHeight + padding * 2;
+        const size_t outlineSize = static_cast<size_t>(*outlineWidth) * *outlineHeight;
+        outlinePixels.assign(outlineSize, 0);
+
+        std::vector<unsigned char> expanded(outlineSize, 0);
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                if (pixels[y * width + x] == 0) {
                     continue;
                 }
-
-                for (int offsetY = -1; offsetY <= 1; offsetY++) {
-                    for (int offsetX = -1; offsetX <= 1; offsetX++) {
-                        if (offsetX == 0 && offsetY == 0) {
-                            continue;
-                        }
-
-                        const int neighborX = x + offsetX;
-                        const int neighborY = y + offsetY;
-                        if (neighborX >= 0 && neighborX < outlineWidth
-                            && neighborY >= 0 && neighborY < outlineHeight
-                            && pixels[(neighborY / scale) * width + neighborX / scale] != 0) {
-                            outlinePixels[y * outlineWidth + x] = color;
-                            break;
-                        }
-                    }
-                    if (outlinePixels[y * outlineWidth + x] != 0) {
-                        break;
+                for (int offsetY = 0; offsetY < scale; offsetY++) {
+                    for (int offsetX = 0; offsetX < scale; offsetX++) {
+                        expanded[(y * scale + padding + offsetY) * *outlineWidth
+                            + x * scale + padding + offsetX] = 1;
                     }
                 }
             }
         }
+
+        std::vector<unsigned char> next(outlineSize);
+        for (int distance = 1; distance <= padding; distance++) {
+            next = expanded;
+            for (int y = 0; y < *outlineHeight; y++) {
+                for (int x = 0; x < *outlineWidth; x++) {
+                    const size_t pixelIndex = static_cast<size_t>(y) * *outlineWidth + x;
+                    if (expanded[pixelIndex] != 0) {
+                        continue;
+                    }
+                    bool touchesExpanded = false;
+                    for (int offsetY = -1; offsetY <= 1 && !touchesExpanded; offsetY++) {
+                        for (int offsetX = -1; offsetX <= 1; offsetX++) {
+                            const int neighborX = x + offsetX;
+                            const int neighborY = y + offsetY;
+                            if (neighborX >= 0 && neighborX < *outlineWidth
+                                && neighborY >= 0 && neighborY < *outlineHeight
+                                && expanded[neighborY * *outlineWidth + neighborX] != 0) {
+                                touchesExpanded = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (touchesExpanded) {
+                        next[pixelIndex] = 1;
+                        if (distance <= 2) {
+                            outlinePixels[pixelIndex] = Color(1);
+                        } else if (color != COLOR_BLACK) {
+                            outlinePixels[pixelIndex] = color;
+                        }
+                    }
+                }
+            }
+            expanded.swap(next);
+        }
+    } else {
+        *outlineWidth = width * 2 + 6;
+        *outlineHeight = height * 2 + 6;
     }
 
     return &outlinePixels;
