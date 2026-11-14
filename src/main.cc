@@ -1359,6 +1359,7 @@ static bool viewerHandleFirstPersonClick(ClientConnection& conn, int screenX, in
         }
         gameMouseSetCursor(MOUSE_CURSOR_NONE);
         gameMouseSetMode(GAME_MOUSE_MODE_MOVE);
+        
         return sent;
     }
 
@@ -1431,7 +1432,7 @@ static bool viewerHandleFirstPersonClick(ClientConnection& conn, int screenX, in
             }
             char cmd[32];
             snprintf(cmd, sizeof(cmd), "%s %d %d", conn.inCombat() ? "cmove" : "mv",
-                tile, settings.preferences.running ? 1 : 0);
+                tile, 1);
             conn.sendLine(cmd);
             sent = true;
         }
