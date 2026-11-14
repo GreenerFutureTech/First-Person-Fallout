@@ -47,6 +47,10 @@
 #include "queue.h"
 #include "random.h"
 #include "scripts.h"
+#ifdef F2_SERVER
+#include "server_control.h"
+#include "server_players.h"
+#endif
 #include "settings.h"
 #include "skill.h"
 #include "stat.h"
@@ -2215,6 +2219,17 @@ int gameDialogProcessUI()
         if (_gdProcessInit() == -1) {
             return -1;
         }
+
+        // Script-driven conversations (gsay_start/gsay_end) bypass the deferred
+        // dialog request handler. The server is still inside the initiating
+        // actor's ServerActorScope here, so use that actor as the conversation
+        // driver before the first node is sent.
+#ifdef F2_SERVER
+        if (serverLoopActive() && gDialogServerPump != nullptr) {
+            serverControlSetPendingDialogRequester(playerActorSlotOf(gDude));
+            serverControlBeginDialogDrive();
+        }
+#endif
     }
 
     _gdReenterLevel += 1;
@@ -2620,6 +2635,9 @@ int gameDialogProcessUI()
             // on the golden/headless path.
             if (gDialogServerPump != nullptr) {
                 presenter()->dialogEnd(gDude);
+#ifdef F2_SERVER
+                serverControlEndDialogDrive();
+#endif
             }
         }
         if (_gdProcessExit() == -1) {

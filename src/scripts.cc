@@ -60,6 +60,7 @@
 namespace fallout {
 
 static Object* gScriptsRequestedElevatorRider;
+static Object* gScriptsRequestedDialogBy;
 
 Object* scriptsRequestedElevatorRider();
 
@@ -1556,6 +1557,7 @@ int scriptsRequestExplosion(int tile, MapElevation elevation, int minDamage, int
 void scriptsRequestDialog(Object* obj)
 {
     gScriptsRequestedDialogWith = obj;
+    gScriptsRequestedDialogBy = playerActorSlotOf(gDude) > 0 ? gDude : nullptr;
     gScriptsRequests |= SCRIPT_REQUEST_DIALOG;
 }
 
@@ -3562,6 +3564,11 @@ int _scr_explode_scenery(Object* explosionSource, int tile, int radius, MapEleva
 Object* scriptsRequestedElevatorRider()
 {
     return gScriptsRequestedElevatorRider != nullptr ? gScriptsRequestedElevatorRider : gDude;
+}
+
+Object* scriptsRequestedDialogBy()
+{
+    return gScriptsRequestedDialogBy;
 }
 
 void scriptTraceLvarAlloc(const char* how, Script* script)

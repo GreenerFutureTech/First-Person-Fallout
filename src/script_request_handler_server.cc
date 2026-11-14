@@ -38,6 +38,13 @@ class ServerScriptRequestHandler : public ScriptRequestHandler {
 public:
     void dialogEnter(Object* speaker) override
     {
+        // The script request outlives the actor's ServerActorScope. Recover its
+        // requester before entering the dialog barrier; scenery scripts can start
+        // dialogs just like the TALK verb.
+        Object* requester = scriptsRequestedDialogBy();
+        if (requester != nullptr) {
+            serverControlSetPendingDialogRequester(playerActorSlotOf(requester));
+        }
         // ►► THE ONE PLACE A SERVER-SIDE CONVERSATION IS ENTERED, and gameDialogEnter
         // BLOCKS here for its whole life (the barrier pumps inside it). So a single
         // scope covers the entire conversation — every node proc, every `dude_obj`
