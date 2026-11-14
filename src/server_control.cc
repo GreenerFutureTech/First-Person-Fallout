@@ -575,15 +575,8 @@ static void interactionFire(int verb, Object* actor, Object* target, int arg, bo
         // this same tick. actionTalk itself cannot be used — its outcome rides a
         // server-no-op reg_anim callback (actions.cc:2076-2077).
         //
-        // Latch WHO asked, beside the request itself, because the conversation that
-        // opens from it is theirs to drive. The two travel together: this runs at
-        // the arrival of the approach walk the same player started, and the request
-        // is drained the same tick.
-        //
-        // Keyed off the ACTOR rather than the session that sent the verb: this is a
-        // deferred outcome, so the actor is the identity that survived the walk (the
-        // session could have reconnected under a new id in between), and it is also
-        // the identity the driver check ultimately compares.
+        // Preserve the actor for explicit TALK. scriptsRequestDialog separately
+        // captures non-host actors for dialogs opened by scripts such as scenery USE.
         serverControlSetPendingDialogRequester(playerActorSlotOf(actor));
         scriptsRequestDialog(target);
         break;

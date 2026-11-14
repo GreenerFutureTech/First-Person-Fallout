@@ -312,6 +312,9 @@ void scriptsRequestWorldMap();
 int scriptsRequestElevator(Object* obj, int elevatorType);
 int scriptsRequestExplosion(int tile, MapElevation elevation, int minDamage, int maxDamage);
 void scriptsRequestDialog(Object* obj);
+// Non-host player actor that requested the dialog, captured before the deferred
+// request drain. Host-initiated dialogs retain their existing driver path.
+Object* scriptsRequestedDialogBy();
 // The player who pressed the elevator button, captured at REQUEST time (the drain
 // runs a beat later, outside that player's ServerActorScope). Never null — falls
 // back to gDude.
