@@ -312,6 +312,7 @@ static void tileFirstPersonDrawMoveMarker(double cameraX, double cameraY, double
 static void tileFirstPersonDrawDiagnosticLine(int x1, int y1, int x2, int y2, Color color);
 static bool tileFirstPersonGetWorldPosition(int tile, double* x, double* y);
 static Rotation tileFirstPersonGetRotationToward(int tile, double targetX, double targetY);
+static bool tileFirstPersonHasWallDepthSpanAt(int x, int y);
 static double tileFirstPersonPreviewGetYaw();
 static int tileFirstPersonPreviewGetHorizonY();
 static void tileFirstPersonGetCameraPosition(int tile, MapElevation elevation, double* x, double* y);
@@ -358,6 +359,7 @@ static std::vector<double> gFirstPersonPreviewWallPixelDepths;
 static std::vector<unsigned int> gFirstPersonPreviewWallPixelDepthStamps;
 static unsigned int gFirstPersonPreviewWallPixelDepthStamp = 0;
 static std::vector<unsigned char> gFirstPersonPreviewHasDetailedWallDepth;
+static std::vector<unsigned char> gFirstPersonPreviewHasDirectWallDepthSpans;
 static std::vector<std::vector<TileFirstPersonWallPixelDepthSpan>> gFirstPersonPreviewWallPixelDepthSpans;
 static constexpr int kFirstPersonWallTextureSize = 64;
 static constexpr int kFirstPersonTextureRunMinimumScale =
@@ -414,6 +416,10 @@ static unsigned int gFirstPersonPreviewProfileTotalMs = 0;
 static unsigned int gFirstPersonPreviewProfileFloorMs = 0;
 static unsigned int gFirstPersonPreviewProfileWallMs = 0;
 static unsigned int gFirstPersonPreviewProfileActorMs = 0;
+static unsigned int gFirstPersonPreviewProfileSetupMs = 0;
+static uint64_t gFirstPersonPreviewProfileWallCellVisits = 0;
+static uint64_t gFirstPersonPreviewProfileOrientedWallTests = 0;
+static uint64_t gFirstPersonPreviewProfileWallHits = 0;
 
 // 0x51D96C off_tile
 const int _off_tile[ROTATION_COUNT] = {
@@ -1361,8 +1367,9 @@ static void tileRenderFirstPersonPreview()
     }
 
     tileFirstPersonInitializeWallTextures();
+    const bool gpuOpaqueWallPass = screenSupportsGpuFirstPersonPass();
     const bool gpuTransparentWallPass = kEnableGpuFirstPersonWallPass
-        && screenSupportsGpuFirstPersonPass();
+        && gpuOpaqueWallPass;
     gFirstPersonPreviewDoorHitTargets.clear();
 
     const int horizonY = tileFirstPersonPreviewGetHorizonY();
@@ -1600,6 +1607,8 @@ static void tileRenderFirstPersonPreview()
         gFirstPersonPreviewWallPixelDepthStamps;
     std::vector<unsigned char>& hasDetailedWallDepth =
         gFirstPersonPreviewHasDetailedWallDepth;
+    std::vector<unsigned char>& hasDirectWallDepthSpans =
+        gFirstPersonPreviewHasDirectWallDepthSpans;
     static std::vector<TileFirstPersonDoorCapSpan> doorCapDepths;
     doorCapDepths.assign(gTileWindowWidth, TileFirstPersonDoorCapSpan {});
     bool hasDoorCaps = false;
@@ -1624,6 +1633,7 @@ static void tileRenderFirstPersonPreview()
     }
     gFirstPersonPreviewWallPixelDepthSpans.resize(gTileWindowWidth);
     hasDetailedWallDepth.assign(gTileWindowWidth, 0);
+    hasDirectWallDepthSpans.assign(gTileWindowWidth, 0);
     static std::vector<std::vector<TileFirstPersonTransparentWallLayer>> transparentWallLayers;
     transparentWallLayers.resize(gTileWindowWidth);
     if (actorDepths.size() != actorDepthSize) {
@@ -1654,6 +1664,9 @@ static void tileRenderFirstPersonPreview()
 
     const unsigned int wallStart = profileFrame ? getTicks() : 0;
     unsigned int wallDepthSpanCount = 0;
+    uint64_t wallCellVisits = 0;
+    uint64_t orientedWallTests = 0;
+    uint64_t wallHits = 0;
     for (int x = 0; x < gTileWindowWidth; x++) {
         std::vector<TileFirstPersonTransparentWallLayer>& transparentLayers =
             transparentWallLayers[x];
@@ -1665,6 +1678,11 @@ static void tileRenderFirstPersonPreview()
         const size_t columnOffset = static_cast<size_t>(x) * gTileWindowHeight;
         const double rayDirectionX = rayDirectionXs[x];
         const double rayDirectionY = rayDirectionYs[x];
+        constexpr double kIntersectionEpsilon = 1.0e-8;
+        const double inverseWallRayDirectionX =
+            fabs(rayDirectionX) <= kIntersectionEpsilon ? 0.0 : 1.0 / rayDirectionX;
+        const double inverseWallRayDirectionY =
+            fabs(rayDirectionY) <= kIntersectionEpsilon ? 0.0 : 1.0 / rayDirectionY;
 
         // Wall objects are stored on the hex grid, which is twice as dense as
         // the square floor grid used by the ground projection.
@@ -1766,6 +1784,9 @@ static void tileRenderFirstPersonPreview()
         };
         while (mapX >= 0 && mapX < gHexGridWidth
             && mapY >= 0 && mapY < gHexGridHeight) {
+            if (profileFrame) {
+                wallCellVisits++;
+            }
             const int cellIndex = mapY * gHexGridWidth + mapX;
             wallType = gFirstPersonPreviewWallCells[cellIndex];
             const MaterialType cellMaterial = gFirstPersonPreviewWallMaterials[cellIndex];
@@ -1773,7 +1794,14 @@ static void tileRenderFirstPersonPreview()
                 wallOrientation =
                     static_cast<TileFirstPersonWallOrientation>(
                         gFirstPersonPreviewWallOrientations[cellIndex]);
+                if (profileFrame
+                    && wallOrientation != TILE_FIRST_PERSON_WALL_ORIENTATION_CELL) {
+                    orientedWallTests++;
+                }
                 if (wallOrientation == TILE_FIRST_PERSON_WALL_ORIENTATION_CELL) {
+                    if (profileFrame) {
+                        wallHits++;
+                    }
                     const double hitDistance = std::max(0.1, cellEntryDistance / 2.0);
                     if (wallType == 2 && cellMaterial != MATERIAL_TYPE_WOOD) {
                         addOpaqueSillWallLayer(
@@ -1816,68 +1844,55 @@ static void tileRenderFirstPersonPreview()
                 }
 
                 const double cellExitDistance = std::min(sideDistanceX, sideDistanceY);
-                constexpr double kIntersectionEpsilon = 1.0e-8;
                 constexpr double kWallThickness = 0.4;
                 const bool wallRunsNorthSouth =
                     wallOrientation == TILE_FIRST_PERSON_WALL_ORIENTATION_NORTH_SOUTH;
-                const double wallMinX = wallRunsNorthSouth
-                    ? mapX + 0.5 - kWallThickness / 2.0
-                    : mapX;
-                const double wallMaxX = wallRunsNorthSouth
-                    ? mapX + 0.5 + kWallThickness / 2.0
-                    : mapX + 1.0;
-                const double wallMinY = wallRunsNorthSouth
-                    ? mapY
-                    : mapY + 0.5 - kWallThickness / 2.0;
-                const double wallMaxY = wallRunsNorthSouth
-                    ? mapY + 1.0
-                    : mapY + 0.5 + kWallThickness / 2.0;
-                double nearX = -std::numeric_limits<double>::infinity();
-                double farX = std::numeric_limits<double>::infinity();
-                double nearY = -std::numeric_limits<double>::infinity();
-                double farY = std::numeric_limits<double>::infinity();
+                const double wallMin = (wallRunsNorthSouth ? mapX : mapY)
+                    + 0.5 - kWallThickness / 2.0;
+                const double wallMax = wallMin + kWallThickness;
+                const double inverseWallRayDirection = wallRunsNorthSouth
+                    ? inverseWallRayDirectionX
+                    : inverseWallRayDirectionY;
+                const double wallRayOrigin =
+                    wallRunsNorthSouth ? rayCameraX : rayCameraY;
+                double wallEntryDistance = cellEntryDistance;
+                double wallExitDistance = cellExitDistance;
+                double wallPlaneEntryDistance =
+                    -std::numeric_limits<double>::infinity();
                 bool rayIntersectsWallBounds = true;
-                if (fabs(rayDirectionX) <= kIntersectionEpsilon) {
-                    rayIntersectsWallBounds = rayCameraX >= wallMinX - kIntersectionEpsilon
-                        && rayCameraX <= wallMaxX + kIntersectionEpsilon;
+                if (inverseWallRayDirection == 0.0) {
+                    rayIntersectsWallBounds = wallRayOrigin >= wallMin - kIntersectionEpsilon
+                        && wallRayOrigin <= wallMax + kIntersectionEpsilon;
                 } else {
-                    nearX = (wallMinX - rayCameraX) / rayDirectionX;
-                    farX = (wallMaxX - rayCameraX) / rayDirectionX;
-                    if (nearX > farX) {
-                        std::swap(nearX, farX);
+                    double wallPlaneExitDistance;
+                    wallPlaneEntryDistance =
+                        (wallMin - wallRayOrigin) * inverseWallRayDirection;
+                    wallPlaneExitDistance =
+                        (wallMax - wallRayOrigin) * inverseWallRayDirection;
+                    if (wallPlaneEntryDistance > wallPlaneExitDistance) {
+                        std::swap(wallPlaneEntryDistance, wallPlaneExitDistance);
                     }
+                    wallEntryDistance = std::max(cellEntryDistance, wallPlaneEntryDistance);
+                    wallExitDistance = std::min(cellExitDistance, wallPlaneExitDistance);
                 }
 
-                if (rayIntersectsWallBounds) {
-                    if (fabs(rayDirectionY) <= kIntersectionEpsilon) {
-                        rayIntersectsWallBounds = rayCameraY >= wallMinY - kIntersectionEpsilon
-                            && rayCameraY <= wallMaxY + kIntersectionEpsilon;
-                    } else {
-                        nearY = (wallMinY - rayCameraY) / rayDirectionY;
-                        farY = (wallMaxY - rayCameraY) / rayDirectionY;
-                        if (nearY > farY) {
-                            std::swap(nearY, farY);
-                        }
-                    }
-                }
-
-                const double wallEntryDistance = std::max(nearX, nearY);
-                const double wallExitDistance = std::min(farX, farY);
-                const double clippedWallEntryDistance =
-                    std::max(cellEntryDistance, wallEntryDistance);
                 if (rayIntersectsWallBounds
-                    && wallExitDistance >= clippedWallEntryDistance - kIntersectionEpsilon
-                    && clippedWallEntryDistance <= cellExitDistance + kIntersectionEpsilon) {
-                    const double hitDistance = std::max(0.1, clippedWallEntryDistance / 2.0);
+                    && wallExitDistance >= wallEntryDistance - kIntersectionEpsilon) {
+                    if (profileFrame) {
+                        wallHits++;
+                    }
+                    const double hitDistance = std::max(0.1, wallEntryDistance / 2.0);
+                    const int hitSide = wallPlaneEntryDistance
+                            >= cellEntryDistance - kIntersectionEpsilon
+                        ? (wallRunsNorthSouth ? 0 : 1)
+                        : side;
                     if (wallType == 2 && cellMaterial != MATERIAL_TYPE_WOOD) {
                         addOpaqueSillWallLayer(
                             cellMaterial,
                             hitDistance,
                             wallOrientation,
                             mapY * gHexGridWidth + (gHexGridWidth - 1 - mapX),
-                            wallEntryDistance >= cellEntryDistance - kIntersectionEpsilon
-                                ? nearX > nearY ? 0 : 1
-                                : side);
+                            hitSide);
                     } else if (wallType == 2
                         || wallType == kFirstPersonWoodGateType
                         || wallType == kFirstPersonClosedWoodGateType) {
@@ -1889,18 +1904,14 @@ static void tileRenderFirstPersonPreview()
                             hitDistance,
                             wallOrientation,
                             mapY * gHexGridWidth + (gHexGridWidth - 1 - mapX),
-                            wallEntryDistance >= cellEntryDistance - kIntersectionEpsilon
-                                ? nearX > nearY ? 0 : 1
-                                : side);
+                            hitSide);
                     } else if (wallType == 5) {
                         if (doorCapDistance == std::numeric_limits<double>::infinity()) {
                             doorCapDistance = hitDistance;
                             doorCapOrientation = wallOrientation;
                             doorCapCellTile = mapY * gHexGridWidth
                                 + (gHexGridWidth - 1 - mapX);
-                            doorCapSide = wallEntryDistance >= cellEntryDistance - kIntersectionEpsilon
-                                ? nearX > nearY ? 0 : 1
-                                : side;
+                            doorCapSide = hitSide;
                         }
                     } else {
                         wallMaterial = cellMaterial;
@@ -1911,9 +1922,7 @@ static void tileRenderFirstPersonPreview()
                         if (x == gTileWindowWidth / 2) {
                             gFirstPersonPreviewCenterRayWallTile = wallCellTile;
                         }
-                        if (wallEntryDistance >= cellEntryDistance - kIntersectionEpsilon) {
-                            side = nearX > nearY ? 0 : 1;
-                        }
+                        side = hitSide;
                         break;
                     }
                 }
@@ -1975,7 +1984,12 @@ static void tileRenderFirstPersonPreview()
         if (detailedWallPixelDepth && hasOpaqueSillLayer) {
             transparentLayers.push_back(opaqueSillLayer);
         }
+        const bool directWallDepthSpans = transparentLayers.size() == 1
+            && !hasOpaqueSillLayer
+            && wallDistance == std::numeric_limits<double>::infinity()
+            && doorCapDistance == std::numeric_limits<double>::infinity();
         hasDetailedWallDepth[x] = detailedWallPixelDepth ? 1 : 0;
+        hasDirectWallDepthSpans[x] = directWallDepthSpans ? 1 : 0;
         wallDepths[x] = wallDistance;
         wallSillDepths[x] = windowSillDistance;
         if (wallDistance == std::numeric_limits<double>::infinity()) {
@@ -2028,6 +2042,17 @@ static void tileRenderFirstPersonPreview()
                 object = objectFindNextAtLocation();
             }
         }
+        const auto appendDirectWallDepthSpan = [&](int top, int bottom, double depth) {
+            if (top >= bottom) {
+                return;
+            }
+            if (!depthSpans.empty() && depthSpans.back().bottom == top
+                && depthSpans.back().depth == depth) {
+                depthSpans.back().bottom = bottom;
+            } else {
+                depthSpans.push_back({ top, bottom, depth });
+            }
+        };
         const auto renderWall = [&](unsigned char type, MaterialType material, double distance,
                                     TileFirstPersonWallOrientation orientation, int wallSide,
                                     bool gpuTransparentWall) {
@@ -2124,6 +2149,34 @@ static void tileRenderFirstPersonPreview()
             }
             depthTop = std::min(depthTop, wallTop);
             depthBottom = std::max(depthBottom, wallBottom + 1);
+            if (gpuOpaqueWallPass && type == 1 && !detailedWallPixelDepth) {
+                const Color* wallTexture = material == MATERIAL_TYPE_WOOD
+                    ? gFirstPersonSolidWoodWallTexture.data()
+                    : material == MATERIAL_TYPE_STONE
+                        ? gFirstPersonImportedStoneWallTexture.data()
+                        : material == MATERIAL_TYPE_LEATHER
+                            ? gFirstPersonLeatherWallTexture.data()
+                            : material == MATERIAL_TYPE_METAL
+                                ? gFirstPersonMetalWallTexture.data()
+                                : useCaveWallTexture
+                                    ? gFirstPersonCaveWallTexture.data()
+                                    : gFirstPersonStoneWallTexture.data();
+                if (gpuFirstPersonSubmitWallColumn(
+                        wallTexture,
+                        nullptr,
+                        kFirstPersonWallTextureSize,
+                        true,
+                        textureX,
+                        static_cast<unsigned char>(light),
+                        x,
+                        wallTop,
+                        wallBottom,
+                        unclippedWallTop,
+                        textureHeight,
+                        distance)) {
+                    return;
+                }
+            }
             if (material == MATERIAL_TYPE_WOOD && type != 3 && type != 5 && !gatePanel
                 && wallBottom - wallTop + 1 >= kFirstPersonWallTextureSize) {
                 std::array<unsigned char, kFirstPersonWallTextureSize> woodColors;
@@ -2155,13 +2208,16 @@ static void tileRenderFirstPersonPreview()
                         const unsigned char color = gpuWallQueued
                             ? 0
                             : woodColors[textureY];
+                        if (directWallDepthSpans) {
+                            appendDirectWallDepthSpan(y, end, distance);
+                        }
                         for (int row = y; row < end; ++row) {
                             const size_t depthIndex = columnOffset + row;
-                            if (!detailedWallPixelDepth
+                            if (directWallDepthSpans || !detailedWallPixelDepth
                                 || wallPixelDepthStamps[depthIndex]
                                     != gFirstPersonPreviewWallPixelDepthStamp
                                 || distance < wallPixelDepths[depthIndex]) {
-                                if (detailedWallPixelDepth) {
+                                if (detailedWallPixelDepth && !directWallDepthSpans) {
                                     wallPixelDepthStamps[depthIndex] =
                                         gFirstPersonPreviewWallPixelDepthStamp;
                                     wallPixelDepths[depthIndex] = distance;
@@ -2178,8 +2234,11 @@ static void tileRenderFirstPersonPreview()
                 const double textureScaleHeight = type == 3 || type == 5 || gatePanel
                     ? std::max(1.0, wallHeight / 2.0)
                     : textureHeight;
-                const bool magnifiedTextureRuns = wallRenderStep == 2
-                    && textureScaleHeight >= kFirstPersonTextureRunMinimumScale;
+                const bool magnifiedTextureRuns = (wallRenderStep == 2
+                        && textureScaleHeight >= kFirstPersonTextureRunMinimumScale)
+                    || (material == MATERIAL_TYPE_WOOD
+                        && type != 3 && type != 5 && !gatePanel
+                        && textureScaleHeight >= kFirstPersonTextureRunMinimumScale);
                 for (int y = wallTop; y <= wallBottom;) {
                     const bool brickTexture = type != 3 || y < doorSplitY;
                     const bool stoneWall = brickTexture && material == MATERIAL_TYPE_STONE;
@@ -2210,10 +2269,21 @@ static void tileRenderFirstPersonPreview()
                     textureY %= kFirstPersonWallTextureSize;
                     const int textureIndex = textureY * kFirstPersonWallTextureSize
                         + (leatherWall ? leatherTextureX : textureX);
+                    int runEnd = y + 1;
+                    if (magnifiedTextureRuns) {
+                        const int textureRunEnd = firstPersonTextureRunEnd(
+                            y, wallBottom + 1, unclippedWallTop,
+                            textureScaleHeight, kFirstPersonWallTextureSize);
+                        const int sampleCount =
+                            (textureRunEnd - y + wallRenderStep - 1) / wallRenderStep;
+                        runEnd = std::min(wallBottom + 1, y + sampleCount * wallRenderStep);
+                    } else {
+                        runEnd = std::min(wallBottom + 1, y + wallRenderStep);
+                    }
                     if ((gateTexture && gFirstPersonGateTextureAlpha[textureIndex] == 0)
                         || (woodWall && !gateTexture
                             && woodWallTextureAlpha[textureIndex] == 0)) {
-                        y += wallRenderStep;
+                        y = runEnd;
                         continue;
                     }
                     unsigned char color = 0;
@@ -2224,25 +2294,16 @@ static void tileRenderFirstPersonPreview()
                             : texture[textureIndex];
                         color = intensityColorTable[texel][light];
                     }
-                    int runEnd = y + 1;
-                    if (magnifiedTextureRuns) {
-                        // Preserve the two-row sampling grid while reusing magnified texels.
-                        const int textureRunEnd = firstPersonTextureRunEnd(
-                            y, wallBottom + 1, unclippedWallTop,
-                            textureScaleHeight, kFirstPersonWallTextureSize);
-                        const int sampleCount =
-                            (textureRunEnd - y + wallRenderStep - 1) / wallRenderStep;
-                        runEnd = std::min(wallBottom + 1, y + sampleCount * wallRenderStep);
-                    } else {
-                        runEnd = std::min(wallBottom + 1, y + wallRenderStep);
+                    if (directWallDepthSpans) {
+                        appendDirectWallDepthSpan(y, runEnd, distance);
                     }
                     for (int row = y; row < runEnd; row++) {
                         const size_t depthIndex = columnOffset + row;
-                        if (!detailedWallPixelDepth
+                        if (directWallDepthSpans || !detailedWallPixelDepth
                             || wallPixelDepthStamps[depthIndex]
                                 != gFirstPersonPreviewWallPixelDepthStamp
                             || distance < wallPixelDepths[depthIndex]) {
-                            if (detailedWallPixelDepth) {
+                            if (detailedWallPixelDepth && !directWallDepthSpans) {
                                 wallPixelDepthStamps[depthIndex] =
                                     gFirstPersonPreviewWallPixelDepthStamp;
                                 wallPixelDepths[depthIndex] = distance;
@@ -2287,7 +2348,9 @@ static void tileRenderFirstPersonPreview()
                     && (layer.material == MATERIAL_TYPE_WOOD
                         || layer.type == kFirstPersonWoodGateType));
         }
-        if (!detailedWallPixelDepth && hasOpaqueSillLayer) {
+        if (directWallDepthSpans) {
+            // Transparent texture runs were recorded while rasterizing.
+        } else if (!detailedWallPixelDepth && hasOpaqueSillLayer) {
             renderWall(
                 opaqueSillLayer.type,
                 opaqueSillLayer.material,
@@ -2409,8 +2472,10 @@ static void tileRenderFirstPersonPreview()
                     const size_t depthIndex = static_cast<size_t>(blockX) * gTileWindowHeight + blockY;
                     if (blockY > floorOcclusionBottoms[blockX]
                         && (hasDetailedWallDepth[blockX] == 0
-                            || wallPixelDepthStamps[depthIndex]
-                                != gFirstPersonPreviewWallPixelDepthStamp)) {
+                            || (hasDirectWallDepthSpans[blockX] != 0
+                                ? !tileFirstPersonHasWallDepthSpanAt(blockX, blockY)
+                                : wallPixelDepthStamps[depthIndex]
+                                    != gFirstPersonPreviewWallPixelDepthStamp))) {
                         gTileWindowBuffer[blockY * gTileWindowPitch + blockX] = color;
                     }
                 }
@@ -2504,6 +2569,7 @@ static void tileRenderFirstPersonPreview()
         const unsigned int floorMs = getTicksBetween(floorEnd, floorStart);
         const unsigned int wallMs = getTicksBetween(wallEnd, wallStart);
         const unsigned int actorMs = getTicksBetween(actorEnd, actorStart);
+        const unsigned int setupMs = getTicksBetween(wallStart, frameStart);
         // Averages hide isolated doorway hitches. Include setup/cache and
         // overlay time, which are outside the three raster/submission stages.
         const SlowFrameLogSample slowSample = slowFrameLog.record(frameEnd, totalMs);
@@ -2524,18 +2590,33 @@ static void tileRenderFirstPersonPreview()
         gFirstPersonPreviewProfileFloorMs += getTicksBetween(floorEnd, floorStart);
         gFirstPersonPreviewProfileWallMs += getTicksBetween(wallEnd, wallStart);
         gFirstPersonPreviewProfileActorMs += getTicksBetween(actorEnd, actorStart);
+        gFirstPersonPreviewProfileSetupMs += setupMs;
+        gFirstPersonPreviewProfileWallCellVisits += wallCellVisits;
+        gFirstPersonPreviewProfileOrientedWallTests += orientedWallTests;
+        gFirstPersonPreviewProfileWallHits += wallHits;
         if (gFirstPersonPreviewProfileFrames >= 60) {
             const double frameCount = gFirstPersonPreviewProfileFrames;
-            debugPrint("F11 timing avg ms: total=%.2f floor=%.2f wall=%.2f actors=%.2f\n",
+            debugPrint("F11 timing avg ms: total=%.2f setup=%.2f floor=%.2f wall=%.2f actors=%.2f; wall avg/ray: cells=%.1f oriented=%0.2f hits=%0.2f\n",
                 gFirstPersonPreviewProfileTotalMs / frameCount,
+                gFirstPersonPreviewProfileSetupMs / frameCount,
                 gFirstPersonPreviewProfileFloorMs / frameCount,
                 gFirstPersonPreviewProfileWallMs / frameCount,
-                gFirstPersonPreviewProfileActorMs / frameCount);
+                gFirstPersonPreviewProfileActorMs / frameCount,
+                gFirstPersonPreviewProfileWallCellVisits / frameCount
+                    / std::max(1, gTileWindowWidth),
+                gFirstPersonPreviewProfileOrientedWallTests / frameCount
+                    / std::max(1, gTileWindowWidth),
+                gFirstPersonPreviewProfileWallHits / frameCount
+                    / std::max(1, gTileWindowWidth));
             gFirstPersonPreviewProfileFrames = 0;
             gFirstPersonPreviewProfileTotalMs = 0;
             gFirstPersonPreviewProfileFloorMs = 0;
             gFirstPersonPreviewProfileWallMs = 0;
             gFirstPersonPreviewProfileActorMs = 0;
+            gFirstPersonPreviewProfileSetupMs = 0;
+            gFirstPersonPreviewProfileWallCellVisits = 0;
+            gFirstPersonPreviewProfileOrientedWallTests = 0;
+            gFirstPersonPreviewProfileWallHits = 0;
         }
     }
 }
@@ -2717,6 +2798,30 @@ static void tileFirstPersonRenderExitGridMarkers(
     }
 }
 
+static const TileFirstPersonWallPixelDepthSpan* tileFirstPersonGetWallDepthSpanAt(
+    int x,
+    int y)
+{
+    if (x < 0 || x >= static_cast<int>(gFirstPersonPreviewWallPixelDepthSpans.size())
+        || y < 0 || y >= gTileWindowHeight) {
+        return nullptr;
+    }
+
+    const auto& spans = gFirstPersonPreviewWallPixelDepthSpans[x];
+    const auto span = std::lower_bound(spans.begin(), spans.end(), y,
+        [](const TileFirstPersonWallPixelDepthSpan& candidate, int row) {
+            return candidate.bottom <= row;
+        });
+    return span != spans.end() && span->top <= y && y < span->bottom
+        ? &*span
+        : nullptr;
+}
+
+static bool tileFirstPersonHasWallDepthSpanAt(int x, int y)
+{
+    return tileFirstPersonGetWallDepthSpanAt(x, y) != nullptr;
+}
+
 static double tileFirstPersonGetWallDepthAt(
     int x,
     int y,
@@ -2729,7 +2834,10 @@ static double tileFirstPersonGetWallDepthAt(
     const bool hasDetailedWallDepth = x >= 0 && x < gTileWindowWidth
         && x < static_cast<int>(gFirstPersonPreviewHasDetailedWallDepth.size())
         && gFirstPersonPreviewHasDetailedWallDepth[x] != 0;
-    double depth = usePixelWallDepthOnly
+    const bool hasDirectWallDepthSpans = x >= 0
+        && x < static_cast<int>(gFirstPersonPreviewHasDirectWallDepthSpans.size())
+        && gFirstPersonPreviewHasDirectWallDepthSpans[x] != 0;
+    double depth = usePixelWallDepthOnly || hasDirectWallDepthSpans
         ? std::numeric_limits<double>::infinity()
         : y < horizonY
             ? (*wallDepths)[x]
@@ -2743,6 +2851,12 @@ static double tileFirstPersonGetWallDepthAt(
         if (gFirstPersonPreviewWallPixelDepthStamps[index]
             == gFirstPersonPreviewWallPixelDepthStamp) {
             depth = std::min(depth, gFirstPersonPreviewWallPixelDepths[index]);
+        } else if (hasDirectWallDepthSpans) {
+            const TileFirstPersonWallPixelDepthSpan* span =
+                tileFirstPersonGetWallDepthSpanAt(x, y);
+            if (span != nullptr) {
+                depth = std::min(depth, span->depth);
+            }
         }
     }
     if (usePixelWallDepthOnly && !hasDetailedWallDepth

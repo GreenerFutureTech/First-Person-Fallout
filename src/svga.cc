@@ -351,7 +351,7 @@ bool gpuFirstPersonSubmitWallColumn(const Color* pixels, const unsigned char* al
 {
 #if SDL_VERSION_ATLEAST(2, 0, 18)
     if (!gSdlRendererHardwareAccelerated || gSdlRenderer == nullptr
-        || pixels == nullptr || alpha == nullptr
+        || pixels == nullptr
         || textureSize <= 0 || textureX < 0 || textureX >= textureSize
         || top > bottom || textureScale <= 0.0) {
         return false;
@@ -1107,7 +1107,7 @@ static bool createRenderer(int width, int height)
             rendererInfo.name != nullptr ? rendererInfo.name : "unknown",
             gSdlRendererHardwareAccelerated ? "accelerated" : "software",
             (rendererInfo.flags & SDL_RENDERER_TARGETTEXTURE) != 0 ? "yes" : "no");
-        debugPrint("GPU first-person wall pass capability: %s; walls use CPU rendering\n",
+        debugPrint("GPU first-person wall pass capability: %s; opaque full-height walls use GPU\n",
             screenSupportsGpuFirstPersonPass() ? "SDL geometry" : "unavailable");
     }
 
