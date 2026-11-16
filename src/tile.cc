@@ -25,6 +25,7 @@
 #include "art.h"
 #include "animation.h"
 #include "billboard_clip_bands.h"
+#include "billboard_mask.h"
 #include "combat.h"
 #include "client_net.h"
 #include "color.h"
@@ -352,6 +353,8 @@ static int gFirstPersonPreviewTopologyPosition = -1;
 static int gFirstPersonPreviewTopologyZoom = 0;
 // Column-major: wall rasterization and occlusion runs both traverse vertical columns.
 static std::vector<double> gFirstPersonPreviewWallPixelDepths;
+// Broad phase for the masked sprite path, restricted to type-1 wooden fences.
+static std::vector<double> gFirstPersonPreviewFenceDepths;
 static std::vector<std::vector<TileFirstPersonWallPixelDepthSpan>> gFirstPersonPreviewWallPixelDepthSpans;
 static constexpr int kFirstPersonWallTextureSize = 64;
 static constexpr unsigned char kFirstPersonTransparentWoodWallType = 7;
@@ -1581,6 +1584,8 @@ static void tileRenderFirstPersonPreview()
     gFirstPersonPreviewWallPixelDepths.resize(
         static_cast<size_t>(gTileWindowWidth) * gTileWindowHeight);
     std::vector<double>& wallPixelDepths = gFirstPersonPreviewWallPixelDepths;
+    gFirstPersonPreviewFenceDepths.assign(gTileWindowWidth,
+        std::numeric_limits<double>::infinity());
     gFirstPersonPreviewWallPixelDepthSpans.resize(gTileWindowWidth);
     static std::vector<std::vector<TileFirstPersonTransparentWallLayer>> transparentWallLayers;
     transparentWallLayers.resize(gTileWindowWidth);
@@ -1962,6 +1967,10 @@ static void tileRenderFirstPersonPreview()
         }
         const auto renderWall = [&](unsigned char type, MaterialType material, double distance,
                                     TileFirstPersonWallOrientation orientation, int wallSide) {
+            if (type == kFirstPersonTransparentWoodWallType) {
+                gFirstPersonPreviewFenceDepths[x] =
+                    std::min(gFirstPersonPreviewFenceDepths[x], distance);
+            }
             const double projectedWallHeight = gTileWindowHeight / distance;
             const bool halfHeightWall = type == 2;
             const bool gatePanel = type == kFirstPersonWoodGateType;
@@ -4934,6 +4943,56 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                 return;
             }
             const SDL_Rect destination = { artLeft, artTop, artWidth, artHeight };
+            bool behindFence = false;
+            for (int x = firstOpaqueColumn; x < lastColumn; ++x) {
+                if (transformY >= gFirstPersonPreviewFenceDepths[x]) {
+                    behindFence = true;
+                    break;
+                }
+            }
+            if (behindFence) {
+                // Straight plank gaps can still be represented cheaply by a
+                // few full-height strips. Reserve the upload path for sprites
+                // with many distinct occlusion rows; stop the probe early.
+                static BillboardClipBands fenceBands;
+                fenceBands.reset(clippedOpaqueTop, clippedOpaqueBottom);
+                behindFence = false;
+                for (int x = firstOpaqueColumn; x < lastColumn; ++x) {
+                    tileFirstPersonAddWallPixelOcclusionBands(x, clippedOpaqueTop,
+                        clippedOpaqueBottom, transformY, &fenceBands);
+                    if (fenceBands.boundaries().size() >= 32) {
+                        behindFence = true;
+                        break;
+                    }
+                }
+            }
+            if (behindFence) {
+                // Fence alpha can create thousands of clip rectangles. Resolve
+                // visibility once per covered pixel and upload one masked quad.
+                // Keep the existing wall/sill policy and exact pixel depth for
+                // critters, including walls behind gaps and overlapping fences.
+                const SDL_Rect clip = { firstOpaqueColumn, clippedOpaqueTop,
+                    lastColumn - firstOpaqueColumn, clippedOpaqueBottom - clippedOpaqueTop };
+                static std::vector<unsigned char> maskedPixels;
+                const bool any = billboardMask(frame.data, frame.width, frame.height,
+                    outlinePixels != nullptr ? outlinePixels->data() : nullptr,
+                    outlineWidth, outlineHeight, destination, clip,
+                    [&](int x, int y) {
+                        return transformY < tileFirstPersonGetWallDepthAt(x, y,
+                            renderContext->horizonY, renderContext->wallDepths,
+                            renderContext->wallSillDepths, renderContext->doorCapDepths,
+                            objectType == OBJ_TYPE_CRITTER);
+                    }, maskedPixels);
+                if (!any || gpuBillboardSubmitMasked(maskedPixels.data(), clip, transformY)) {
+                    if (objectType != OBJ_TYPE_SCENERY) {
+                        textObjectsRenderForOwner(object,
+                            tileFirstPersonQueueTextRender, &textRenderContext,
+                            screenCenterX, artTop - 3);
+                    }
+                    return;
+                }
+                // Allocation/upload failure retains the established clip path.
+            }
             static std::vector<SDL_Rect> visibleClips;
             visibleClips.clear();
             const auto queueVisibleClip = [&](const SDL_Rect& clip) {

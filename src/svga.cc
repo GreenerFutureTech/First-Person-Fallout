@@ -80,6 +80,13 @@ enum class GpuOverlayType {
 };
 
 static std::vector<GpuBillboard> gGpuBillboards;
+struct GpuMaskedBillboardTexture {
+    SDL_Texture* texture = nullptr;
+    int width = 0;
+    int height = 0;
+};
+static std::vector<GpuMaskedBillboardTexture> gGpuMaskedBillboardTextures;
+static size_t gGpuMaskedBillboardCount = 0;
 static std::vector<SDL_Rect> gGpuOverlayRects;
 static std::vector<SDL_Rect> gGpuCursorRestoreRects;
 static GpuOverlayType gGpuOverlayType = GpuOverlayType::Default;
@@ -198,6 +205,7 @@ bool screenHasOpenGLContext()
 void gpuBillboardBeginFrame(unsigned char lightModulation)
 {
     gGpuBillboards.clear();
+    gGpuMaskedBillboardCount = 0;
     gGpuOverlayRects.clear();
     gGpuCursorRestoreRects.clear();
     gGpuBillboardLightModulation = lightModulation;
@@ -330,6 +338,57 @@ bool gpuBillboardSetCursor(const unsigned char* pixels, int width, int height,
     }
 
     gGpuCursorRect = { x, y, width, height };
+    return true;
+}
+
+bool gpuBillboardSubmitMasked(const unsigned char* pixels, const SDL_Rect& rect, double depth)
+{
+    if (!gSdlRendererHardwareAccelerated || pixels == nullptr || rect.w <= 0 || rect.h <= 0) {
+        return false;
+    }
+    if (gGpuMaskedBillboardCount == gGpuMaskedBillboardTextures.size()) {
+        gGpuMaskedBillboardTextures.emplace_back();
+    }
+    auto& entry = gGpuMaskedBillboardTextures[gGpuMaskedBillboardCount];
+    // Grow in blocks so camera motion does not allocate a texture every frame.
+    if (entry.width < rect.w || entry.height < rect.h) {
+        const int width = std::max(entry.width, (rect.w + 63) / 64 * 64);
+        const int height = std::max(entry.height, (rect.h + 63) / 64 * 64);
+        SDL_Texture* texture = SDL_CreateTexture(gSdlRenderer,
+            SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, width, height);
+        if (texture == nullptr) return false;
+        SDL_DestroyTexture(entry.texture);
+        entry = { texture, width, height };
+        SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+        SDL_SetTextureScaleMode(texture, SDL_ScaleModeNearest);
+#endif
+    }
+    void* lockedPixels = nullptr;
+    int pitch = 0;
+    const SDL_Rect source = { 0, 0, rect.w, rect.h };
+    if (SDL_LockTexture(entry.texture, &source, &lockedPixels, &pitch) != 0) return false;
+    uint32_t colors[256];
+    colors[0] = 0;
+    for (int index = 1; index < 256; ++index) {
+        colors[index] = 0xFF000000u
+            | (static_cast<uint32_t>(gGpuPalette[index * 3]) << 18)
+            | (static_cast<uint32_t>(gGpuPalette[index * 3 + 1]) << 10)
+            | (static_cast<uint32_t>(gGpuPalette[index * 3 + 2]) << 2);
+    }
+    for (int y = 0; y < rect.h; ++y) {
+        auto* row = reinterpret_cast<uint32_t*>(static_cast<unsigned char*>(lockedPixels) + y * pitch);
+        for (int x = 0; x < rect.w; ++x) row[x] = colors[pixels[y * rect.w + x]];
+    }
+    SDL_UnlockTexture(entry.texture);
+    SDL_SetTextureColorMod(entry.texture, gGpuBillboardLightModulation,
+        gGpuBillboardLightModulation, gGpuBillboardLightModulation);
+    // A larger destination and exact clip select just the initialized portion
+    // of the pooled texture in both RenderCopy and RenderGeometry paths.
+    const SDL_Rect destination = { rect.x, rect.y, entry.width, entry.height };
+    gGpuBillboards.push_back({ entry.texture, destination, rect, depth });
+    ++gGpuMaskedBillboardCount;
+    if (settings.debug.show_fps) ++gGpuBillboardSubmitCount;
     return true;
 }
 
@@ -932,6 +991,9 @@ static void destroyRenderer()
         SDL_DestroyTexture(entry.second.texture);
     }
     gGpuBillboardTextures.clear();
+    for (const auto& entry : gGpuMaskedBillboardTextures) SDL_DestroyTexture(entry.texture);
+    gGpuMaskedBillboardTextures.clear();
+    gGpuMaskedBillboardCount = 0;
     gSdlRendererHardwareAccelerated = false;
     if (gSdlTextureSurface != nullptr) {
         SDL_FreeSurface(gSdlTextureSurface);
