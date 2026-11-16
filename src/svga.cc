@@ -1,4 +1,5 @@
 #include "billboard_depth_sort.h"
+#include "first_person_gpu_depth.h"
 
 #include "svga.h"
 
@@ -62,6 +63,7 @@ struct GpuBillboard {
     SDL_Rect destination;
     SDL_Rect clip;
     double depth;
+    int depthPolicy = 0;
 };
 
 struct GpuBillboardTexture {
@@ -80,13 +82,15 @@ enum class GpuOverlayType {
 };
 
 static std::vector<GpuBillboard> gGpuBillboards;
-struct GpuMaskedBillboardTexture {
-    SDL_Texture* texture = nullptr;
-    int width = 0;
-    int height = 0;
-};
-static std::vector<GpuMaskedBillboardTexture> gGpuMaskedBillboardTextures;
-static size_t gGpuMaskedBillboardCount = 0;
+static bool gGpuDepthAvailable = false;
+static bool gGpuDepthActive = false;
+static bool gGpuDepthAttempted = false;
+static double gGpuDepthUploadMs = 0.0;
+static double gGpuDepthPackMs = 0.0;
+static uint64_t gGpuDepthUploadBytes = 0;
+static double gGpuPresentationProfileDepthUploadMs = 0.0;
+static double gGpuPresentationProfileDepthPackMs = 0.0;
+static uint64_t gGpuPresentationProfileDepthUploadBytes = 0;
 static std::vector<SDL_Rect> gGpuOverlayRects;
 static std::vector<SDL_Rect> gGpuCursorRestoreRects;
 static GpuOverlayType gGpuOverlayType = GpuOverlayType::Default;
@@ -137,6 +141,9 @@ static double performanceCounterMilliseconds(Uint64 start, Uint64 end)
 static void resetGpuPresentationProfile()
 {
     gGpuPresentationProfileFrames = 0;
+    gGpuPresentationProfileDepthUploadMs = 0.0;
+    gGpuPresentationProfileDepthPackMs = 0.0;
+    gGpuPresentationProfileDepthUploadBytes = 0;
     gGpuPresentationProfileBillboardCount = 0;
     gGpuPresentationProfileDrawCalls = 0;
     gGpuPresentationProfileClipChanges = 0;
@@ -205,7 +212,8 @@ bool screenHasOpenGLContext()
 void gpuBillboardBeginFrame(unsigned char lightModulation)
 {
     gGpuBillboards.clear();
-    gGpuMaskedBillboardCount = 0;
+    gGpuDepthActive = false;
+    gGpuDepthAttempted = false;
     gGpuOverlayRects.clear();
     gGpuCursorRestoreRects.clear();
     gGpuBillboardLightModulation = lightModulation;
@@ -239,6 +247,7 @@ void gpuBillboardMarkSceneComplete()
 
 void gpuBillboardClear()
 {
+    gGpuDepthActive = false;
     gGpuBillboards.clear();
     gGpuOverlayRects.clear();
     gGpuCursorRestoreRects.clear();
@@ -341,59 +350,27 @@ bool gpuBillboardSetCursor(const unsigned char* pixels, int width, int height,
     return true;
 }
 
-bool gpuBillboardSubmitMasked(const unsigned char* pixels, const SDL_Rect& rect, double depth)
+bool gpuBillboardSetWallDepths(int width, int height, int horizon,
+    const double* pixels, const double* walls, const double* sills)
 {
-    if (!gSdlRendererHardwareAccelerated || pixels == nullptr || rect.w <= 0 || rect.h <= 0) {
-        return false;
-    }
-    if (gGpuMaskedBillboardCount == gGpuMaskedBillboardTextures.size()) {
-        gGpuMaskedBillboardTextures.emplace_back();
-    }
-    auto& entry = gGpuMaskedBillboardTextures[gGpuMaskedBillboardCount];
-    // Grow in blocks so camera motion does not allocate a texture every frame.
-    if (entry.width < rect.w || entry.height < rect.h) {
-        const int width = std::max(entry.width, (rect.w + 63) / 64 * 64);
-        const int height = std::max(entry.height, (rect.h + 63) / 64 * 64);
-        SDL_Texture* texture = SDL_CreateTexture(gSdlRenderer,
-            SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, width, height);
-        if (texture == nullptr) return false;
-        SDL_DestroyTexture(entry.texture);
-        entry = { texture, width, height };
-        SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
-#if SDL_VERSION_ATLEAST(2, 0, 12)
-        SDL_SetTextureScaleMode(texture, SDL_ScaleModeNearest);
-#endif
-    }
-    void* lockedPixels = nullptr;
-    int pitch = 0;
-    const SDL_Rect source = { 0, 0, rect.w, rect.h };
-    if (SDL_LockTexture(entry.texture, &source, &lockedPixels, &pitch) != 0) return false;
-    uint32_t colors[256];
-    colors[0] = 0;
-    for (int index = 1; index < 256; ++index) {
-        colors[index] = 0xFF000000u
-            | (static_cast<uint32_t>(gGpuPalette[index * 3]) << 18)
-            | (static_cast<uint32_t>(gGpuPalette[index * 3 + 1]) << 10)
-            | (static_cast<uint32_t>(gGpuPalette[index * 3 + 2]) << 2);
-    }
-    for (int y = 0; y < rect.h; ++y) {
-        auto* row = reinterpret_cast<uint32_t*>(static_cast<unsigned char*>(lockedPixels) + y * pitch);
-        for (int x = 0; x < rect.w; ++x) row[x] = colors[pixels[y * rect.w + x]];
-    }
-    SDL_UnlockTexture(entry.texture);
-    SDL_SetTextureColorMod(entry.texture, gGpuBillboardLightModulation,
-        gGpuBillboardLightModulation, gGpuBillboardLightModulation);
-    // A larger destination and exact clip select just the initialized portion
-    // of the pooled texture in both RenderCopy and RenderGeometry paths.
-    const SDL_Rect destination = { rect.x, rect.y, entry.width, entry.height };
-    gGpuBillboards.push_back({ entry.texture, destination, rect, depth });
-    ++gGpuMaskedBillboardCount;
-    if (settings.debug.show_fps) ++gGpuBillboardSubmitCount;
-    return true;
+    if (!gGpuDepthAvailable || gGpuDepthAttempted) return gGpuDepthActive;
+    gGpuDepthAttempted = true;
+    FirstPersonGpuDepthUploadStats stats;
+    gGpuDepthActive = firstPersonGpuDepthUpload(gSdlRenderer,
+        width, height, horizon, pixels, walls, sills, settings.debug.show_fps ? &stats : nullptr);
+    gGpuDepthPackMs += stats.packMs;
+    gGpuDepthUploadMs += stats.uploadMs;
+    gGpuDepthUploadBytes += stats.bytes;
+    return gGpuDepthActive;
+}
+
+bool gpuBillboardUsesWallDepths()
+{
+    return gGpuDepthActive;
 }
 
 void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
-    const SDL_Rect& destination, const SDL_Rect& clip, double depth)
+    const SDL_Rect& destination, const SDL_Rect& clip, double depth, int depthPolicy)
 {
     if (!gSdlRendererHardwareAccelerated || pixels == nullptr
         || width <= 0 || height <= 0 || destination.w <= 0 || destination.h <= 0) {
@@ -488,6 +465,7 @@ void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
             && previous.destination.w == destination.w
             && previous.destination.h == destination.h
             && previous.depth == depth
+            && previous.depthPolicy == depthPolicy
             && previous.clip.y == clip.y
             && previous.clip.h == clip.h
             && previous.clip.x + previous.clip.w == clip.x;
@@ -505,6 +483,7 @@ void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
         destination,
         clip,
         depth,
+        depthPolicy,
     });
 }
 
@@ -949,10 +928,6 @@ static bool createRenderer(int width, int height)
             rendererInfo.name != nullptr ? rendererInfo.name : "unknown",
             gSdlRendererHardwareAccelerated ? "accelerated" : "software",
             (rendererInfo.flags & SDL_RENDERER_TARGETTEXTURE) != 0 ? "yes" : "no");
-        debugPrint("GPU first-person backend: %s\n",
-            screenSupportsGpuFirstPersonPass() && screenHasOpenGLContext()
-                ? "available for isolated shader integration"
-                : "CPU fallback");
     }
 
     if (SDL_RenderSetLogicalSize(gSdlRenderer, width, height) != 0) {
@@ -974,11 +949,16 @@ static bool createRenderer(int width, int height)
         return false;
     }
 
+    gGpuDepthAvailable = firstPersonGpuDepthInit(gSdlRenderer);
+    debugPrint("F11 fence depth shader: %s (F2_FENCE_GPU_DEPTH=0 disables for comparison)\n",
+        gGpuDepthAvailable ? "enabled" : "unavailable; using CPU clipping");
     return true;
 }
 
 static void destroyRenderer()
 {
+    firstPersonGpuDepthDestroy();
+    gGpuDepthAvailable = gGpuDepthActive = false;
     gGpuBillboards.clear();
     gpuOverlayClear();
     if (gGpuCursorTexture != nullptr) {
@@ -991,9 +971,6 @@ static void destroyRenderer()
         SDL_DestroyTexture(entry.second.texture);
     }
     gGpuBillboardTextures.clear();
-    for (const auto& entry : gGpuMaskedBillboardTextures) SDL_DestroyTexture(entry.texture);
-    gGpuMaskedBillboardTextures.clear();
-    gGpuMaskedBillboardCount = 0;
     gSdlRendererHardwareAccelerated = false;
     if (gSdlTextureSurface != nullptr) {
         SDL_FreeSurface(gSdlTextureSurface);
@@ -1127,70 +1104,79 @@ void renderPresent()
         SDL_RenderCopy(gSdlRenderer, billboard.texture, nullptr, &billboard.destination);
         ++billboardDrawCalls;
     };
+    if (gGpuDepthActive) {
+        firstPersonGpuDepthBegin(gSdlRenderer);
+        for (const GpuBillboard& billboard : gGpuBillboards) {
+            firstPersonGpuDepthDraw(billboard.texture, billboard.destination,
+                billboard.clip, billboard.depth, billboard.depthPolicy);
+        }
+        billboardDrawCalls = firstPersonGpuDepthEnd();
+    } else {
 #if SDL_VERSION_ATLEAST(2, 0, 18)
-    // Scissor changes break SDL batching. Encode wall visibility in quad
-    // positions/UVs instead, preserving the stable back-to-front ordering.
-    static std::vector<SDL_Vertex> vertices;
-    static std::vector<int> indices;
-    constexpr size_t kMaxBatchQuads = 4096;
-    for (size_t first = 0; first < gGpuBillboards.size();) {
-        size_t end = first + 1;
-        SDL_Texture* texture = gGpuBillboards[first].texture;
-        while (end < gGpuBillboards.size() && end - first < kMaxBatchQuads
-            && gGpuBillboards[end].texture == texture) {
-            ++end;
-        }
-        vertices.clear();
-        indices.clear();
-        // RenderGeometry ignores texture color modulation; carry it in vertices.
-        SDL_Color color { 255, 255, 255, 255 };
-        SDL_GetTextureColorMod(texture, &color.r, &color.g, &color.b);
-        SDL_GetTextureAlphaMod(texture, &color.a);
-        for (size_t index = first; index < end; ++index) {
-            const GpuBillboard& billboard = gGpuBillboards[index];
-            SDL_Rect visible;
-            if (!SDL_IntersectRect(&billboard.destination, &billboard.clip, &visible)) {
-                continue;
+        // Scissor changes break SDL batching. Encode wall visibility in quad
+        // positions/UVs instead, preserving the stable back-to-front ordering.
+        static std::vector<SDL_Vertex> vertices;
+        static std::vector<int> indices;
+        constexpr size_t kMaxBatchQuads = 4096;
+        for (size_t first = 0; first < gGpuBillboards.size();) {
+            size_t end = first + 1;
+            SDL_Texture* texture = gGpuBillboards[first].texture;
+            while (end < gGpuBillboards.size() && end - first < kMaxBatchQuads
+                && gGpuBillboards[end].texture == texture) {
+                ++end;
             }
-            const SDL_Rect& dest = billboard.destination;
-            const float left = static_cast<float>(visible.x);
-            const float top = static_cast<float>(visible.y);
-            const float right = static_cast<float>(visible.x + visible.w);
-            const float bottom = static_cast<float>(visible.y + visible.h);
-            const float u0 = static_cast<float>(visible.x - dest.x) / dest.w;
-            const float v0 = static_cast<float>(visible.y - dest.y) / dest.h;
-            const float u1 = static_cast<float>(visible.x + visible.w - dest.x) / dest.w;
-            const float v1 = static_cast<float>(visible.y + visible.h - dest.y) / dest.h;
-            const int base = static_cast<int>(vertices.size());
-            vertices.push_back({ { left, top }, color, { u0, v0 } });
-            vertices.push_back({ { right, top }, color, { u1, v0 } });
-            vertices.push_back({ { right, bottom }, color, { u1, v1 } });
-            vertices.push_back({ { left, bottom }, color, { u0, v1 } });
-            for (int offset : { 0, 1, 2, 0, 2, 3 }) indices.push_back(base + offset);
-        }
-        if (!vertices.empty()) {
-            if (hasActiveClip) {
-                SDL_RenderSetClipRect(gSdlRenderer, nullptr);
-                hasActiveClip = false;
+            vertices.clear();
+            indices.clear();
+            // RenderGeometry ignores texture color modulation; carry it in vertices.
+            SDL_Color color { 255, 255, 255, 255 };
+            SDL_GetTextureColorMod(texture, &color.r, &color.g, &color.b);
+            SDL_GetTextureAlphaMod(texture, &color.a);
+            for (size_t index = first; index < end; ++index) {
+                const GpuBillboard& billboard = gGpuBillboards[index];
+                SDL_Rect visible;
+                if (!SDL_IntersectRect(&billboard.destination, &billboard.clip, &visible)) {
+                    continue;
+                }
+                const SDL_Rect& dest = billboard.destination;
+                const float left = static_cast<float>(visible.x);
+                const float top = static_cast<float>(visible.y);
+                const float right = static_cast<float>(visible.x + visible.w);
+                const float bottom = static_cast<float>(visible.y + visible.h);
+                const float u0 = static_cast<float>(visible.x - dest.x) / dest.w;
+                const float v0 = static_cast<float>(visible.y - dest.y) / dest.h;
+                const float u1 = static_cast<float>(visible.x + visible.w - dest.x) / dest.w;
+                const float v1 = static_cast<float>(visible.y + visible.h - dest.y) / dest.h;
+                const int base = static_cast<int>(vertices.size());
+                vertices.push_back({ { left, top }, color, { u0, v0 } });
+                vertices.push_back({ { right, top }, color, { u1, v0 } });
+                vertices.push_back({ { right, bottom }, color, { u1, v1 } });
+                vertices.push_back({ { left, bottom }, color, { u0, v1 } });
+                for (int offset : { 0, 1, 2, 0, 2, 3 }) indices.push_back(base + offset);
             }
-            if (SDL_RenderGeometry(gSdlRenderer, texture, vertices.data(),
-                    static_cast<int>(vertices.size()), indices.data(),
-                    static_cast<int>(indices.size())) == 0) {
-                ++billboardDrawCalls;
-            } else {
-                // Retain compatibility with renderers lacking geometry support.
-                for (size_t index = first; index < end; ++index) {
-                    copyBillboard(gGpuBillboards[index]);
+            if (!vertices.empty()) {
+                if (hasActiveClip) {
+                    SDL_RenderSetClipRect(gSdlRenderer, nullptr);
+                    hasActiveClip = false;
+                }
+                if (SDL_RenderGeometry(gSdlRenderer, texture, vertices.data(),
+                        static_cast<int>(vertices.size()), indices.data(),
+                        static_cast<int>(indices.size())) == 0) {
+                    ++billboardDrawCalls;
+                } else {
+                    // Retain compatibility with renderers lacking geometry support.
+                    for (size_t index = first; index < end; ++index) {
+                        copyBillboard(gGpuBillboards[index]);
+                    }
                 }
             }
+            first = end;
         }
-        first = end;
-    }
 #else
-    for (const GpuBillboard& billboard : gGpuBillboards) {
-        copyBillboard(billboard);
-    }
+        for (const GpuBillboard& billboard : gGpuBillboards) {
+            copyBillboard(billboard);
+        }
 #endif
+    }
     if (hasActiveClip) {
         SDL_RenderSetClipRect(gSdlRenderer, nullptr);
     }
@@ -1227,6 +1213,13 @@ void renderPresent()
     if (profileGpuFrame) {
         const Uint64 frameEnd = SDL_GetPerformanceCounter();
         gGpuPresentationProfileFrames++;
+        gGpuPresentationProfileDepthUploadMs += gGpuDepthUploadMs;
+        gGpuPresentationProfileDepthPackMs += gGpuDepthPackMs;
+        gGpuPresentationProfileDepthUploadBytes += gGpuDepthUploadBytes;
+        // A retained scene can be presented again without another depth upload.
+        gGpuDepthUploadMs = 0.0;
+        gGpuDepthPackMs = 0.0;
+        gGpuDepthUploadBytes = 0;
         gGpuPresentationProfileBillboardCount += gGpuBillboards.size();
         gGpuPresentationProfileDrawCalls += billboardDrawCalls;
         gGpuPresentationProfileClipChanges += clipChanges;
@@ -1242,7 +1235,7 @@ void renderPresent()
         gGpuPresentationProfileTotalMs += performanceCounterMilliseconds(frameStart, frameEnd);
         if (gGpuPresentationProfileFrames >= 60) {
             const double frameCount = static_cast<double>(gGpuPresentationProfileFrames);
-            debugPrint("F11 GPU avg: spans=%.0f submits=%.0f merged=%.0f queued=%.0f draws=%.0f clips=%.0f cacheHit=%.0f cacheMiss=%.0f upload=%.3f sort=%.3f copyQueue=%.3f present=%.3f total=%.3f ms\n",
+            debugPrint("F11 GPU avg: spans=%.0f submits=%.0f merged=%.0f queued=%.0f draws=%.0f clips=%.0f cacheHit=%.0f cacheMiss=%.0f upload=%.3f depthPack=%.3f depthUpload=%.3f depthKB=%.0f sort=%.3f copyQueue=%.3f present=%.3f total=%.3f ms\n",
                 gGpuPresentationProfileWallDepthSpanCount / frameCount,
                 gGpuPresentationProfileSubmitCount / frameCount,
                 gGpuPresentationProfileMergedSubmitCount / frameCount,
@@ -1252,6 +1245,9 @@ void renderPresent()
                 gGpuPresentationProfileTextureCacheHits / frameCount,
                 gGpuPresentationProfileTextureCacheMisses / frameCount,
                 gGpuPresentationProfileUploadMs / frameCount,
+                gGpuPresentationProfileDepthPackMs / frameCount,
+                gGpuPresentationProfileDepthUploadMs / frameCount,
+                gGpuPresentationProfileDepthUploadBytes / (1024.0 * frameCount),
                 gGpuPresentationProfileSortMs / frameCount,
                 gGpuPresentationProfileDrawMs / frameCount,
                 gGpuPresentationProfilePresentMs / frameCount,

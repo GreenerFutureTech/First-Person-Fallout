@@ -768,7 +768,9 @@ void gpuBillboardBeginFrame(unsigned char lightModulation) { }
 void gpuBillboardSetWallDepthSpanCount(unsigned int count) { }
 void gpuBillboardMarkSceneComplete() { }
 void gpuBillboardClear() { }
-void gpuBillboardSubmit(const unsigned char* pixels, int width, int height, const SDL_Rect& destination, const SDL_Rect& clip, double depth) { }
+void gpuBillboardSubmit(const unsigned char* pixels, int width, int height, const SDL_Rect& destination, const SDL_Rect& clip, double depth, int depthPolicy) { }
+bool gpuBillboardSetWallDepths(int width, int height, int horizon, const double* pixels, const double* walls, const double* sills) { return false; }
+bool gpuBillboardUsesWallDepths() { return false; }
 bool gBlockMouseUpEvent = false;
 int gInterfaceBarWindow = -1;
 bool _ctrl_pressed() { return false; }

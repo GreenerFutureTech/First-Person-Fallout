@@ -401,6 +401,8 @@ set(FALLOUT_CLIENT_SOURCES
     "src/sound_effects_list.h"
     "src/svga.cc"
     "src/svga.h"
+    "src/first_person_gpu_depth.cc"
+    "src/first_person_gpu_depth.h"
     "src/text_font.cc"
     "src/text_font.h"
     "src/text_object.cc"
@@ -659,6 +661,14 @@ foreach(_f2lib f2_core f2_client)
 endforeach()
 target_link_libraries(f2_client PUBLIC ${SDL2_LIBRARIES})
 target_link_libraries(f2_core PUBLIC ${SDL2_LIBRARIES})
+
+option(FALLOUT_BUILD_GPU_DEPTH_TEST "Build the hidden-window OpenGL fence regression test" OFF)
+if(FALLOUT_BUILD_GPU_DEPTH_TEST)
+    add_executable(first-person-gpu-depth-test tools/tests/first_person_gpu_depth_test.cc src/first_person_gpu_depth.cc)
+    target_compile_features(first-person-gpu-depth-test PRIVATE cxx_std_17)
+    target_include_directories(first-person-gpu-depth-test PRIVATE src ${SDL2_INCLUDE_DIRS})
+    target_link_libraries(first-person-gpu-depth-test PRIVATE ${SDL2_LIBRARIES})
+endif()
 # Core headers include client type declarations, but the server does not link SDL.
 foreach(_sdllib ${SDL2_LIBRARIES})
     if(TARGET ${_sdllib})
