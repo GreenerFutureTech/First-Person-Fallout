@@ -275,6 +275,11 @@ size_t proto_size(ObjectType type)
 // 0x49E99C proto_action_can_use
 bool _proto_action_can_use(const ProtoId& protoId)
 {
+    // These generic desk prototypes are inspectable props, not usable scenery.
+    if (protoId == SceneryProtoTypeId::Desk || protoId == SceneryProtoTypeId::DeskAlt) {
+        return false;
+    }
+
     Proto* proto;
     if (protoGetProto(protoId, &proto) == -1) {
         return false;

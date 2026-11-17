@@ -3067,7 +3067,7 @@ static void _combat_over()
         // Pay every bucket to its own earner. playerActorCount() is 1 with an
         // empty registry, so this is the vanilla single call.
         for (int slot = 0; slot < playerActorCount(); slot++) {
-            _combat_give_exps(_combat_exps[slot], playerActorAt(slot));
+            _combat_give_exps(_combat_exps[slot], playerActorAt(slot), true);
         }
     }
 
@@ -3116,7 +3116,7 @@ void _combat_over_from_load()
 // Give exp for destroying critter.
 //
 // 0x4221B4
-void _combat_give_exps(int exp_points, Object* earner)
+void _combat_give_exps(int exp_points, Object* earner, bool allowDeadPlayer)
 {
     MessageListItem v7;
     MessageListItem v9;
@@ -3131,10 +3131,9 @@ void _combat_give_exps(int exp_points, Object* earner)
     // nullptr is "no subject in hand" — the vanilla meaning of this function.
     Object* subject = earner != nullptr ? earner : gDude;
 
-    // A dead earner banks nothing. Per-actor now: one player dying used to
-    // cancel the whole party's payout, because this read gDude no matter who
-    // the XP belonged to.
-    if (critterIsDead(subject)) {
+    // A dead player still receives XP for kills made while they were online.
+    // Non-player earners and other callers retain the existing dead-recipient guard.
+    if (critterIsDead(subject) && !(allowDeadPlayer && playerActorIs(subject))) {
         return;
     }
 
@@ -5482,23 +5481,15 @@ static void _damage_object(Object* target, int damage, bool animated, int hitUni
                 }
 
                 if (!scriptOverrides) {
-                    // Credit the KILLER's bucket. whoHitMe is a live pointer
-                    // right here, which is why §4 takes the subject from the call
-                    // site rather than from nearest-player geometry — that would
-                    // hand a kill to whoever happened to be standing closest.
-                    //
-                    // A killer that is not a registered player actor (a companion,
-                    // or the team-mate branch of the guard above) credits slot 0.
-                    // That is exactly today's behavior for those cases — a
-                    // disclosed default, not new guesswork (§4). The -1 is mapped
-                    // to that policy explicitly and never used as an index — a
-                    // negative one would corrupt whatever static precedes the
-                    // array.
-                    int slot = playerActorSlotOf(whoHitMe);
-                    if (slot < 0) {
-                        slot = 0;
+                    // Award every player who was online when the critter died.
+                    // The per-slot buckets retain that eligibility until combat
+                    // ends, when each actor receives XP on its own stat row.
+                    const int experience = critterGetExp(target);
+                    for (int slot = 0; slot < playerActorCount(); slot++) {
+                        if (playerActorOnline(slot)) {
+                            _combat_exps[slot] += experience;
+                        }
                     }
-                    _combat_exps[slot] += critterGetExp(target);
                     killsIncByType(critterGetKillType(target));
                 }
             }

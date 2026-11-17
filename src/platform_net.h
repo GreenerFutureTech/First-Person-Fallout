@@ -218,12 +218,11 @@ inline void netSetSendTimeout(NetSocket s, int seconds)
 #endif
 }
 
-// Non-blocking recv on a socket left in BLOCKING mode (the server keeps its
-// wire clients blocking so bounded sends work — see netSetSendTimeout). POSIX
-// has the per-call MSG_DONTWAIT flag; Windows does not, so readiness is probed
-// with a zero-timeout select first — recv is only called when it cannot block,
-// which also preserves the "recv==0 means orderly close" signal. Same return
-// contract as netRecv; "nothing pending" reads as netErrorWouldBlock.
+// Non-blocking recv. POSIX has the per-call MSG_DONTWAIT flag; Windows does not,
+// so readiness is probed with a zero-timeout select first — recv is only called
+// when data is ready, which also preserves the "recv==0 means orderly close"
+// signal. Same return contract as netRecv; "nothing pending" reads as
+// netErrorWouldBlock.
 inline long netRecvNoWait(NetSocket s, void* buf, size_t len)
 {
 #ifdef _WIN32
