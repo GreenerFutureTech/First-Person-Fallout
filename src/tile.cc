@@ -47,6 +47,13 @@
 
 namespace fallout {
 
+constexpr int kArroyoVillageMonumentProtoId = 938;
+constexpr int kArroyoVillageMonumentFrontWallProtoId = 621;
+constexpr int kArroyoVillageMonumentFrontWallLength = 9;
+constexpr int kArroyoVillageNorthMountainProtoId = 1370;
+constexpr int kArroyoVillageNorthCavernProtoId = 1371;
+constexpr double kArroyoVillageNorthBackdropY = 0.25;
+
 static bool tileScrollLeashUnlocked();
 
 
@@ -76,6 +83,7 @@ struct TileFirstPersonTopologyRenderContext {
 struct TileFirstPersonGrayboxRenderContext {
     MapElevation elevation;
     int gridWidth;
+    int arroyoMonumentTile;
     unsigned char* wallCells;
     unsigned char* wallOrientations;
     std::vector<int>* exitGridTiles;
@@ -186,6 +194,7 @@ static void tileFirstPersonInitializeWallTextures();
 static unsigned int tileFirstPersonTextureNoise(int x, int y, unsigned int seed);
 static void tileFirstPersonTopologyMarkObject(Object* object, void* context);
 static void tileFirstPersonSnapshotTopologyObject(Object* object, void* context);
+static void tileFirstPersonFindArroyoVillageMonument(Object* object, void* context);
 static void tileFirstPersonFindTempleWallAreaLandmark(Object* object, void* context);
 static void tileFirstPersonMarkTempleBlockedAreaWalls(
     const TileFirstPersonGrayboxRenderContext* renderContext);
@@ -1088,6 +1097,17 @@ static void tileRenderFirstPersonPreview()
     gFirstPersonPreviewWallCells.assign(gHexGridSize, 0);
     gFirstPersonPreviewWallOrientations.assign(gHexGridSize, 0);
     gFirstPersonPreviewExitGridTiles.clear();
+    static int arroyoMonumentMap = -1;
+    static int arroyoMonumentElevation = -1;
+    static int arroyoMonumentTile = -1;
+    if (gMapHeader.index == MAP_ARROYO_VILLAGE
+        && (arroyoMonumentMap != static_cast<int>(gMapHeader.index)
+            || arroyoMonumentElevation != static_cast<int>(gElevation))) {
+        arroyoMonumentTile = -1;
+        objectVisitAll(tileFirstPersonFindArroyoVillageMonument, &arroyoMonumentTile);
+        arroyoMonumentMap = static_cast<int>(gMapHeader.index);
+        arroyoMonumentElevation = static_cast<int>(gElevation);
+    }
     static bool templeFirePitsCached = false;
     static int templeFirePitsElevation = -1;
     static std::vector<int> templeWallAreaLandmarkTiles;
@@ -1104,6 +1124,7 @@ static void tileRenderFirstPersonPreview()
     TileFirstPersonGrayboxRenderContext context = {
         gElevation,
         gHexGridWidth,
+        gMapHeader.index == MAP_ARROYO_VILLAGE ? arroyoMonumentTile : -1,
         gFirstPersonPreviewWallCells.data(),
         gFirstPersonPreviewWallOrientations.data(),
         &gFirstPersonPreviewExitGridTiles,
@@ -1301,7 +1322,6 @@ static void tileRenderFirstPersonPreview()
     // it. Record actual raster bounds so floor clipping agrees at every edge.
     static std::vector<int> floorOcclusionBottoms;
     floorOcclusionBottoms.assign(gTileWindowWidth, horizonY);
-
     const unsigned int wallStart = profileFrame ? getTicks() : 0;
     for (int x = 0; x < gTileWindowWidth; x++) {
         const double rayDirectionX = rayDirectionXs[x];
@@ -2034,6 +2054,17 @@ static void tileFirstPersonRenderExitGridMarker(
     }
 }
 
+static void tileFirstPersonFindArroyoVillageMonument(Object* object, void* context)
+{
+    if (object->elevation == gElevation
+        && (object->flags & OBJECT_HIDDEN) == OBJECT_NONE
+        && ProtoId(object).objectType() == OBJ_TYPE_SCENERY
+        && ProtoId(object).protoId() == kArroyoVillageMonumentProtoId
+        && tileIsValid(object->tile)) {
+        *static_cast<int*>(context) = object->tile;
+    }
+}
+
 static void tileFirstPersonFindTempleWallAreaLandmark(Object* object, void* context)
 {
     const int protoId = ProtoId(object).protoId();
@@ -2189,6 +2220,20 @@ static void tileFirstPersonGrayboxMarkObject(Object* object, void* context)
     if (objectType != OBJ_TYPE_WALL && objectType != OBJ_TYPE_SCENERY) {
         return;
     }
+    if (objectType == OBJ_TYPE_WALL
+        && ProtoId(object).protoId() == kArroyoVillageMonumentFrontWallProtoId
+        && renderContext->arroyoMonumentTile >= 0
+        && gHexGridWidth > 0) {
+        const int monumentRow = renderContext->arroyoMonumentTile / gHexGridWidth;
+        const int monumentColumn = renderContext->arroyoMonumentTile % gHexGridWidth;
+        const int wallRow = object->tile / gHexGridWidth;
+        const int wallColumn = object->tile % gHexGridWidth;
+        if (wallRow == monumentRow - 1
+            && wallColumn >= monumentColumn - kArroyoVillageMonumentFrontWallLength
+            && wallColumn < monumentColumn) {
+            return;
+        }
+    }
 
     const bool halfHeightWall = objectType == OBJ_TYPE_WALL
         && (object->flags & OBJECT_NO_BLOCK) == OBJECT_NONE
@@ -2279,14 +2324,24 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
     const TileFirstPersonActorRenderContext* context, double worldX, double worldY,
     bool templeBackwall)
 {
+    const bool arroyoVillageMonument = gMapHeader.index == MAP_ARROYO_VILLAGE
+        && ProtoId(object).objectType() == OBJ_TYPE_SCENERY
+        && ProtoId(object).protoId() == kArroyoVillageMonumentProtoId;
+    const bool arroyoVillageNorthBackdrop = gMapHeader.index == MAP_ARROYO_VILLAGE
+        && ProtoId(object).objectType() == OBJ_TYPE_SCENERY
+        && (ProtoId(object).protoId() == kArroyoVillageNorthMountainProtoId
+            || ProtoId(object).protoId() == kArroyoVillageNorthCavernProtoId);
+    constexpr double kArroyoMonumentScale = 1.6;
     // Backdrops can be NO_BLOCK and use separate invisible blocking hexes
     // (including the starting map). Classify the artwork, not collision flags.
-    if (!templeBackwall && (object->flags & OBJECT_FLAT) != OBJECT_NONE) {
+    if (!templeBackwall && !arroyoVillageMonument && !arroyoVillageNorthBackdrop
+        && (object->flags & OBJECT_FLAT) != OBJECT_NONE) {
         return false;
     }
     Proto* proto = nullptr;
     if (protoGetProto(object, &proto) != 0
-        || (!templeBackwall && proto->scenery.type != SCENERY_TYPE_GENERIC)) {
+        || (!templeBackwall && !arroyoVillageMonument && !arroyoVillageNorthBackdrop
+            && proto->scenery.type != SCENERY_TYPE_GENERIC)) {
         return false;
     }
     const Rotation rotation = rotationIsValid(object->rotation) ? object->rotation : ROTATION_NE;
@@ -2295,17 +2350,20 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
         return false;
     }
     const ConstBuffer2D frame = image.getBuffer();
-    if (!templeBackwall && (frame.width < 160 || frame.height < 64)) {
+    if (!templeBackwall && !arroyoVillageMonument && !arroyoVillageNorthBackdrop
+        && (frame.width < 160 || frame.height < 64)) {
         return false;
     }
     // Key by art identity rather than cache allocation, which can be reused
     // after eviction. Frame and rotation still follow scripted art changes.
     const FirstPersonSceneryProfile& profile =
         tileFirstPersonGetSceneryProfile(object, rotation, frame);
-    if (!profile.fixed && !templeBackwall) {
+    if (!profile.fixed && !templeBackwall && !arroyoVillageMonument
+        && !arroyoVillageNorthBackdrop) {
         return false;
     }
-    if (templeBackwall && profile.left >= profile.right) {
+    if ((templeBackwall || arroyoVillageMonument || arroyoVillageNorthBackdrop)
+        && profile.left >= profile.right) {
         return false;
     }
     double projectedIsoX = firstPersonSceneryBackwallProjectedX(worldX, worldY);
@@ -2321,13 +2379,26 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
         + image.getYOffset() + object->y;
     const double backwallVerticalOffset = templeBackwall
         ? 0.0
+        : arroyoVillageMonument || arroyoVillageNorthBackdrop
+        ? 0.0
         : firstPersonSceneryBackwallVerticalOffset(
               context->backwallIsoBaseY, projectedIsoY);
-    const FirstPersonScenerySlab slab = templeBackwall
+    FirstPersonScenerySlab slab = templeBackwall
         ? firstPersonSceneryBackwallSlab(profile, projectedIsoX, context->backwallY,
+              image.getXOffset() + object->x, backwallVerticalOffset)
+        : arroyoVillageNorthBackdrop
+        ? firstPersonSceneryBackwallSlab(profile, projectedIsoX,
+              kArroyoVillageNorthBackdropY, image.getXOffset() + object->x,
+              backwallVerticalOffset)
+        : arroyoVillageMonument
+        ? firstPersonSceneryBackwallSlab(profile, projectedIsoX, worldY,
               image.getXOffset() + object->x, backwallVerticalOffset)
         : firstPersonScenerySlab(profile, worldX, worldY,
               image.getXOffset() + object->x, image.getYOffset() + object->y);
+    if (arroyoVillageMonument) {
+        slab.length *= kArroyoMonumentScale;
+        slab.thickness = 0.35;
+    }
     const bool gpu = screenIsHardwareAccelerated();
     BillboardClipBands bands;
     const auto columns = firstPersonSceneryColumns(slab, context->cameraX, context->cameraY,
@@ -2351,11 +2422,14 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
         if (profile.bottoms[sourceX] == 0) {
             continue;
         }
-        const int sourceBaseline = templeBackwall
+        const int sourceBaseline = templeBackwall || arroyoVillageNorthBackdrop
             ? firstPersonSceneryBackwallBaseline(profile, sourceX)
             : profile.bottoms[sourceX];
         const double scale = gTileWindowHeight / hit.depth;
-        const double pixelsPerWorldUnit = templeBackwall ? 48.0 : 80.0;
+        const double pixelsPerWorldUnit = templeBackwall
+                ? 48.0
+                : arroyoVillageMonument ? 48.0 / kArroyoMonumentScale
+                : arroyoVillageNorthBackdrop ? 48.0 : 80.0;
         const int artHeight = std::max(1,
             static_cast<int>(scale * frame.height / pixelsPerWorldUnit));
         const int base = context->horizonY + static_cast<int>(
@@ -2419,7 +2493,9 @@ static bool tileFirstPersonRenderLargeScenery(Object* object,
 
 static bool tileFirstPersonIsTempleBackwall(const Object* object)
 {
-    if (object == nullptr || ProtoId(object).objectType() != OBJ_TYPE_SCENERY) {
+    if (gMapHeader.index != MAP_ARROYO_TEMPLE
+        || object == nullptr
+        || ProtoId(object).objectType() != OBJ_TYPE_SCENERY) {
         return false;
     }
 
@@ -4093,6 +4169,7 @@ static void tileRenderFirstPersonTopology()
             }
         }
     }
+
 }
 
 static void tileRenderFirstPersonTopologyOverlay()

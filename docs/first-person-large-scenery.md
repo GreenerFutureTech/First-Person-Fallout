@@ -61,8 +61,10 @@ depth and texture coordinate. Conservative bounds include all four corners
 and retain volumes crossing the near plane. GPU rendering submits clipped
 texture columns through the existing depth-sorted queue; CPU rendering uses
 the same intersections with its per-pixel depth buffer. Wall, sill and door-cap
-clipping use each column's depth. Scenery picking uses the corresponding
-source column and visible vertical intervals.
+clipping use each column's depth. Wall texture spans use a separate per-pixel
+depth buffer to order textured wall hits against each other; it does not
+depth-test those textures against scenery artwork. Scenery picking uses the
+corresponding source column and visible vertical intervals.
 
 Ordinary billboards now cull against the actual opaque artwork bounds. The
 placeholder bounds are used only when artwork cannot be loaded.
@@ -150,13 +152,38 @@ wall rather than being clipped to its per-column ray hits, so gaps in the wall
 graybox do not break up the packed art; transparent areas remain transparent.
 If no solid wall tile is found, the existing shared-plane placement 7.5 world
 units in front of the entry tile is used. This map-specific
-override includes the narrow and flat-flagged panels that the general large-scenery
-heuristic intentionally leaves alone. Fire-pit props and collision/blocker
-objects are not included. The isometric renderer, movement, and collision
-continue to use the original map objects.
+override includes the narrow and flat-flagged panels that the general
+large-scenery heuristic intentionally leaves alone. Fire-pit props and
+unrelated collision/blocker objects are not included. The isometric renderer,
+movement, and collision continue to use the original map objects.
+
+## Temple blocked-floor boundaries
+
+F11 derives floor appearance from floor FRMs, while movement uses blocking
+objects. A blocked tile therefore does not automatically look like a wall.
+On Arroyo Temple, F11 searches within eight hexes of the facade panels and the
+two fire pits (prototypes 1366 and 1367), then draws half-height wall cells on
+the perimeter of blocked tiles. The search is limited to those known landmark
+areas and its result is cached per map and elevation; it does not scan other
+maps. Doors, actors, facade panels, and fire-pit props are excluded from the
+blocking test. Movement and collision remain authoritative and unchanged.
+
+This is intentionally Temple-specific. A general rule based on all blocking
+scenery affected unrelated maps and was reverted after F11 began crashing on
+Klamath; the exact crash cause was not confirmed. Apply the visual treatment
+to another map only after identifying its specific blocked-floor landmarks
+and validating it in-game.
+
+On Arroyo Village, the central Stone Monument (scenery prototype 938) is
+rendered as an enlarged slab. Its nine-tile front wall segment (wall prototype
+621) is suppressed in F11 so the monument fills that space. The northern
+Mountain and Cavern scenery (prototypes 1370 and 1371) are rendered as
+backdrops at the north map edge rather than foreground-facing billboards.
 
 Temple facade prototypes are routed into the shared backwall before the
 ordinary scenery-door exclusion. This matters because one of the facade
 prototypes is tagged as a door in its prototype data even though its art is a
 backwall panel. That exception is limited to the recognized Temple backwall
-group; normal doors keep their existing F11 behavior.
+group and the Arroyo Temple map; prototype IDs can refer to unrelated scenery
+on other maps.
+
