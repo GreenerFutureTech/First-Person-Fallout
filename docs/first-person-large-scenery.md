@@ -180,15 +180,27 @@ and validating it in-game.
 
 On Arroyo Village, all three pieces of the central Stone Monument (scenery
 prototypes 937-939, including the `head1.frm` head at prototype 938) are
-rendered as enlarged slabs. The head anchors suppression of its nine-tile front
-wall segment (wall prototype 621) in F11. More generally, large scenery with a
-map-aligned base is rendered as a backdrop when its object tile is within 1.5
-first-person world units of the corresponding rectangular map-grid edge. The
-base slope selects the edge direction, and transparent art pixels are
-preserved. This replaces the Village-specific Mountain and Cavern backdrop
-list (prototypes 1370 and 1371); map collision and other wall pieces remain
-unchanged. The heuristic uses rectangular tile-grid bounds, not the playable
-area's potentially irregular boundary.
+replaced in F11 by the composite `art/scenery/arroyo_monument.frm` image.
+Its PNG source is `tools/assets/arroyo_monument.png`, with palette index 0
+preserving transparency. The composite uses the head object's tile and
+placement offsets; all three original pieces are suppressed in F11. The head
+also anchors suppression of its nine-tile front wall segment (wall prototype
+621). Other wall pieces, collision, and the isometric view remain unchanged.
+
+Large generic scenery with a map-aligned base is rendered as a backdrop when
+its object tile is within 1.5 first-person world units of the corresponding
+rectangular map-grid edge. The base slope selects the edge direction, and
+transparent art pixels are preserved. This replaces the Village-specific
+Mountain and Cavern backdrop list (prototypes 1370 and 1371); the heuristic
+uses rectangular tile-grid bounds rather than the playable area's potentially
+irregular boundary.
+
+The Arroyo Village cave panorama uses `art/scenery/cave_backdrop.frm`, with
+source art in `tools/assets/cave_backdrop.png`. It is centered behind the
+exit-grid tiles leading to Arroyo Caves, half a world unit north of the exit,
+and is rendered behind edge scenery while retaining wall, door-cap, and floor
+occlusion. All scenery changes are visual only; map objects and collision
+remain unchanged.
 
 Temple facade prototypes are routed into the shared backwall before the
 ordinary scenery-door exclusion. This matters because one of the facade
