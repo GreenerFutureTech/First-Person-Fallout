@@ -766,7 +766,7 @@ int floatSoundPlay(const char* fileName, Object* speaker) { return -1; }
 void gpuBillboardBeginFrame(unsigned char lightModulation) { }
 void gpuBillboardMarkSceneComplete() { }
 void gpuBillboardClear() { }
-void gpuBillboardSubmit(const unsigned char* pixels, int width, int height, const SDL_Rect& destination, const SDL_Rect& clip, double depth) { }
+void gpuBillboardSubmit(const unsigned char* pixels, int width, int height, const SDL_Rect& destination, const SDL_Rect& clip, double depth, int blackMaskColor) { }
 bool gBlockMouseUpEvent = false;
 int gInterfaceBarWindow = -1;
 bool _ctrl_pressed() { return false; }

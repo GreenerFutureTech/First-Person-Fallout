@@ -68,6 +68,7 @@ struct GpuBillboardTexture {
     int width;
     int height;
     unsigned char lightModulation;
+    int blackMaskColor;
     uint64_t paletteRevision;
     IndexedTexturePalette palette;
 };
@@ -273,7 +274,7 @@ void gpuBillboardSetCursor(const unsigned char* pixels, int width, int height,
 }
 
 void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
-    const SDL_Rect& destination, const SDL_Rect& clip, double depth)
+    const SDL_Rect& destination, const SDL_Rect& clip, double depth, int blackMaskColor)
 {
     if (!gSdlRendererHardwareAccelerated || pixels == nullptr
         || width <= 0 || height <= 0 || destination.w <= 0 || destination.h <= 0) {
@@ -284,7 +285,8 @@ void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
     auto textureIt = gGpuBillboardTextures.find(pixels);
     if (textureIt != gGpuBillboardTextures.end()
         && textureIt->second.width == width
-        && textureIt->second.height == height) {
+        && textureIt->second.height == height
+        && textureIt->second.blackMaskColor == blackMaskColor) {
         GpuBillboardTexture& candidate = textureIt->second;
         // Color cycling changes a small palette range many times per second.
         // Reuse textures whose opaque pixels do not use the changed colors.
@@ -309,12 +311,15 @@ void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
                 const unsigned char colorIndex = pixels[y * width + x];
                 texturePalette.useColor(colorIndex);
                 const int paletteIndex = colorIndex * 3;
-                const uint32_t color = colorIndex == 0
-                    ? 0
-                    : 0xFF000000u
-                        | (static_cast<uint32_t>(gGpuPalette[paletteIndex]) << 18)
-                        | (static_cast<uint32_t>(gGpuPalette[paletteIndex + 1]) << 10)
-                        | (static_cast<uint32_t>(gGpuPalette[paletteIndex + 2]) << 2);
+                uint32_t color = 0;
+                if (colorIndex != 0) {
+                    color = 0xFF000000u;
+                    if (colorIndex != blackMaskColor) {
+                        color |= (static_cast<uint32_t>(gGpuPalette[paletteIndex]) << 18)
+                            | (static_cast<uint32_t>(gGpuPalette[paletteIndex + 1]) << 10)
+                            | (static_cast<uint32_t>(gGpuPalette[paletteIndex + 2]) << 2);
+                    }
+                }
                 rgba[static_cast<size_t>(y) * width + x] = color;
             }
         }
@@ -332,7 +337,7 @@ void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
             SDL_DestroyTexture(textureIt->second.texture);
             textureIt->second = {
                 texture, width, height, gGpuBillboardLightModulation,
-                gGpuPaletteRevision, texturePalette
+                blackMaskColor, gGpuPaletteRevision, texturePalette
             };
             cachedTexture = &textureIt->second;
         } else {
@@ -340,7 +345,7 @@ void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
                 &gGpuBillboardTextures.emplace(pixels,
                     GpuBillboardTexture {
                         texture, width, height, gGpuBillboardLightModulation,
-                        gGpuPaletteRevision, texturePalette
+                        blackMaskColor, gGpuPaletteRevision, texturePalette
                     }).first->second;
         }
     }

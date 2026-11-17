@@ -71,7 +71,8 @@ void gpuBillboardHideCursor();
 void gpuBillboardSetCursor(const unsigned char* pixels, int width, int height,
     int pitch, unsigned char transparentColor, int x, int y);
 void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
-    const SDL_Rect& destination, const SDL_Rect& clip, double depth);
+    const SDL_Rect& destination, const SDL_Rect& clip, double depth,
+    int blackMaskColor = -1);
 bool gpuOverlaySetIndexed(const unsigned char* pixels, int width, int height, int pitch, int x, int y);
 void gpuOverlayClear();
 

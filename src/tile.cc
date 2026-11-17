@@ -23,6 +23,7 @@
 #include "animation.h"
 #include "billboard_clip_bands.h"
 #include "combat.h"
+#include "client_net.h"
 #include "color.h"
 #include "critter.h"
 #include "debug.h"
@@ -237,7 +238,9 @@ static const std::vector<unsigned char>* tileFirstPersonGetActorOutlinePixels(
     const unsigned char* pixels,
     int width,
     int height,
-    Color color);
+    Color color,
+    int* outlineWidth,
+    int* outlineHeight);
 static void tileFirstPersonRenderExitGridMarkers(
     const std::vector<int>& tiles,
     const TileFirstPersonExitGridRenderContext* context);
@@ -3826,11 +3829,25 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         && gameMouseGetMode() == GAME_MOUSE_MODE_CROSSHAIR
         && settings.preferences.target_highlight != TARGET_HIGHLIGHT_OFF
         && !_combat_is_shot_blocked(gDude, gDude->tile, object->tile, object, nullptr);
-    const Color combatOutlineColor = drawCombatOutline
-            && (objectIsPartyMember(object)
-                || gDude->data.critter.combat.team == object->data.critter.combat.team)
-        ? Color(229)
-        : Color(243);
+    Color combatOutlineColor = COLOR_BLACK;
+    if (objectType == OBJ_TYPE_CRITTER) {
+        if (clientViewerActive()) {
+            if (!critterIsDead(object) && objectHasVisibleOutline(object)) {
+                const OutlineType outlineType =
+                    static_cast<OutlineType>(object->outline & OUTLINE_TYPE_MAX);
+                if ((outlineType & OUTLINE_TYPE_FRIENDLY) != OUTLINE_TYPE_NONE) {
+                    combatOutlineColor = Color(229);
+                } else if ((outlineType & OUTLINE_TYPE_HOSTILE) != OUTLINE_TYPE_NONE) {
+                    combatOutlineColor = Color(243);
+                }
+            }
+        } else if (drawCombatOutline) {
+            combatOutlineColor = objectIsPartyMember(object)
+                    || gDude->data.critter.combat.team == object->data.critter.combat.team
+                ? Color(229)
+                : Color(243);
+        }
+    }
     Color actorColor = COLOR_AMBER;
     if (objectType == OBJ_TYPE_CRITTER) {
         if (objectIsPartyMember(object)
@@ -3848,13 +3865,12 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         if (frame.width <= 0 || frame.height <= 0) {
             return;
         }
-        const std::vector<unsigned char>* outlinePixels = drawCombatOutline
+        int outlineWidth = frame.width * 2 + 6;
+        int outlineHeight = frame.height * 2 + 6;
+        const std::vector<unsigned char>* outlinePixels = objectType == OBJ_TYPE_CRITTER
             ? tileFirstPersonGetActorOutlinePixels(frame.data, frame.width, frame.height,
-                combatOutlineColor)
+                combatOutlineColor, &outlineWidth, &outlineHeight)
             : nullptr;
-        const int outlineScale = combatOutlineColor == Color(243) ? 2 : 1;
-        const int outlineWidth = frame.width * outlineScale;
-        const int outlineHeight = frame.height * outlineScale;
         const int artHeight = actorHeight;
         const int artWidth = std::max(1,
             static_cast<int>(artHeight * frame.width / static_cast<double>(frame.height)
@@ -3908,10 +3924,34 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         const int opaqueTop = artTop + spriteBounds.top * artHeight / frame.height;
         const int opaqueBottom = artTop
             + (spriteBounds.bottom + 1) * artHeight / frame.height;
+        const int outlinePaddingX = outlinePixels != nullptr
+            ? std::max(1, (artWidth * 3 + frame.width * 2 - 1) / (frame.width * 2))
+            : 0;
+        const int outlinePaddingY = outlinePixels != nullptr
+            ? std::max(1, (artHeight * 3 + frame.height * 2 - 1) / (frame.height * 2))
+            : 0;
+        const SDL_Rect outlineDestination = {
+            artLeft - outlinePaddingX,
+            artTop - outlinePaddingY,
+            artWidth + 2 * outlinePaddingX,
+            artHeight + 2 * outlinePaddingY,
+        };
+        const int renderLeft = outlinePixels != nullptr
+            ? std::min(opaqueLeft, outlineDestination.x)
+            : opaqueLeft;
+        const int renderRight = outlinePixels != nullptr
+            ? std::max(opaqueRight, outlineDestination.x + outlineDestination.w)
+            : opaqueRight;
+        const int renderTop = outlinePixels != nullptr
+            ? std::min(opaqueTop, outlineDestination.y)
+            : opaqueTop;
+        const int renderBottom = outlinePixels != nullptr
+            ? std::max(opaqueBottom, outlineDestination.y + outlineDestination.h)
+            : opaqueBottom;
         // Only actual artwork bounds are safe for culling. Wide sprites can
         // extend far beyond the placeholder silhouette or one-tile radius.
-        if (opaqueRight <= 0 || opaqueLeft >= gTileWindowWidth
-            || opaqueBottom <= 0 || opaqueTop >= gTileWindowHeight) {
+        if (renderRight <= 0 || renderLeft >= gTileWindowWidth
+            || renderBottom <= 0 || renderTop >= gTileWindowHeight) {
             return;
         }
         renderContext->hitTargets->push_back({
@@ -3927,13 +3967,15 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
 
         const int firstOpaqueColumn = std::max(0, opaqueLeft);
         const int lastColumn = std::min(gTileWindowWidth, opaqueRight);
+        const int firstRenderColumn = std::max(0, renderLeft);
+        const int lastRenderColumn = std::min(gTileWindowWidth, renderRight);
         if ((objectType == OBJ_TYPE_CRITTER
                 || objectType == OBJ_TYPE_SCENERY
                 || objectType == OBJ_TYPE_ITEM)
             && screenIsHardwareAccelerated()) {
             bool hasVisibleColumn = false;
-            const int clippedOpaqueTop = std::max(0, opaqueTop);
-            const int clippedOpaqueBottom = std::min(gTileWindowHeight, opaqueBottom);
+            const int clippedOpaqueTop = std::max(0, renderTop);
+            const int clippedOpaqueBottom = std::min(gTileWindowHeight, renderBottom);
             // Within each horizon band, wall depth is constant vertically and
             // a door cap is one contiguous interval. If neither endpoint is
             // visible, the entire band is hidden; no per-pixel scan is needed.
@@ -3946,7 +3988,7 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                             renderContext->horizonY, renderContext->wallDepths,
                             renderContext->wallSillDepths, renderContext->doorCapDepths));
             };
-            for (int x = firstOpaqueColumn; x < lastColumn; x++) {
+            for (int x = firstRenderColumn; x < lastRenderColumn; x++) {
                 hasVisibleColumn = bandVisible(x, clippedOpaqueTop,
                                        std::min(clippedOpaqueBottom, renderContext->horizonY))
                     || bandVisible(x, std::max(clippedOpaqueTop, renderContext->horizonY),
@@ -3976,7 +4018,7 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                 static BillboardClipBands clipBands;
                 clipBands.reset(top, bottom);
                 if (renderContext->doorCapDepths != nullptr) {
-                    for (int x = firstOpaqueColumn; x < lastColumn; x++) {
+                    for (int x = firstRenderColumn; x < lastRenderColumn; x++) {
                         const TileFirstPersonDoorCapSpan& cap = (*renderContext->doorCapDepths)[x];
                         if (cap.top < cap.bottom && cap.top < bottom && cap.bottom > top
                             && transformY >= cap.depth) {
@@ -3989,10 +4031,10 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                     // Each call stays on one side of the horizon. Visibility
                     // therefore depends only on x; merge adjacent columns into
                     // full-height clips without allocating vectors per row.
-                    int runStart = firstOpaqueColumn;
+                    int runStart = firstRenderColumn;
                     bool inRun = false;
-                    for (int x = firstOpaqueColumn; x <= lastColumn; x++) {
-                        const bool visible = x < lastColumn
+                    for (int x = firstRenderColumn; x <= lastRenderColumn; x++) {
+                        const bool visible = x < lastRenderColumn
                             && transformY < (top < renderContext->horizonY
                                     ? (*renderContext->wallDepths)[x]
                                     : std::min((*renderContext->wallDepths)[x],
@@ -4004,7 +4046,7 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                             const SDL_Rect clip = { runStart, top, x - runStart, bottom - top };
                             if (outlinePixels != nullptr) {
                                 gpuBillboardSubmit(outlinePixels->data(), outlineWidth, outlineHeight,
-                                    destination, clip, transformY);
+                                    outlineDestination, clip, transformY, Color(1));
                             }
                             gpuBillboardSubmit(frame.data, frame.width, frame.height,
                                 destination, clip, transformY);
@@ -4025,7 +4067,7 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                     const int bandHeight = boundaries[band + 1] - y;
                     nextClips.clear();
                     retained.assign(activeClips.size(), false);
-                    int runStart = firstOpaqueColumn;
+                    int runStart = firstRenderColumn;
                     bool inRun = false;
                     const auto finishRun = [&](int runEnd) {
                         SDL_Rect clip = { runStart, y, runEnd - runStart, bandHeight };
@@ -4042,8 +4084,8 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                         }
                         nextClips.push_back(clip);
                     };
-                    for (int x = firstOpaqueColumn; x <= lastColumn; x++) {
-                        const bool nextVisible = x < lastColumn
+                    for (int x = firstRenderColumn; x <= lastRenderColumn; x++) {
+                        const bool nextVisible = x < lastRenderColumn
                             && transformY < tileFirstPersonGetWallDepthAt(
                                 x,
                                 y,
@@ -4063,7 +4105,7 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                         if (!retained[index]) {
                             if (outlinePixels != nullptr) {
                                 gpuBillboardSubmit(outlinePixels->data(), outlineWidth, outlineHeight,
-                                    destination, activeClips[index], transformY);
+                                    outlineDestination, activeClips[index], transformY, Color(1));
                             }
                             gpuBillboardSubmit(frame.data, frame.width, frame.height,
                                 destination, activeClips[index], transformY);
@@ -4074,16 +4116,16 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                 for (const SDL_Rect& clip : activeClips) {
                     if (outlinePixels != nullptr) {
                         gpuBillboardSubmit(outlinePixels->data(), outlineWidth, outlineHeight,
-                            destination, clip, transformY);
+                            outlineDestination, clip, transformY, Color(1));
                     }
                     gpuBillboardSubmit(frame.data, frame.width, frame.height,
                         destination, clip, transformY);
                 }
             };
-            submitVisibleRange(std::max(0, opaqueTop),
-                std::min(gTileWindowHeight, std::min(opaqueBottom, renderContext->horizonY)));
-            submitVisibleRange(std::max(0, std::max(opaqueTop, renderContext->horizonY)),
-                std::min(gTileWindowHeight, opaqueBottom));
+            submitVisibleRange(std::max(0, renderTop),
+                std::min(gTileWindowHeight, std::min(renderBottom, renderContext->horizonY)));
+            submitVisibleRange(std::max(0, std::max(renderTop, renderContext->horizonY)),
+                std::min(gTileWindowHeight, renderBottom));
             if (objectType != OBJ_TYPE_SCENERY) {
                 textObjectsRenderForOwner(object,
                     gTileWindowBuffer,
@@ -4105,14 +4147,18 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
             : artHeight >= 96 ? 3
             : 2;
         if (outlinePixels != nullptr) {
-            const int outlineTop = std::max(0, artTop);
-            const int outlineBottom = std::min(gTileWindowHeight, artTop + artHeight);
-            const int outlineLeft = std::max(0, artLeft);
-            const int outlineRight = std::min(gTileWindowWidth, artLeft + artWidth);
+            const int outlineTop = std::max(0, outlineDestination.y);
+            const int outlineBottom = std::min(
+                gTileWindowHeight, outlineDestination.y + outlineDestination.h);
+            const int outlineLeft = std::max(0, outlineDestination.x);
+            const int outlineRight = std::min(
+                gTileWindowWidth, outlineDestination.x + outlineDestination.w);
             for (int y = outlineTop; y < outlineBottom; y++) {
-                const int sourceY = (y - artTop) * outlineHeight / artHeight;
+                const int sourceY = (y - outlineDestination.y) * outlineHeight
+                    / outlineDestination.h;
                 for (int x = outlineLeft; x < outlineRight; x++) {
-                    const int sourceX = (x - artLeft) * outlineWidth / artWidth;
+                    const int sourceX = (x - outlineDestination.x) * outlineWidth
+                        / outlineDestination.w;
                     const unsigned char color = (*outlinePixels)[sourceY * outlineWidth + sourceX];
                     if (color == 0
                         || transformY >= tileFirstPersonGetWallDepthAt(
@@ -4133,7 +4179,8 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
                             std::numeric_limits<double>::infinity();
                     }
                     if (transformY < (*renderContext->actorDepths)[depthIndex]) {
-                        gTileWindowBuffer[y * gTileWindowPitch + x] = color;
+                        gTileWindowBuffer[y * gTileWindowPitch + x] =
+                            color == Color(1) ? COLOR_BLACK : color;
                         (*renderContext->actorDepths)[depthIndex] = transformY;
                     }
                 }
@@ -4312,12 +4359,14 @@ static const std::vector<unsigned char>* tileFirstPersonGetActorOutlinePixels(
     const unsigned char* pixels,
     int width,
     int height,
-    Color color)
+    Color color,
+    int* outlineWidth,
+    int* outlineHeight)
 {
     struct OutlineFrameCacheEntry {
         int width = 0;
         int height = 0;
-        std::array<std::vector<unsigned char>, 2> frames;
+        std::array<std::vector<unsigned char>, 3> frames;
     };
     static std::unordered_map<const unsigned char*, OutlineFrameCacheEntry> cache;
 
@@ -4328,40 +4377,71 @@ static const std::vector<unsigned char>* tileFirstPersonGetActorOutlinePixels(
         entry.height = height;
     }
 
-    const size_t frameIndex = color == Color(229) ? 0 : 1;
+    const size_t frameIndex = color == COLOR_BLACK ? 0
+        : color == Color(229) ? 1
+        : 2;
     std::vector<unsigned char>& outlinePixels = entry.frames[frameIndex];
     if (outlinePixels.empty()) {
-        const int scale = color == Color(243) ? 2 : 1;
-        const int outlineWidth = width * scale;
-        const int outlineHeight = height * scale;
-        outlinePixels.assign(static_cast<size_t>(outlineWidth) * outlineHeight, 0);
-        for (int y = 0; y < outlineHeight; y++) {
-            for (int x = 0; x < outlineWidth; x++) {
-                if (pixels[(y / scale) * width + x / scale] != 0) {
+        constexpr int scale = 2;
+        constexpr int padding = 3;
+        const int frameWidth = width * scale;
+        const int frameHeight = height * scale;
+        *outlineWidth = frameWidth + padding * 2;
+        *outlineHeight = frameHeight + padding * 2;
+        const size_t outlineSize = static_cast<size_t>(*outlineWidth) * *outlineHeight;
+        outlinePixels.assign(outlineSize, 0);
+        std::vector<unsigned char> expanded(outlineSize, 0);
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                if (pixels[y * width + x] == 0) {
                     continue;
                 }
-
-                for (int offsetY = -1; offsetY <= 1; offsetY++) {
-                    for (int offsetX = -1; offsetX <= 1; offsetX++) {
-                        if (offsetX == 0 && offsetY == 0) {
-                            continue;
-                        }
-
-                        const int neighborX = x + offsetX;
-                        const int neighborY = y + offsetY;
-                        if (neighborX >= 0 && neighborX < outlineWidth
-                            && neighborY >= 0 && neighborY < outlineHeight
-                            && pixels[(neighborY / scale) * width + neighborX / scale] != 0) {
-                            outlinePixels[y * outlineWidth + x] = color;
-                            break;
-                        }
-                    }
-                    if (outlinePixels[y * outlineWidth + x] != 0) {
-                        break;
+                for (int offsetY = 0; offsetY < scale; offsetY++) {
+                    for (int offsetX = 0; offsetX < scale; offsetX++) {
+                        expanded[(y * scale + padding + offsetY) * *outlineWidth
+                            + x * scale + padding + offsetX] = 1;
                     }
                 }
             }
         }
+
+        std::vector<unsigned char> next(outlineSize);
+        for (int distance = 1; distance <= padding; distance++) {
+            next = expanded;
+            for (int y = 0; y < *outlineHeight; y++) {
+                for (int x = 0; x < *outlineWidth; x++) {
+                    const size_t pixelIndex = static_cast<size_t>(y) * *outlineWidth + x;
+                    if (expanded[pixelIndex] != 0) {
+                        continue;
+                    }
+                    bool touchesExpanded = false;
+                    for (int offsetY = -1; offsetY <= 1 && !touchesExpanded; offsetY++) {
+                        for (int offsetX = -1; offsetX <= 1; offsetX++) {
+                            const int neighborX = x + offsetX;
+                            const int neighborY = y + offsetY;
+                            if (neighborX >= 0 && neighborX < *outlineWidth
+                                && neighborY >= 0 && neighborY < *outlineHeight
+                                && expanded[neighborY * *outlineWidth + neighborX] != 0) {
+                                touchesExpanded = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (touchesExpanded) {
+                        next[pixelIndex] = 1;
+                        if (distance <= 2 || color == COLOR_BLACK) {
+                            outlinePixels[pixelIndex] = Color(1);
+                        } else {
+                            outlinePixels[pixelIndex] = color;
+                        }
+                    }
+                }
+            }
+            expanded.swap(next);
+        }
+    } else {
+        *outlineWidth = width * 2 + 6;
+        *outlineHeight = height * 2 + 6;
     }
 
     return &outlinePixels;
@@ -5262,8 +5342,12 @@ static Object* tileFirstPersonPreviewPickCritterAtPosition(int x, int y)
 
     Object* pickedObject = nullptr;
     double pickedDepth = std::numeric_limits<double>::infinity();
+    Object* pickedLivingCritter = nullptr;
+    double pickedLivingCritterDepth = std::numeric_limits<double>::infinity();
     Object* fallbackObject = nullptr;
     double fallbackDepth = std::numeric_limits<double>::infinity();
+    Object* fallbackLivingCritter = nullptr;
+    double fallbackLivingCritterDepth = std::numeric_limits<double>::infinity();
     for (const TileFirstPersonActorHitTarget& target : gFirstPersonPreviewActorHitTargets) {
         if (FrmId(target.object).objectType() != OBJ_TYPE_CRITTER) {
             continue;
@@ -5279,8 +5363,10 @@ static Object* tileFirstPersonPreviewPickCritterAtPosition(int x, int y)
             fallbackObject = target.object;
             fallbackDepth = target.depth;
         }
-        if (target.depth >= pickedDepth) {
-            continue;
+        const bool livingCritter = !critterIsDead(target.object);
+        if (livingCritter && target.depth < fallbackLivingCritterDepth) {
+            fallbackLivingCritter = target.object;
+            fallbackLivingCritterDepth = target.depth;
         }
 
         FrmImage image;
@@ -5299,11 +5385,23 @@ static Object* tileFirstPersonPreviewPickCritterAtPosition(int x, int y)
             }
         }
 
-        pickedObject = target.object;
-        pickedDepth = target.depth;
+        if (target.depth < pickedDepth) {
+            pickedObject = target.object;
+            pickedDepth = target.depth;
+        }
+        if (livingCritter && target.depth < pickedLivingCritterDepth) {
+            pickedLivingCritter = target.object;
+            pickedLivingCritterDepth = target.depth;
+        }
     }
 
-    return pickedObject != nullptr ? pickedObject : fallbackObject;
+    if (pickedLivingCritter != nullptr) {
+        return pickedLivingCritter;
+    }
+    if (pickedObject != nullptr) {
+        return pickedObject;
+    }
+    return fallbackLivingCritter != nullptr ? fallbackLivingCritter : fallbackObject;
 }
 
 Object* tileFirstPersonPreviewPickCritter()
@@ -5424,7 +5522,7 @@ Object* tileFirstPersonPreviewPickDoorAt(int screenX, int screenY)
     double pickedDepth = std::numeric_limits<double>::infinity();
     for (const TileFirstPersonDoorHitTarget& target : gFirstPersonPreviewDoorHitTargets) {
         const int xDistance = target.screenX > x ? target.screenX - x : x - target.screenX;
-        if (xDistance > 4
+        if (xDistance > 12
             || xDistance > pickedXDistance
             || (xDistance == pickedXDistance && target.depth >= pickedDepth)) {
             continue;
