@@ -195,6 +195,10 @@ public:
     // a story beat — rides the baseline, never blocks.
     virtual void movieSeenState(const unsigned char* seen, int count) {}
 
+    // Endgame presentation is client-local UI, but the server decides when it
+    // starts and whether the configured credits movie follows the slideshow.
+    virtual void endgame(bool playSlideshow, bool playMovie) {}
+
     // Co-op: tell every viewer to STOP its local movie playback. FIRST ACK RELEASES
     // THE ROOM (game_movie.h) — the server emits this the instant the barrier frees,
     // so a viewer that skipped ends the cutscene for everyone instead of the others
@@ -207,6 +211,12 @@ public:
     // releases, so any OTHER viewer still in the prompt box breaks out. No-op by
     // default: SP / golden reach showDialogBox directly.
     virtual void encounterPrompt(const char* title, const char* body) {}
+
+    // Co-op sfall `message_box` metarule. Every viewer sees the same dialog; the
+    // server blocks for the first viewer's result and closes the other viewers' boxes.
+    virtual void sfallMessageBoxPrompt(int promptId, const char* title,
+        const char* const* body, int bodyLength, int titleColor, int bodyColor, int flags) {}
+    virtual void sfallMessageBoxClose(int promptId) {}
 
     // Co-op ELEVATOR (dedicated server). The server has no picker screen, so it asks
     // the RIDER's client to show vanilla's, addressed by netId — every other viewer

@@ -7,6 +7,16 @@ namespace fallout {
 
 struct Object;
 
+struct SfallMessageBoxPrompt {
+    int promptId = 0;
+    std::string title;
+    std::string body[4];
+    int bodyLength = 0;
+    int titleColor = 0;
+    int bodyColor = 0;
+    int flags = 0;
+};
+
 // STEP-4 joining client (CLIENT_JOIN_DESIGN.md §D — the inverse of the
 // NetworkPresenter encoder). The decoder loads the join snapshot BLOB, then
 // applies the live F2NS event stream, mutating the local sim into the server's
@@ -129,6 +139,7 @@ public:
     // One-shot: the streamed random-encounter prompt, latched out of the decoder
     // (see onEncounterPrompt — opening it inside pump() re-enters drain()).
     bool takeEncounterPrompt(std::string* title, std::string* body);
+    bool takeSfallMessageBox(SfallMessageBoxPrompt* prompt);
     bool takeElevatorPrompt(int* elevator, int* startLevel);
     // One-shot: the server says WE used a Motion Sensor, so open our own automap.
     bool takeAutomapOpen(bool* usingScanner);

@@ -158,6 +158,7 @@ an `actorNetId` parameter mirroring `consoleMessageFor`.
 | Karma *change* notification | MIS-ADDRESSED (benign) | `game.cc:131-144` broadcast; karma is shared, so acceptable |
 | Music, ambient sfx, movies, movie-seen ledger | FORWARDED (+ baseline re-announce) | `EVENT_MUSIC_PLAY=41`, `MOVIE_*=42/46/47` |
 | Worldmap position / fog of war / encounter prompt | FORWARDED | `worldmapState`/`Subtiles` (`presenter.h:606,612`), `EVENT_ENCOUNTER_PROMPT=49` |
+| Sfall `message_box` prompt / close | FORWARDED + input barrier | `EVENT_SFALL_MESSAGE_BOX/CLOSE=63/64`; first `mbanswer <prompt-id> <result>` wins |
 | Day/night, palette cycling, weather | n/a | `cycle.cc`/`palette.cc` are `f2_client`-only and time-driven; game time streams (`WORLD_DELTA_GAMETIME`) |
 | Floating text (script + AI barks) | FORWARDED | `EVENT_FLOAT_TEXT=17`, `interpreter_extra.cc:3261`, `combat_ai.cc:3425` |
 | Examine / "You see: X" | **MIS-ADDRESSED** | `proto_instance.cc:43-46` (§2). Mouse-*hover* description is client-local and correct (`game_mouse.cc:732`). |

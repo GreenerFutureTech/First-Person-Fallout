@@ -54,6 +54,7 @@
 #include "character_editor.h"
 #include "character_selector.h"
 #include "color.h"
+#include "content_config.h"
 #include "dinput.h"
 #include "combat.h"
 #include "combat_ui.h"
@@ -404,13 +405,20 @@ int dialogSetReplyWindow(int a1, int a2, int a3, int a4, char* a5) { (void)a1; (
 // server has nobody to ask, so it replicates that answer, and serverRun deliberately
 // ignores the flag (the all-players-dead soft-lock policy owns it).
 //
-// ►► This makes victory SURVIVABLE, not WATCHABLE. Streaming the slideshow + credits
-// is a separate feature (docs/COOP_COVERAGE.md action list); until it exists the
-// campaign ends silently rather than fatally.
+// The full SCRIPT_REQUEST_ENDGAME path streams the combined sequence through the
+// handler. This covers scripts that call endgamePlayMovie directly.
 void endgamePlayMovie()
 {
     serverStubHeadlessOnce("endgamePlayMovie");
+    presenter()->endgame(false, true);
     _game_user_wants_to_quit = GAME_QUIT_REQUEST_MAIN_MENU;
+}
+bool endgameShouldPlayMovieAfterSlideshow()
+{
+    bool enabled;
+    configGetBool(&gContentConfig, CONTENT_CONFIG_MOVIES_SECTION,
+        "endgame_play_after_slideshow", &enabled, true);
+    return enabled;
 }
 // Benign: selects which death-ending narration/slideshow to show — presentation
 // the server hands to clients, and it picks from gEndgameDeathEndings, which is
@@ -584,11 +592,9 @@ void paletteFadeTo(unsigned char* palette) { (void)palette; }
 int screenGetHeight() { serverStubHeadlessOnce("screenGetHeight"); return kHeadlessScreenHeight; }
 // HEADLESS-SAFE (sfall `get_screen_width`): vanilla's native resolution.
 int screenGetWidth() { serverStubHeadlessOnce("screenGetWidth"); return kHeadlessScreenWidth; }
-// HEADLESS-SAFE (sfall `create_message_window`, and any engine yes/no prompt that
-// slips through): there is nobody at this machine to answer, so answer NO / 0 —
-// the same choice the streamed encounter prompt makes when no viewer replies.
-// ►► A prompt a PLAYER should answer must be streamed (see wmEncounterPromptBarrier),
-// not routed here; this is the backstop that keeps an unstreamed one from being fatal.
+// HEADLESS-SAFE (sfall `create_message_window` and engine dialogs): there is nobody
+// at this machine to answer, so answer NO / 0. The sfall `message_box` metarule has
+// its own multiplayer prompt bridge; other callers still use this fallback.
 int showDialogBox(const char* title, const char** body, int bodyLength, int x, int y, ColorWithFlags titleColor, const char* a8, ColorWithFlags bodyColor, int flags)
 {
     (void)title; (void)body; (void)bodyLength; (void)x; (void)y;

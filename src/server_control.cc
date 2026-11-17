@@ -34,6 +34,7 @@
 #include "game_sound.h" // sfxBuildWeaponName / WEAPON_SOUND_EFFECT_READY — the reload click
 #include "game_movie.h" // gameMovieAck — the movie barrier's release
 #include "game_dialog.h" // _gdialogActive — dialog-active gate for dsay/dend
+#include "sfall_metarules.h" // sfallMessageBoxAnswer — first viewer answer wins
 #include "input.h" // getTicks — wall-clock rate limit on the busy refusal (feature A)
 #include "inventory.h" // inventoryEquip / inventoryUnequip / critterGetArmor / adjustCritterStatsOnArmorChange / HAND_*
 #include "item.h" // itemGetType / ITEM_TYPE_CONTAINER / itemDropStack / itemRemove
@@ -1847,6 +1848,24 @@ static bool serverControlIsStealVerb(const char* verb)
         || strcmp(verb, "sdone") == 0;
 }
 
+static bool serverControlIsBarterVerb(const char* verb)
+{
+    return strcmp(verb, "boffer") == 0
+        || strcmp(verb, "btake") == 0
+        || strcmp(verb, "bunoffer") == 0
+        || strcmp(verb, "bunoffer_npc") == 0
+        || strcmp(verb, "bcommit") == 0
+        || strcmp(verb, "bdone") == 0
+        || strcmp(verb, "bcancel") == 0;
+}
+
+static bool serverControlIsDialogVerb(const char* verb)
+{
+    return strcmp(verb, "dsay") == 0
+        || strcmp(verb, "dend") == 0
+        || strcmp(verb, "dbarter") == 0;
+}
+
 static Object* serverFindInventoryItemByNetId(Object* owner, int netId, Object** itemOwner, int* quantity)
 {
     if (owner == nullptr || netId <= 0) {
@@ -1874,7 +1893,7 @@ static Object* serverFindInventoryItemByNetId(Object* owner, int netId, Object**
     return nullptr;
 }
 
-void serverControlLine(int sessionId, const char* line)
+void serverControlLine(int sessionId, const char* line, ServerControlInputContext context)
 {
     if (++gLineCounts[sessionId] > kMaxLinesPerBeat) {
         return; // flood guard: silently ignore lines past the per-beat cap
@@ -1887,6 +1906,44 @@ void serverControlLine(int sessionId, const char* line)
     int arg3 = 0;
     int n = sscanf(line, "%31s %d %d %d", verb, &arg, &arg2, &arg3);
     if (n < 1 || verb[0] == '\0') {
+        return;
+    }
+
+    // Modal pumps continue reading the wire while the world is parked. Only accept
+    // input that can advance the active modal; other commands would mutate the
+    // paused world, or be mistaken for an input to a different open screen.
+    bool allowedInContext = true;
+    switch (context) {
+    case ServerControlInputContext::kNormal:
+        break;
+    case ServerControlInputContext::kDialog:
+        allowedInContext = serverControlIsDialogVerb(verb);
+        break;
+    case ServerControlInputContext::kBarter:
+        allowedInContext = serverControlIsBarterVerb(verb);
+        break;
+    case ServerControlInputContext::kSteal:
+        allowedInContext = serverControlIsStealVerb(verb);
+        break;
+    case ServerControlInputContext::kMovie:
+        allowedInContext = strcmp(verb, "movdone") == 0;
+        break;
+    case ServerControlInputContext::kWorldmap:
+        allowedInContext = strcmp(verb, "wmmove") == 0
+            || strcmp(verb, "wmenter") == 0
+            || strcmp(verb, "wmesc") == 0;
+        break;
+    case ServerControlInputContext::kEncounter:
+        allowedInContext = strcmp(verb, "encaccept") == 0
+            || strcmp(verb, "encdecline") == 0;
+        break;
+    case ServerControlInputContext::kSfallMessageBox:
+        allowedInContext = strcmp(verb, "mbanswer") == 0;
+        break;
+    }
+    if (!allowedInContext) {
+        fprintf(stderr, "f2_server: control %s dropped (outside active modal)\n", verb);
+        serverControlRefuse(sessionId, "You cannot act while this screen is open.");
         return;
     }
 
@@ -1906,6 +1963,13 @@ void serverControlLine(int sessionId, const char* line)
         // prompt can decide, and a late answer after the barrier freed is a no-op.
         worldmapEncounterAnswer(strcmp(verb, "encaccept") == 0);
         fprintf(stderr, "f2_server: control %s\n", verb);
+        return;
+    }
+
+    if (strcmp(verb, "mbanswer") == 0) {
+        if (n >= 3) {
+            sfallMessageBoxAnswer(arg, arg2);
+        }
         return;
     }
 
@@ -2494,7 +2558,7 @@ void serverControlLine(int sessionId, const char* line)
     //     never hardcode "viewer 0 drives"). A spectator's dsay must no-op.
     // Fully DORMANT today: no viewer sends these yet (TALK→LOOK until A3) and no
     // pump runs by default, so the gate short-circuits at _gdialogActive().
-    if (strcmp(verb, "dsay") == 0 || strcmp(verb, "dend") == 0 || strcmp(verb, "dbarter") == 0) {
+    if (serverControlIsDialogVerb(verb)) {
         // WHOEVER STARTED IT ANSWERS IT (owner ruling 2026-07-21). The stderr text
         // keeps the "host-only screen" wording it has always had — scripts grep it,
         // and it is still accurate for the NPC-initiated fallback.
@@ -2566,10 +2630,7 @@ void serverControlLine(int sessionId, const char* line)
     // DRIVE FOLLOWS THE CONVERSATION. Barter is reached by picking a dialog
     // option, so the player who owns the conversation owns the trade — the same
     // predicate, deliberately not a second notion of ownership to keep in sync.
-    if (strcmp(verb, "boffer") == 0 || strcmp(verb, "btake") == 0
-        || strcmp(verb, "bunoffer") == 0 || strcmp(verb, "bunoffer_npc") == 0
-        || strcmp(verb, "bcommit") == 0
-        || strcmp(verb, "bdone") == 0 || strcmp(verb, "bcancel") == 0) {
+    if (serverControlIsBarterVerb(verb)) {
         if (!serverControlMayDriveDialog(sessionId)) {
             fprintf(stderr, "f2_server: control %s dropped (not the barter driver)\n", verb);
             serverControlRefuse(sessionId, "This isn't your trade.");

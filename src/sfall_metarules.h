@@ -3,6 +3,8 @@
 
 #include "opcode_context.h"
 
+#include <functional>
+
 namespace fallout {
 
 typedef void(MetaruleHandler)(OpcodeContext& ctx);
@@ -33,6 +35,12 @@ class Program;
 
 void sfall_metarule(Program* program, int args);
 void mf_string_format(OpcodeContext& ctx);
+
+// Dedicated-server bridge for sfall `message_box`; the pump services viewer
+// answers while the simulation is parked. Without a pump, use the local dialog
+// path (or the headless stub's default answer).
+void sfallMessageBoxSetServerPump(std::function<bool()> pump);
+bool sfallMessageBoxAnswer(int promptId, int result);
 
 } // namespace fallout
 

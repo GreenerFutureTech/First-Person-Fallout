@@ -37,8 +37,9 @@ gap list, not the percentage.**
 Say both, because the gap between them IS the finding: a feature count cannot see that one dead
 level-picker outweighs twenty working perks. Four absent entries are not features, they are
 GATES — elevators (Sierra, Navarro, the Military Base, Vault City's vault, Vault 15, the Shi
-Temple, the Wanamingo Mine), the town map (no district navigation anywhere), the endgame (cannot
-be watched, and reaching it kills the server), and rejoin corruption (ends sessions).
+Temple, the Wanamingo Mine), all-player death recovery, and rejoin corruption (which can end or
+strand sessions). Town-map entrance selection is server-resolved; the endgame now streams its
+slideshow and optional movie to viewers, pending live verification.
 
 Per family (partial credit: NATIVE 1.0, UNSEEN 0.75, SHARED 0.5, ABSENT 0):
 
@@ -95,9 +96,9 @@ Ranked by damage to a real session, with the axis that found each and an effort 
 | 4 | **Route the 29 personal broadcasts** — the two XP lines are **DONE** (`_combat_give_exps` + `_show_skill_use_messages`, addressed on `kMsgChannelReward`; an extra no longer earns in silence), as are the radiation/poison warnings. REMAINING: examine (`proto_instance.cc:43-46`, highest frequency) and the rest of the list | every player still reads "You see: a locker" when one of them looks at it | leaf per site |
 | ~~5~~ | ~~**Elevators**~~ | **DONE** — server-side `elevatorSelect` streams vanilla's panel to the rider (`EVENT_ELEVATOR_PROMPT`), `elev <level>` rides. The tables moved to `elevator_data.cc` (f2_core) so the SERVER resolves destinations: the client only ever names a BUTTON. Gated by `scripts/check_rest_elevator.sh` | done |
 | ~~6~~ | ~~**Rest**~~ | **DONE** — the loop moved to `rest.cc` (f2_core) with the presentation as a frame callback, so single-player and the server share ONE simulation; `rest`/`restopt` verbs + an admin `rest`. Retired one of the six abort landmines (`pipboyRestHeadless`) | done |
-| 7 | **Server-side `endgame()`** — evaluate the 52 gvar-matched slides and stream them | no campaign payoff exists. ⚠ MUST land with #3's `endgamePlayMovie` or wiring it re-introduces the abort. `FULL_RUN_RECON.md` proved the ending is a pure function of 16 gvars | medium |
+| ~~7~~ | ~~**Server-side `endgame()`**~~ | **IMPLEMENTED** — `EVENT_ENDGAME` streams the slideshow and configured movie; direct movie-only calls are projected too. Live multiplayer verification remains owed | done |
 | ~~8~~ | ~~**extras are never in `gPartyMembers`**~~ | **DONE 2026-07-26** — and NOT by joining the registry, which would have been the trap: that list is saved, levelled, position-synced and garbage-collected as companions, and `partyFixMultipleMembers` `objectDestroy()`s what it reads as a duplicate (player bodies escape it only because their pids are not in party.txt). Instead the four READERS widened, in two scopes — GROUP for travel/party-count, SOLO for a trade or a skill use. Closed: barter price, Outdoorsman + the Motion Sensor bonus, encounter SIZING + the pipboy rest option, and an extra's skill use being substituted by a worse companion. ►► `METARULE_PARTY_COUNT` deliberately left counting companions only — see the FEATURES row | done |
-| 9 | **Town map** — one wire event for the entrance list | you always arrive at a city's FIRST map; district navigation does not exist. The viewer sends `wmEnter` unconditionally (`worldmap_ui.cc:270-291`) | medium |
+| ~~9~~ | ~~**Town map**~~ | **ALREADY IMPLEMENTED** — the viewer sends an entrance index and the server resolves it against discovered entrances (`wmAreaResolveEntrance`) | done |
 | 10 | **Addressing mechanism for personal sfx/fades** — add `actorNetId` to `sfxPlay`/`screenFadeOut`/`screenFadeIn`, and DECODE the fades | closes a whole category: the level-up chime plays on everyone's speakers, and `EVENT_FADE_OUT/IN` are emitted by the server and **never decoded** by the client, so the time-skip fade is thrown away | medium |
 
 ## The 5 subtlest gaps — a player notices these before we do

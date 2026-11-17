@@ -47,6 +47,7 @@
 #include "server_loop.h"
 #include "server_net.h"
 #include "state_dump.h"
+#include "sfall_metarules.h" // sfallMessageBoxSetServerPump — mod prompt barrier
 
 int main(int argc, char** argv)
 {
@@ -378,15 +379,13 @@ int main(int argc, char** argv)
         // A2-ACTIVATE fills in the REAL body but leaves it flag-guarded until the
         // A3 viewer + a review pass promote it to always-on.
         //
-        // NOTE (owner-directed): this activation body has NOT had the mandatory
-        // adversarial review yet — it is a first cut, acceptable to land behind the
-        // flag. Known follow-ups for the review pass: (a) non-dialog control verbs
-        // (mv/use/…) are still serviced mid-dialog and would act on the frozen
-        // world — the reviewed body should gate serverControlLine to dsay/dend while
-        // a dialog is active; (b) hazard 5 — gGameDialogSpeaker can dangle across a
-        // rebaseline, so we deliberately skip acceptPending() here (joins wait).
+        // Each modal pump labels its input context; serverControlLine admits only
+        // that modal's commands, preventing unrelated actions from mutating the
+        // paused simulation. Hazard 5 remains: a gGameDialogSpeaker pointer could
+        // dangle across a rebaseline, so acceptPending() is deliberately skipped
+        // here (joins wait).
         if (serverFeatureEnabled("F2_DIALOG_STREAM")) {
-            fprintf(stderr, "f2_server: F2_DIALOG_STREAM set — dialog block-and-pump ACTIVE (unreviewed first cut)\n");
+            fprintf(stderr, "f2_server: F2_DIALOG_STREAM set — dialog block-and-pump ACTIVE\n");
             gameDialogSetServerPump([&]() -> bool {
                 // Always-bail conditions — never wedge the tick on a vanished viewer,
                 // and let combat/quit preempt an open conversation. TERMINAL quit
@@ -419,7 +418,7 @@ int main(int argc, char** argv)
                     // claimant that just dropped releases its claim (→ bail below).
                     serverControlBeginDrain([&](int sid) { return netSink.hasSession(sid); });
                     netSink.pollInbound([&](int sessionId, const char* line) {
-                        serverControlLine(sessionId, line);
+                        serverControlLine(sessionId, line, ServerControlInputContext::kDialog);
                     });
                 }
                 if (haveCmd) {
@@ -470,7 +469,7 @@ int main(int argc, char** argv)
                 if (haveNet) {
                     serverControlBeginDrain([&](int sid) { return netSink.hasSession(sid); });
                     netSink.pollInbound([&](int sessionId, const char* line) {
-                        serverControlLine(sessionId, line);
+                        serverControlLine(sessionId, line, ServerControlInputContext::kBarter);
                     });
                 }
                 if (haveCmd) {
@@ -522,7 +521,7 @@ int main(int argc, char** argv)
             if (haveNet) {
                 serverControlBeginDrain([&](int sid) { return netSink.hasSession(sid); });
                 netSink.pollInbound([&](int sessionId, const char* line) {
-                    serverControlLine(sessionId, line);
+                    serverControlLine(sessionId, line, ServerControlInputContext::kSteal);
                 });
             }
             if (haveCmd) {
@@ -565,7 +564,7 @@ int main(int argc, char** argv)
             // world anyway — joiners wait for the cutscene, same ruling as dialog.
             serverControlBeginDrain([&](int sid) { return netSink.hasSession(sid); });
             netSink.pollInbound([&](int sessionId, const char* line) {
-                serverControlLine(sessionId, line);
+                serverControlLine(sessionId, line, ServerControlInputContext::kMovie);
             });
             if (haveCmd) {
                 cmdListener.pollCommands([&](const char* line, const CommandListener::ReplyFn& reply) { dispatchControlLine(0, line, reply); });
@@ -593,7 +592,7 @@ int main(int argc, char** argv)
                 if (haveNet) {
                     serverControlBeginDrain([&](int sid) { return netSink.hasSession(sid); });
                     netSink.pollInbound([&](int sessionId, const char* line) {
-                        serverControlLine(sessionId, line);
+                        serverControlLine(sessionId, line, ServerControlInputContext::kWorldmap);
                     });
                 }
                 if (haveCmd) {
@@ -650,7 +649,7 @@ int main(int argc, char** argv)
             if (haveNet) {
                 serverControlBeginDrain([&](int sid) { return netSink.hasSession(sid); });
                 netSink.pollInbound([&](int sessionId, const char* line) {
-                    serverControlLine(sessionId, line);
+                    serverControlLine(sessionId, line, ServerControlInputContext::kEncounter);
                 });
             }
             if (haveCmd) {
@@ -659,6 +658,23 @@ int main(int argc, char** argv)
             std::this_thread::sleep_for(std::chrono::milliseconds(paceMs > 0 ? paceMs : 10));
             return true;
         });
+
+        if (haveNet) {
+            sfallMessageBoxSetServerPump([&]() -> bool {
+                if (gameTerminalQuitRequested() || netSink.clientCount() == 0) {
+                    return false;
+                }
+                serverControlBeginDrain([&](int sid) { return netSink.hasSession(sid); });
+                netSink.pollInbound([&](int sessionId, const char* line) {
+                    serverControlLine(sessionId, line, ServerControlInputContext::kSfallMessageBox);
+                });
+                if (haveCmd) {
+                    cmdListener.pollCommands([&](const char* line, const CommandListener::ReplyFn& reply) { dispatchControlLine(0, line, reply); });
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(paceMs > 0 ? paceMs : 10));
+                return true;
+            });
+        }
 
         serverServe(
             // intentsDrain: each beat, pull whatever command lines have arrived
@@ -785,6 +801,7 @@ int main(int argc, char** argv)
         // placeholder; correct for the reviewed body that follows.
         gameDialogSetServerPump(nullptr);
         worldmapSetServerPump(nullptr);
+        sfallMessageBoxSetServerPump(nullptr);
 
         // Clear the registration before the sink is destroyed at scope exit, so
         // no dangling pointer survives in the core presenter machinery.

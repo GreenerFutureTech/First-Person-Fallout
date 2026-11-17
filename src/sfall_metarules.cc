@@ -1,10 +1,12 @@
 #include "sfall_metarules.h"
 
 #include <algorithm>
+#include <functional>
 #include <math.h>
 #include <memory>
 #include <string.h>
 #include <string>
+#include <utility>
 
 #include "art.h"
 #include "automap.h"
@@ -31,6 +33,7 @@
 #include "party_member.h"
 #include "pipboy.h"
 #include "platform_compat.h"
+#include "presenter.h"
 #include "proto_instance.h"
 #include "reaction.h"
 #include "scripts.h"
@@ -55,6 +58,12 @@
 namespace fallout {
 
 namespace {
+
+std::function<bool()> gSfallMessageBoxServerPump;
+bool gSfallMessageBoxAnswered = false;
+int gSfallMessageBoxResult = 0;
+int gSfallMessageBoxCurrentPromptId = 0;
+unsigned int gSfallMessageBoxNextPromptId = 0;
 
     // these were real struct offsets in vanilla; now we use them as an enum of field ids
     enum class ObjectDataField : int {
@@ -765,6 +774,54 @@ namespace {
     }
 
 } // namespace
+
+void sfallMessageBoxSetServerPump(std::function<bool()> pump)
+{
+    gSfallMessageBoxServerPump = std::move(pump);
+}
+
+bool sfallMessageBoxAnswer(int promptId, int result)
+{
+    if (promptId == 0 || promptId != gSfallMessageBoxCurrentPromptId
+        || gSfallMessageBoxAnswered || (result != 0 && result != 1)) {
+        return false;
+    }
+    gSfallMessageBoxResult = result;
+    gSfallMessageBoxAnswered = true;
+    return true;
+}
+
+static int sfallMessageBoxPrompt(const char* title, const char** body,
+    int bodyLength, int titleColor, int bodyColor, int flags)
+{
+    if (!gSfallMessageBoxServerPump) {
+        return showDialogBox(title, body, bodyLength, 192, 116,
+            static_cast<ColorWithFlags>(titleColor), nullptr,
+            static_cast<ColorWithFlags>(bodyColor), flags);
+    }
+
+    if (gSfallMessageBoxNextPromptId >= 0x7FFFFFFFu) {
+        gSfallMessageBoxNextPromptId = 1;
+    } else {
+        gSfallMessageBoxNextPromptId++;
+    }
+    int promptId = static_cast<int>(gSfallMessageBoxNextPromptId);
+    gSfallMessageBoxCurrentPromptId = promptId;
+    gSfallMessageBoxAnswered = false;
+    gSfallMessageBoxResult = 0;
+    presenter()->sfallMessageBoxPrompt(promptId, title, body, bodyLength,
+        titleColor, bodyColor, flags);
+
+    while (!gSfallMessageBoxAnswered) {
+        if (!gSfallMessageBoxServerPump()) {
+            break;
+        }
+    }
+
+    presenter()->sfallMessageBoxClose(promptId);
+    gSfallMessageBoxCurrentPromptId = 0;
+    return gSfallMessageBoxAnswered ? gSfallMessageBoxResult : 0;
+}
 
 static void mf_attack_is_aimed(OpcodeContext& ctx);
 static void mf_car_gas_amount(OpcodeContext& ctx);
@@ -2463,7 +2520,7 @@ void mf_message_box(OpcodeContext& ctx)
 
     dialogShowCount++;
     scriptsDisable();
-    int rc = showDialogBox(copy, body, count, 192, 116, color1, nullptr, color2, flags);
+    int rc = sfallMessageBoxPrompt(copy, body, count, color1, color2, flags);
     if (--dialogShowCount == 0) {
         scriptsEnable();
     }
