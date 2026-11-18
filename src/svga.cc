@@ -61,13 +61,13 @@ struct GpuBillboard {
     SDL_Rect destination;
     SDL_Rect clip;
     double depth;
+    unsigned char lightModulation;
 };
 
 struct GpuBillboardTexture {
     SDL_Texture* texture;
     int width;
     int height;
-    unsigned char lightModulation;
     int blackMaskColor;
     uint64_t paletteRevision;
     IndexedTexturePalette palette;
@@ -274,7 +274,8 @@ void gpuBillboardSetCursor(const unsigned char* pixels, int width, int height,
 }
 
 void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
-    const SDL_Rect& destination, const SDL_Rect& clip, double depth, int blackMaskColor)
+    const SDL_Rect& destination, const SDL_Rect& clip, double depth,
+    int blackMaskColor, bool applyLightModulation)
 {
     if (!gSdlRendererHardwareAccelerated || pixels == nullptr
         || width <= 0 || height <= 0 || destination.w <= 0 || destination.h <= 0) {
@@ -328,34 +329,25 @@ void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
             return;
         }
         SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
-        SDL_SetTextureColorMod(texture, gGpuBillboardLightModulation,
-            gGpuBillboardLightModulation, gGpuBillboardLightModulation);
 #if SDL_VERSION_ATLEAST(2, 0, 12)
         SDL_SetTextureScaleMode(texture, SDL_ScaleModeNearest);
 #endif
         if (textureIt != gGpuBillboardTextures.end()) {
             SDL_DestroyTexture(textureIt->second.texture);
             textureIt->second = {
-                texture, width, height, gGpuBillboardLightModulation,
-                blackMaskColor, gGpuPaletteRevision, texturePalette
+                texture, width, height, blackMaskColor, gGpuPaletteRevision, texturePalette
             };
             cachedTexture = &textureIt->second;
         } else {
             cachedTexture =
                 &gGpuBillboardTextures.emplace(pixels,
                     GpuBillboardTexture {
-                        texture, width, height, gGpuBillboardLightModulation,
-                        blackMaskColor, gGpuPaletteRevision, texturePalette
+                        texture, width, height, blackMaskColor, gGpuPaletteRevision, texturePalette
                     }).first->second;
         }
     }
-    if (cachedTexture->lightModulation != gGpuBillboardLightModulation) {
-        SDL_SetTextureColorMod(cachedTexture->texture,
-            gGpuBillboardLightModulation,
-            gGpuBillboardLightModulation,
-            gGpuBillboardLightModulation);
-        cachedTexture->lightModulation = gGpuBillboardLightModulation;
-    }
+    const unsigned char lightModulation =
+        applyLightModulation ? gGpuBillboardLightModulation : 255;
 
     if (!gGpuBillboards.empty()) {
         GpuBillboard& previous = gGpuBillboards.back();
@@ -365,6 +357,7 @@ void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
             && previous.destination.w == destination.w
             && previous.destination.h == destination.h
             && previous.depth == depth
+            && previous.lightModulation == lightModulation
             && previous.clip.y == clip.y
             && previous.clip.h == clip.h
             && previous.clip.x + previous.clip.w == clip.x;
@@ -379,6 +372,7 @@ void gpuBillboardSubmit(const unsigned char* pixels, int width, int height,
         destination,
         clip,
         depth,
+        lightModulation,
     });
 }
 
@@ -980,6 +974,8 @@ void renderPresent()
             activeClip = billboard.clip;
             hasActiveClip = true;
         }
+        SDL_SetTextureColorMod(billboard.texture, billboard.lightModulation,
+            billboard.lightModulation, billboard.lightModulation);
         SDL_RenderCopy(gSdlRenderer, billboard.texture, nullptr, &billboard.destination);
     }
     if (hasActiveClip) {

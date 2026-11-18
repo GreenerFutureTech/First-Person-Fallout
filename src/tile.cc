@@ -2110,7 +2110,8 @@ static void tileFirstPersonRenderTextObject(
                     inRun = true;
                 } else if (!visible && inRun) {
                     const SDL_Rect clip = { runStart, bandTop, x - runStart, bandBottom - bandTop };
-                    gpuBillboardSubmit(pixels, width, height, destination, clip, depth);
+                    gpuBillboardSubmit(
+                        pixels, width, height, destination, clip, depth, -1, false);
                     inRun = false;
                 }
             }
