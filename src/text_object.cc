@@ -371,6 +371,29 @@ void textObjectsRenderForOwner(Object* object, unsigned char* buffer, int pitch,
     }
 }
 
+void textObjectsVisitForOwner(
+    Object* object, int centerX, int top, TextObjectRenderCallback callback, void* context)
+{
+    if (!gTextObjectsInitialized || object == nullptr || callback == nullptr) {
+        return;
+    }
+
+    for (int index = 0; index < gTextObjectsCount; index++) {
+        const TextObject* textObject = gTextObjects[index];
+        if (textObject->owner != object
+            || (textObject->flags & TEXT_OBJECT_MARKED_FOR_REMOVAL) != 0) {
+            continue;
+        }
+
+        callback(textObject->data,
+            textObject->width,
+            textObject->height,
+            centerX - textObject->width / 2,
+            top - textObject->height,
+            context);
+    }
+}
+
 // 0x4B07F8 text_object_bk
 static void textObjectsTicker()
 {

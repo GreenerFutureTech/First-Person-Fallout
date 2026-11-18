@@ -758,6 +758,7 @@ bool pipboyRestOptionSet(int restOption, int value) { return false; }
 void pipboySetRestHealTime(int minutes) { }
 int skilldexGetWindow() { return -1; }
 void textObjectsRenderForOwner(Object* object, unsigned char* buffer, int pitch, int width, int height, int centerX, int top) { }
+void textObjectsVisitForOwner(Object* object, int centerX, int top, TextObjectRenderCallback callback, void* context) { }
 int wmInterfaceRefresh() { return 0; }
 int wmRefreshInterfaceOverlay(bool shouldRefreshWindow) { return 0; }
 void _dark_translucent_trans_buf_to_buf(unsigned char* src, int srcWidth, int srcHeight, int srcPitch, unsigned char* dest, int destX, int destY, int destPitch, int light, Color* blendTable, Color* colorTable) { }

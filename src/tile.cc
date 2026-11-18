@@ -2055,6 +2055,104 @@ static double tileFirstPersonGetWallDepthAt(
     return depth;
 }
 
+struct TileFirstPersonTextRenderContext {
+    const TileFirstPersonActorRenderContext* actorContext;
+    double depth;
+};
+
+static void tileFirstPersonRenderTextObject(
+    const unsigned char* pixels,
+    int width,
+    int height,
+    int left,
+    int top,
+    void* context)
+{
+    TileFirstPersonTextRenderContext* renderContext =
+        static_cast<TileFirstPersonTextRenderContext*>(context);
+    const TileFirstPersonActorRenderContext* actorContext = renderContext->actorContext;
+    const int firstX = std::max(0, left);
+    const int lastX = std::min(gTileWindowWidth, left + width);
+    const int firstY = std::max(0, top);
+    const int lastY = std::min(gTileWindowHeight, top + height);
+    if (pixels == nullptr || firstX >= lastX || firstY >= lastY) {
+        return;
+    }
+
+    const double depth = std::max(0.1, renderContext->depth - 0.0001);
+    const SDL_Rect destination = { left, top, width, height };
+    if (screenIsHardwareAccelerated()) {
+        static BillboardClipBands bands;
+        bands.reset(firstY, lastY);
+        bands.addOccluder(actorContext->horizonY, lastY);
+        if (actorContext->doorCapDepths != nullptr) {
+            for (int x = firstX; x < lastX; x++) {
+                const TileFirstPersonDoorCapSpan& cap = (*actorContext->doorCapDepths)[x];
+                if (cap.top < cap.bottom && cap.top < lastY && cap.bottom > firstY) {
+                    bands.addOccluder(cap.top, cap.bottom);
+                }
+            }
+        }
+
+        const std::vector<int>& boundaries = bands.boundaries();
+        for (size_t band = 0; band + 1 < boundaries.size(); band++) {
+            const int bandTop = boundaries[band];
+            const int bandBottom = boundaries[band + 1];
+            int runStart = firstX;
+            bool inRun = false;
+            for (int x = firstX; x <= lastX; x++) {
+                const bool visible = x < lastX
+                    && depth < tileFirstPersonGetWallDepthAt(x, bandTop,
+                        actorContext->horizonY, actorContext->wallDepths,
+                        actorContext->wallSillDepths, actorContext->doorCapDepths);
+                if (visible && !inRun) {
+                    runStart = x;
+                    inRun = true;
+                } else if (!visible && inRun) {
+                    const SDL_Rect clip = { runStart, bandTop, x - runStart, bandBottom - bandTop };
+                    gpuBillboardSubmit(pixels, width, height, destination, clip, depth);
+                    inRun = false;
+                }
+            }
+        }
+        return;
+    }
+
+    for (int y = firstY; y < lastY; y++) {
+        for (int x = firstX; x < lastX; x++) {
+            const unsigned char color = pixels[(y - top) * width + x - left];
+            if (color == 0
+                || depth >= tileFirstPersonGetWallDepthAt(x, y, actorContext->horizonY,
+                    actorContext->wallDepths, actorContext->wallSillDepths,
+                    actorContext->doorCapDepths)) {
+                continue;
+            }
+
+            const size_t index = static_cast<size_t>(y) * gTileWindowWidth + x;
+            if ((*actorContext->actorDepthStamps)[index] != actorContext->actorDepthStamp) {
+                (*actorContext->actorDepthStamps)[index] = actorContext->actorDepthStamp;
+                (*actorContext->actorDepths)[index] = std::numeric_limits<double>::infinity();
+            }
+            if (depth < (*actorContext->actorDepths)[index]) {
+                gTileWindowBuffer[y * gTileWindowPitch + x] = color;
+                (*actorContext->actorDepths)[index] = depth;
+            }
+        }
+    }
+}
+
+static void tileFirstPersonRenderTextForOwner(
+    Object* object,
+    const TileFirstPersonActorRenderContext* actorContext,
+    double depth,
+    int centerX,
+    int top)
+{
+    TileFirstPersonTextRenderContext renderContext = { actorContext, depth };
+    textObjectsVisitForOwner(
+        object, centerX, top, tileFirstPersonRenderTextObject, &renderContext);
+}
+
 static void tileFirstPersonRenderExitGridMarker(
     int tile,
     const TileFirstPersonExitGridRenderContext* renderContext)
@@ -3999,13 +4097,8 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
             }
             if (!hasVisibleColumn) {
                 if (objectType != OBJ_TYPE_SCENERY) {
-                    textObjectsRenderForOwner(object,
-                        gTileWindowBuffer,
-                        gTileWindowPitch,
-                        gTileWindowWidth,
-                        gTileWindowHeight,
-                        screenCenterX,
-                        artTop - 3);
+                    tileFirstPersonRenderTextForOwner(
+                        object, renderContext, transformY, screenCenterX, artTop - 3);
                 }
                 return;
             }
@@ -4127,13 +4220,8 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
             submitVisibleRange(std::max(0, std::max(renderTop, renderContext->horizonY)),
                 std::min(gTileWindowHeight, renderBottom));
             if (objectType != OBJ_TYPE_SCENERY) {
-                textObjectsRenderForOwner(object,
-                    gTileWindowBuffer,
-                    gTileWindowPitch,
-                    gTileWindowWidth,
-                    gTileWindowHeight,
-                    screenCenterX,
-                    artTop - 3);
+                tileFirstPersonRenderTextForOwner(
+                    object, renderContext, transformY, screenCenterX, artTop - 3);
             }
             return;
         }
@@ -4272,13 +4360,8 @@ static void tileFirstPersonRenderActor(Object* object, void* context)
         }
 
         if (objectType != OBJ_TYPE_SCENERY) {
-            textObjectsRenderForOwner(object,
-                gTileWindowBuffer,
-                gTileWindowPitch,
-                gTileWindowWidth,
-                gTileWindowHeight,
-                screenCenterX,
-                artTop - 3);
+            tileFirstPersonRenderTextForOwner(
+                object, renderContext, transformY, screenCenterX, artTop - 3);
         }
 
         return;

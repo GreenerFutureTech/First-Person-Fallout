@@ -24,6 +24,10 @@ inline int textObjectAdd(Object* object, char* string, int font, Color color, Co
 
 void textObjectsRenderInRect(Rect* rect);
 void textObjectsRenderForOwner(Object* object, unsigned char* buffer, int pitch, int width, int height, int centerX, int top);
+typedef void (*TextObjectRenderCallback)(
+    const unsigned char* pixels, int width, int height, int left, int top, void* context);
+void textObjectsVisitForOwner(
+    Object* object, int centerX, int top, TextObjectRenderCallback callback, void* context);
 int textObjectsGetCount();
 void textObjectsRemoveByOwner(Object* object);
 
